@@ -1,0 +1,17 @@
+# Never commit key material or credentials
+*.pem
+.env
+.env.*
+!.env.example
+
+# Token cache
+.token_cache.json
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Report output
+reports/

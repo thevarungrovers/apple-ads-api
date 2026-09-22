@@ -1,0 +1,12 @@
+# Conda equivalent of requirements.txt.
+#   conda env create -f environment.yml
+#   conda activate apple-ads
+name: apple-ads
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.10
+  - cryptography>=42
+  - requests>=2.31
+  - python-dotenv>=1.0
+  - pyjwt>=2.8
