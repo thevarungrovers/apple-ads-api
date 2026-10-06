@@ -10,6 +10,12 @@ one set of credentials can reach several orgs and the API will not guess which
 one you mean. The exception is GET /acls, which is the endpoint that *tells*
 you which orgs you can reach; it is called without the context header on
 purpose, so a wrong orgId cannot mask a credential problem.
+
+The client is READ-ONLY unless it is built with allow_writes=True. Apple runs
+no sandbox for campaign management -- there is no test org, no staging account,
+nothing to point this at that is not the live advertising account. A mutating
+call therefore has to be asked for twice: once by opening the client for
+writes, and again (for anything touching a serving campaign) by the caller.
 """
 
 from __future__ import annotations
@@ -37,6 +43,25 @@ class AppleAdsError(RuntimeError):
         super().__init__(f"HTTP {status_code} from {url}: {_short(body)}")
 
 
+class WriteBlocked(RuntimeError):
+    """A mutating call was made on a client that was not opened for writes.
+
+    This is raised BEFORE the request leaves the process, so nothing reached
+    Apple. It is deliberately not an AppleAdsError: callers that catch API
+    failures should not accidentally swallow a refused write.
+    """
+
+    def __init__(self, method: str, url: str, payload):
+        self.method = method
+        self.url = url
+        self.payload = payload
+        preview = "" if payload is None else f"\n  payload: {_short(payload, 400)}"
+        super().__init__(
+            f"refused to send {method} {url} -- client is read-only.{preview}\n"
+            "  Build the client with allow_writes=True, or pass --apply on the CLI."
+        )
+
+
 def _short(body, limit: int = 600) -> str:
     text = body if isinstance(body, str) else json.dumps(body)
     return text if len(text) <= limit else text[:limit] + "..."
@@ -45,10 +70,23 @@ def _short(body, limit: int = 600) -> str:
 class AppleAdsClient:
     BASE_URL = "https://api.searchads.apple.com/api/v5"
 
-    def __init__(self, org_id: str | None = None, config: dict | None = None, timeout: int = 60):
+    # Apple uses POST for two endpoints that only READ: reporting, and the
+    # /find selectors. Everything else posted creates something, so the two
+    # shapes have to be told apart before a POST can be called safe.
+    READ_ONLY_POST_PREFIXES = ("reports/",)
+    READ_ONLY_POST_SUFFIXES = ("/find",)
+
+    def __init__(
+        self,
+        org_id: str | None = None,
+        config: dict | None = None,
+        timeout: int = 60,
+        allow_writes: bool = False,
+    ):
         self.config = config or load_config()
         self.org_id = str(org_id or self.config["APPLE_ADS_ORG_ID"])
         self.timeout = timeout
+        self.allow_writes = allow_writes
         self.session = requests.Session()
 
     def _headers(self, with_context: bool, force_refresh: bool = False) -> dict[str, str]:
@@ -60,8 +98,24 @@ class AppleAdsClient:
             headers["X-AP-Context"] = f"orgId={self.org_id}"
         return headers
 
+    @classmethod
+    def is_mutation(cls, method: str, path: str) -> bool:
+        """True when this call would change something in the ad account."""
+        method = method.upper()
+        if method in ("PUT", "PATCH", "DELETE"):
+            return True
+        if method != "POST":
+            return False
+        leaf = path.strip("/").lower()
+        if leaf.startswith(cls.READ_ONLY_POST_PREFIXES):
+            return False
+        return not leaf.endswith(cls.READ_ONLY_POST_SUFFIXES)
+
     def request(self, method: str, path: str, *, with_context: bool = True, **kwargs):
         url = f"{self.BASE_URL}/{path.lstrip('/')}"
+
+        if self.is_mutation(method, path) and not self.allow_writes:
+            raise WriteBlocked(method.upper(), url, kwargs.get("json"))
 
         response = self.session.request(
             method, url, headers=self._headers(with_context), timeout=self.timeout, **kwargs
@@ -98,6 +152,12 @@ class AppleAdsClient:
 
     def post(self, path: str, payload: dict | None = None, **kwargs):
         return self.request("POST", path, json=payload, **kwargs)
+
+    def put(self, path: str, payload: dict | None = None, **kwargs):
+        return self.request("PUT", path, json=payload, **kwargs)
+
+    def delete(self, path: str, **kwargs):
+        return self.request("DELETE", path, **kwargs)
 
     # --- convenience endpoints -------------------------------------------------
 
