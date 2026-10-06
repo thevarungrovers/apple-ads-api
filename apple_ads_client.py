@@ -293,12 +293,24 @@ def main() -> int:
     # It prints the exact request and stops, so the cost of being wrong about a
     # payload is a line of output rather than a change to live ads.
     if mutating and not args.apply:
+        # Resolve the org the real call would use, rather than printing a
+        # placeholder: a dry run that shows something other than the request
+        # it is standing in for is worse than no dry run.
+        org = args.org_id
+        if org is None:
+            try:
+                org = load_config().get("APPLE_ADS_ORG_ID")
+            except ConfigError:
+                org = None
+
         print("DRY RUN -- nothing was sent\n")
         print(f"  {method} {url}")
         if not args.no_context:
-            print(f"  X-AP-Context: orgId={args.org_id or '<APPLE_ADS_ORG_ID>'}")
+            print(f"  X-AP-Context: orgId={org or '<APPLE_ADS_ORG_ID is not set>'}")
         if payload is not None:
-            print(f"  payload: {json.dumps(payload, indent=2)}")
+            print("  payload:")
+            for line in json.dumps(payload, indent=2).splitlines():
+                print(f"    {line}")
         print("\nAdd --apply to send it.")
         return 0
 
