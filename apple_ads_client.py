@@ -23,6 +23,8 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import pathlib
+import re
 import sys
 
 from _bootstrap import ensure_venv
@@ -221,24 +223,110 @@ class AppleAdsClient:
         return self.post("reports/campaigns", payload)
 
 
+def _parse_payload(raw: str | None):
+    """--data as inline JSON, or @path to read it from a file."""
+    if raw is None:
+        return None
+    try:
+        text = pathlib.Path(raw[1:]).read_text() if raw.startswith("@") else raw
+    except OSError as exc:
+        raise ConfigError(f"could not read {raw[1:]}: {exc}") from None
+    try:
+        return json.loads(text)
+    except ValueError as exc:
+        raise ConfigError(f"--data is not valid JSON: {exc}") from None
+
+
+def _campaign_in_path(path: str) -> str | None:
+    """The campaign id a mutating path points at, if it names an existing one.
+
+    POST /campaigns creates a new one and matches nothing here, which is the
+    point: there is no live campaign to protect yet.
+    """
+    match = re.match(r"campaigns/(\d+)", path.strip("/").lower())
+    return match.group(1) if match else None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Call an Apple Search Ads API v5 endpoint and print the JSON response.",
         epilog="examples:\n"
                "  ./venv/bin/python apple_ads_client.py acls\n"
                "  ./venv/bin/python apple_ads_client.py campaigns\n"
-               "  ./venv/bin/python apple_ads_client.py acls --raw",
+               "  ./venv/bin/python apple_ads_client.py acls --raw\n"
+               "\n"
+               "writes are a dry run unless you add --apply:\n"
+               "  ./venv/bin/python apple_ads_client.py campaigns -X POST -d @new-campaign.json\n"
+               "  ./venv/bin/python apple_ads_client.py campaigns -X POST -d @new-campaign.json --apply\n"
+               "  ./venv/bin/python apple_ads_client.py campaigns/123 -X PUT -d '{\"status\":\"PAUSED\"}' \\\n"
+               "      --apply --confirm-live",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("path", help="endpoint path relative to /api/v5, e.g. acls or campaigns")
+    parser.add_argument("-X", "--method", default="GET", help="HTTP method (default: %(default)s)")
+    parser.add_argument("-d", "--data", default=None,
+                        help="JSON request body, or @path to read it from a file")
+    parser.add_argument("--apply", action="store_true",
+                        help="actually send a mutating call. Without it, writes are a dry run")
+    parser.add_argument("--confirm-live", action="store_true",
+                        help="also allow the write when the campaign it targets is serving")
     parser.add_argument("--org-id", default=None, help="override APPLE_ADS_ORG_ID")
     parser.add_argument("--no-context", action="store_true", help="omit the X-AP-Context header")
     parser.add_argument("--raw", action="store_true", help="print the full response, unabridged")
     args = parser.parse_args()
 
+    method = args.method.upper()
+    mutating = AppleAdsClient.is_mutation(method, args.path)
+    url = f"{AppleAdsClient.BASE_URL}/{args.path.lstrip('/')}"
+
     try:
-        client = AppleAdsClient(org_id=args.org_id)
-        body = client.request("GET", args.path, with_context=not args.no_context)
+        payload = _parse_payload(args.data)
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if payload is not None and method == "GET":
+        print("error: --data needs a method that carries a body, e.g. -X POST", file=sys.stderr)
+        return 1
+
+    # The dry run is the default for anything that would change the account.
+    # It prints the exact request and stops, so the cost of being wrong about a
+    # payload is a line of output rather than a change to live ads.
+    if mutating and not args.apply:
+        print("DRY RUN -- nothing was sent\n")
+        print(f"  {method} {url}")
+        if not args.no_context:
+            print(f"  X-AP-Context: orgId={args.org_id or '<APPLE_ADS_ORG_ID>'}")
+        if payload is not None:
+            print(f"  payload: {json.dumps(payload, indent=2)}")
+        print("\nAdd --apply to send it.")
+        return 0
+
+    try:
+        client = AppleAdsClient(org_id=args.org_id, allow_writes=args.apply)
+
+        # A write aimed at a campaign that is currently serving needs a second,
+        # different flag. --apply alone means "I meant to write"; --confirm-live
+        # means "I meant to write to something that is spending money today".
+        if mutating:
+            campaign_id = _campaign_in_path(args.path)
+            if campaign_id:
+                data = (client.get(f"campaigns/{campaign_id}") or {}).get("data") or {}
+                if data.get("servingStatus") == "RUNNING" and not args.confirm_live:
+                    print(
+                        f"error: campaign {campaign_id} ({data.get('name')}) is serving right now.\n"
+                        "  Re-run with --confirm-live if that is what you meant.",
+                        file=sys.stderr,
+                    )
+                    return 1
+
+        body = client.request(
+            method, args.path, with_context=not args.no_context,
+            **({"json": payload} if payload is not None else {}),
+        )
+    except WriteBlocked as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     except (ConfigError, TokenError, AppleAdsError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
