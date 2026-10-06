@@ -130,6 +130,61 @@ or shell history by accident.
 
 ---
 
+## Writing to the account
+
+The client reads by default and refuses to write. A mutating call on a client
+that was not opened for writes raises `WriteBlocked` **before the request leaves
+the process**, so nothing reaches Apple.
+
+That default matters more here than on most APIs: Apple runs **no sandbox** for
+campaign management. There is no test org and no staging account. The only thing
+these credentials can point at is the live advertising account, where campaigns
+are serving and spending today.
+
+Two flags gate a write, and they answer different questions:
+
+| Flags | Means |
+| ----- | ----- |
+| *(neither)* | Dry run — print the exact request, send nothing |
+| `--apply` | "I meant to write" |
+| `--apply --confirm-live` | "I meant to write to a campaign that is spending money today" |
+
+```bash
+# Dry run: exactly what would be sent, no network call
+python3 apple_ads_client.py campaigns -X POST -d @new-campaign.json
+
+# Send it
+python3 apple_ads_client.py campaigns -X POST -d @new-campaign.json --apply
+
+# Pause a campaign that is currently serving — needs the second flag
+python3 apple_ads_client.py campaigns/2144331926 -X PUT \
+    -d '{"status":"PAUSED"}' --apply --confirm-live
+```
+
+Before applying a write whose path names an existing campaign, the CLI reads that
+campaign back and refuses if its `servingStatus` is `RUNNING`, unless
+`--confirm-live` is also present. `POST /campaigns` creates a new campaign and
+matches no existing id, so it is not gated on that.
+
+From Python:
+
+```python
+from apple_ads_client import AppleAdsClient, WriteBlocked
+
+AppleAdsClient().post("campaigns", payload)                   # raises WriteBlocked
+AppleAdsClient(allow_writes=True).post("campaigns", payload)  # sends it
+```
+
+`POST` on its own does not mean "write". Apple uses it for two endpoints that only
+read — reporting (`reports/...`) and the `/find` selectors — so the client
+classifies by path as well as by method. `AppleAdsClient.is_mutation(method, path)`
+is that decision, exposed so a caller can ask before it calls.
+
+The role on the credential has the last word: a write succeeds only if the ACL
+role allows it. `python3 apple_ads_client.py acls` prints the role.
+
+---
+
 
 
 ## Rotation and expiry
@@ -217,7 +272,7 @@ openssl dgst -sha256 public-key.pem      # the two digests must be identical
 | `requirements.txt`          | Same four packages, for `pip install -r` into an existing environment.                                                                                                               |
 | `generate_client_secret.py` | Signs the 180-day ES256 client secret.                                                                                                                                               |
 | `get_token.py`              | Trades it for an access token; caches and auto-refreshes.                                                                                                                            |
-| `apple_ads_client.py`       | API wrapper — auth headers, `X-AP-Context`, 401 retry.                                                                                                                               |
+| `apple_ads_client.py`       | API wrapper — auth headers, `X-AP-Context`, 401 retry. Reads by default; writes need `allow_writes` / `--apply`.                                                                                                                               |
 | `test_connection.py`        | 7-step end-to-end verification.                                                                                                                                                      |
 | `fetch_campaign_report.py`  | Daily campaign performance → table and CSV.                                                                                                                                          |
 | `fetch_ad_structure.py`     | Campaign → ad group → keyword tree, as a name lookup.                                                                                                                                |
