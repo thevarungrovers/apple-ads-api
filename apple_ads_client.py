@@ -311,7 +311,30 @@ def main() -> int:
             print("  payload:")
             for line in json.dumps(payload, indent=2).splitlines():
                 print(f"    {line}")
-        print("\nAdd --apply to send it.")
+
+        # The serving check belongs here too, not only behind --apply. The dry
+        # run is where you decide whether to add --apply, so finding out only
+        # afterwards that the target is spending money today is the wrong order.
+        needs_confirm_live = False
+        campaign_id = _campaign_in_path(args.path)
+        if campaign_id:
+            try:
+                data = (
+                    AppleAdsClient(org_id=args.org_id).get(f"campaigns/{campaign_id}") or {}
+                ).get("data") or {}
+            except (ConfigError, TokenError, AppleAdsError, requests.RequestException) as exc:
+                print(f"\n  could not check whether campaign {campaign_id} is serving: {exc}")
+            else:
+                if data:
+                    serving = data.get("servingStatus")
+                    print(f"\n  target: {data.get('name')}")
+                    print(f"          status {data.get('status')} / serving {serving}")
+                    needs_confirm_live = serving == "RUNNING"
+                    if needs_confirm_live:
+                        print("          this campaign is SERVING -- it is spending today")
+
+        flags = "--apply --confirm-live" if needs_confirm_live else "--apply"
+        print(f"\nAdd {flags} to send it.")
         return 0
 
     try:
