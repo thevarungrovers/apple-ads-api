@@ -1,0 +1,41 @@
+# Hard bounds on what the MCP server will apply to the live ad account.
+#
+# COMMITTED ON PURPOSE. Every limit in here is also a code constant in
+# apple_ads_mcp/guardrails.py; this file only overrides them. The point of
+# committing it is that raising a limit becomes a visible diff with an author and
+# a date, rather than an env var someone exported once and nobody can find.
+#
+# A key you delete falls back to the code default. A key you misspell is an error
+# at startup, not a silently ignored line.
+#
+# There is no sandbox for Apple Ads campaign management. These numbers apply to
+# the live account, with campaigns serving and spending today.
+
+[limits]
+# --- per-call bounds ---------------------------------------------------------
+max_bid                     = "5.00"   # decimal string, account currency
+max_bid_increase_pct        = 50.0     # relative to the current bid
+max_daily_budget            = "150.00"
+max_budget_change_pct       = 25.0
+max_entities_per_call       = 25       # ceiling on a bulk apply
+max_projected_delta_per_day = "50.00"  # upper-bound extra spend from one change
+
+# --- per-session bounds ------------------------------------------------------
+# These matter more than the per-call ones. A per-call limit does nothing to stop
+# a runaway loop making 400 individually-legal changes; a session counter does.
+max_applies_per_session          = 20
+max_projected_session_delta      = "150.00"
+
+[scope]
+# Campaign ids the server may touch. An EMPTY list means every campaign in the ad
+# account -- pin this to one pilot campaign for the first week, then widen.
+# Ids are real identifiers, so they live in .env, not here: set
+# APPLE_ADS_ALLOWED_CAMPAIGN_IDS to a comma-separated list and leave this empty.
+# A value here wins if both are set, which is the escape hatch for a shared
+# machine where .env is not the right place.
+allowed_campaign_ids = []
+
+# Currencies a write may be denominated in. A Money whose currency is not in this
+# list is refused before the bounds are even checked, because a limit of "5.00"
+# means nothing until you know 5.00 of what.
+allowed_currencies = ["CAD"]
