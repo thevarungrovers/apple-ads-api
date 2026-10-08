@@ -19,7 +19,10 @@ Two things about the Apple side shape the output:
 
   ./venv/bin/python fetch_ad_structure.py                     # table to stdout
   ./venv/bin/python fetch_ad_structure.py --json              # lookup as JSON
-  ./venv/bin/python fetch_ad_structure.py --campaign 2144331926
+  ./venv/bin/python fetch_ad_structure.py --campaign 1234567890
+
+--campaign defaults to APPLE_ADS_DEFAULT_CAMPAIGN_ID when that is set in .env,
+so the real id never has to be typed into a command or a doc.
 """
 
 from __future__ import annotations
@@ -36,7 +39,7 @@ ensure_venv()  # re-exec under venv/ if launched with a bare `python3`
 import requests
 
 from apple_ads_client import AppleAdsClient, AppleAdsError
-from generate_client_secret import ConfigError
+from generate_client_secret import ConfigError, load_config
 from get_token import TokenError
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -134,15 +137,30 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--campaign", action="append", type=int, default=None,
-                        help="limit to one campaign id (repeatable)")
+                        help="limit to one campaign id (repeatable). Defaults to "
+                             "APPLE_ADS_DEFAULT_CAMPAIGN_ID from .env when set.")
     parser.add_argument("--json", action="store_true", help="print the lookup tree as JSON")
     parser.add_argument("--save", action="store_true",
                         help="also write reports/ad_structure.json")
     args = parser.parse_args()
 
     try:
-        client = AppleAdsClient()
-        tree = build_structure(client, args.campaign)
+        config = load_config()
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    campaign_ids = args.campaign
+    if campaign_ids is None:
+        # The real campaign id lives in .env, never in source or in a README. An
+        # absent key is not an error -- without it the script walks every campaign.
+        default = (config.get("APPLE_ADS_DEFAULT_CAMPAIGN_ID") or "").strip()
+        if default:
+            campaign_ids = [int(default)]
+
+    try:
+        client = AppleAdsClient(config=config)
+        tree = build_structure(client, campaign_ids)
     except (ConfigError, TokenError, AppleAdsError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

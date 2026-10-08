@@ -20,7 +20,7 @@ source of "it worked yesterday" problems.
 | --- | ------------------------------------------------------------------------------------ | -------------------------- | ---------------------------------------- |
 | 1   | **Client secret** — a self-signed ES256 JWT, produced locally from `private-key.pem` | **180 days** (Apple's cap) | `generate_client_secret.py`              |
 | 2   | **Access token** — obtained by POSTing that secret to Apple                          | **3600 s**                 | `get_token.py` (cached + auto-refreshed) |
-| 3   | **API call** — `Authorization: Bearer …` + `X-AP-Context: orgId=22648740`            | per request                | `apple_ads_client.py`                    |
+| 3   | **API call** — `Authorization: Bearer …` + `X-AP-Context: orgId=$APPLE_ADS_ORG_ID`            | per request                | `apple_ads_client.py`                    |
 
 
 Apple never sees the private key. It verifies our signature against the public
@@ -66,12 +66,25 @@ the one the packages went into.
 `.env` holds:
 
 
-| Variable              | Where it comes from                             |
-| --------------------- | ----------------------------------------------- |
-| `APPLE_ADS_CLIENT_ID` | shown **once** when the API client is generated |
-| `APPLE_ADS_TEAM_ID`   | Apple Ads UI, API client list                   |
-| `APPLE_ADS_KEY_ID`    | Apple Ads UI, API client list                   |
-| `APPLE_ADS_ORG_ID`    | `22648740`                                      |
+| Variable                        | Required | Where it comes from                                                                       |
+| ------------------------------- | -------- | ----------------------------------------------------------------------------------------- |
+| `APPLE_ADS_CLIENT_ID`           | yes      | shown **once** when the API client is generated                                           |
+| `APPLE_ADS_TEAM_ID`             | yes      | Apple Ads UI, API client list                                                             |
+| `APPLE_ADS_KEY_ID`              | yes      | Apple Ads UI, API client list                                                             |
+| `APPLE_ADS_ORG_ID`              | yes      | Apple Ads UI, Account Settings. Used by the **v5** scripts as `X-AP-Context: orgId=<id>`   |
+| `APPLE_ADS_AD_ACCOUNT_ID`       | for the Platform API | **discovered, not looked up** — run `test_platform_connection.py`            |
+| `APPLE_ADS_DEFAULT_CAMPAIGN_ID` | no       | default for `fetch_ad_structure.py --campaign`, so no real id has to be typed             |
+
+`APPLE_ADS_AD_ACCOUNT_ID` is **not** the org id. Apple returns them as two
+separate fields (`id` and `orgId`) on the same ACL record, and the Platform API
+wants the former. Do not read it off the UI and do not guess it — step 5 of
+`test_platform_connection.py` reads it back from `GET /me/acls` and prints the
+line to paste into `.env`. Writing to the wrong account is not an error Apple
+will catch for you.
+
+Nothing in this repo defaults any of these. `load_config()` raises `ConfigError`
+on a missing value, which is the correct failure: this repo is public, so a real
+id has nowhere to live except `.env`, which is gitignored.
 
 
 `clientId` and `teamId` are usually the **same** `SEARCHADS.<uuid>` string. That
@@ -95,7 +108,8 @@ python3 fetch_campaign_report.py --start 2026-08-01 --end 2026-08-28
 
 # Resolve ad ids -> names (campaign / ad group / keyword tree)
 python3 fetch_ad_structure.py                        # table to stdout
-python3 fetch_ad_structure.py --campaign 2144331926 --save
+python3 fetch_ad_structure.py --campaign 1234567890 --save
+python3 fetch_ad_structure.py --save                 # defaults to $APPLE_ADS_DEFAULT_CAMPAIGN_ID
 
 # Which user came from which ad group / keyword
 python3 resolve_attribution.py reports/attribution_rows.csv
@@ -157,7 +171,7 @@ python3 apple_ads_client.py campaigns -X POST -d @new-campaign.json
 python3 apple_ads_client.py campaigns -X POST -d @new-campaign.json --apply
 
 # Pause a campaign that is currently serving — needs the second flag
-python3 apple_ads_client.py campaigns/2144331926 -X PUT \
+python3 apple_ads_client.py campaigns/1234567890 -X PUT \
     -d '{"status":"PAUSED"}' --apply --confirm-live
 ```
 
