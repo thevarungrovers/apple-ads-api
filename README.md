@@ -254,6 +254,31 @@ campaign budget. Pausing a keyword is reversible, and marking it destructive wou
 train you to click through the loud prompts, which is how loud prompts stop
 working.
 
+### A write can be in scope and still be a no-op
+
+**Keyword bids only mean anything under a manual bid strategy.** If the ad group
+is on `MAX_CONVERSIONS` or `MAX_ENGAGEMENTS`, Apple sets the bids, and a
+keyword-bid `PUT` is accepted with **HTTP 200 and then discarded** — same status
+code, same response shape, bid unchanged, nothing anywhere saying it was ignored.
+
+`preview_keyword_bid` therefore reads the parent ad group's `bidStrategy` and
+blocks on a `bid_is_settable` check before anyone is asked to approve a change
+that cannot land:
+
+```
+FAIL bid_is_settable: ad group bid strategy is MAX_CONVERSIONS -- Apple sets the
+     bids. A keyword-bid write is accepted with HTTP 200 and then IGNORED, so this
+     would report success and change nothing. Change the ad group's bid strategy
+     first, in the Apple Ads UI.
+```
+
+Switching an ad group to `MANUAL_CPT` is a campaign-strategy decision, not a
+scripting one, so the server will not do it for you. Check with `list_ad_groups`
+— the `default_bid` column comes from `bidStrategy.bid`.
+
+This is also why *every* write verifies its read-back rather than trusting the
+status code; see [The ledger](#the-ledger).
+
 ### Money
 
 Always a **decimal string in major units**: `"1.20"` is one dollar twenty. Never
@@ -278,6 +303,43 @@ Credentials stay in `.env` (mode 600) and **not** in the registration's `env`
 block. `~/.claude.json` is a config file that gets backed up, copied between
 machines and pasted into issues; `.env` is already the one place credentials
 live, and splitting them across two files means rotating them in two places.
+
+---
+
+### Reading data: Apple's filter rules are narrower than they look
+
+The read tools hide this, but anyone extending them will hit it. Verified against
+the live API, not the SDK's models:
+
+| Call | What it actually accepts |
+| --- | --- |
+| `apps_campaign_reports` | **no filter at all** — even `campaignId` is rejected |
+| `apps_keyword_reports`, `apps_ad_group_reports`, `apps_search_term_reports` | `campaignId` and **nothing else**; `keywordId` and `adGroupId` are rejected with `INVALID_FIELD_ATTRIBUTE` |
+| any report filter | `EQUALS` with a scalar. `IN` is refused for API users |
+| `apps_search_term_reports` | `GRAND_TOTAL` **or** granular rows, never both |
+| `negative_keywords_query_post` | requires an `adGroupId` condition. A `campaignId` filter alone is a 400 |
+| `query_audit_summary` | `eventTime` as a `BETWEEN` range **and** a required `entityType`, one type per call |
+
+So the API call is scoped by campaign (or not at all) and every other narrowing
+happens client-side, over the rows that come back. `keyword_report(ad_group_id=…)`
+works; it just filters after fetching, and drops the grand total because Apple's
+covers the whole campaign rather than the subset you asked for.
+
+Two consequences worth knowing:
+
+- **Campaign-level negative keywords are not listable.** They belong to no ad
+  group, and the query endpoint demands one. `list_negative_keywords` sweeps a
+  campaign's ad groups, so it finds everything attached to an ad group and
+  nothing attached to the campaign itself. Check the Apple Ads UI if you need
+  certainty.
+- **Reports are parsed from raw JSON**, not through the SDK's response models.
+  `apple-ads-platform` 1.109.0 generates `ReportingKeyword.status` with the enum
+  `('ACTIVE','PAUSED','DELETED')` while the live API returns `ENABLED`, and the
+  generated validator *raises* rather than falling back to its own
+  `unknown_default_open_api` placeholder — so the whole keyword report fails to
+  deserialize with the response sitting there intact. The tools reshape reports
+  into their own row type anyway, so reading the JSON directly costs nothing and
+  stops the server being hostage to one wrong enum in generated code.
 
 ---
 
@@ -485,7 +547,7 @@ openssl dgst -sha256 public-key.pem      # the two digests must be identical
 
 | Symptom                                               | Cause                                                                                                                                                                                               |
 | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ModuleNotFoundError: No module named 'cryptography'` | The active conda environment is not the one the packages were installed into. `conda activate apple-ads`, or `python3 -m pip install -r requirements.txt` into the current one.                     |
+| `ModuleNotFoundError: No module named 'cryptography'` / `'mcp'` / `'apple_ads_platform'` | Wrong interpreter. Run everything as `./venv/bin/python …`, or `conda activate apple-ads`. If `cryptography` is older than 50, `pip install -r requirements.txt` to fix the floor.                |
 | `invalid_client` from the token endpoint              | Secret past its 180 days (most likely); or `sub`/`iss` swapped; or the API client was revoked. `get_token.py` prints this checklist on failure.                                                     |
 | API section missing at ads.apple.com                  | The account needs the **Account Admin** or **API Account Manager** role on the org.                                                                                                                 |
 | clientId lost                                         | Not recoverable — generate a new API client (full key rotation above).                                                                                                                              |
@@ -493,6 +555,20 @@ openssl dgst -sha256 public-key.pem      # the two digests must be identical
 | Works for `/acls`, fails for everything else          | Missing or wrong `X-AP-Context`. `/acls` is the only endpoint that does not take it — which is why `test_connection.py` calls it without one, so a bad orgId cannot masquerade as a bad credential. |
 | Empty report, no error                                | Apple only reports days with delivery. No spend in the window is a valid empty response, not a failure.                                                                                             |
 | A metric column is blank for every row                | A wrong v5 field name. Apple returns absent keys silently rather than erroring — see the reconciliation caveats below.                                                                              |
+
+### MCP server
+
+| Symptom                                                        | Cause                                                                                                                                                                                                 |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ConfigError: .env has no value for APPLE_ADS_AD_ACCOUNT_ID`    | Expected the first time. Run `test_platform_connection.py` — step 5 reads it back from Apple and prints the line to paste. Nothing guesses it.                                                        |
+| Every tool that takes the context header returns 401/403, but `whoami` works | The `X-AP-Context` is wrong. `whoami` is the only call that sends none. Check the trailing semicolon: `adAccountId=<id>;`                                                                 |
+| `apply_*` says `preview_token … is unknown or already used`     | Tokens are single-use and expire after 10 minutes. Re-run the preview. This is working as intended, not a bug.                                                                                        |
+| `apply_*` says the value "is now X, but the preview recorded Y" | The TOCTOU guard. Something changed the entity between the preview and the approval — often a person in the Apple Ads UI. Re-run the preview and look at the new numbers before deciding again.       |
+| `applied: false` with "Apple returned success and left the value alone" | A write Apple accepted and discarded. For a keyword bid this is almost always an automated bid strategy — see [A write can be in scope and still be a no-op](#a-write-can-be-in-scope-and-still-be-a-no-op). |
+| A preview shows `projected_daily_spend_delta: 0.00` with a warning about "0 by default, NOT by measurement" | The 7-day report for that entity failed, so the projection has no data behind it. The warning carries Apple's reason. Treat the zero as unknown, not as "spends nothing". |
+| `writes are disabled: …`                                        | The kill switch. `rm .audit/DISABLE_WRITES`.                                                                                                                                                         |
+| `session limit reached: N applies already made`                 | The per-session counter. Check what those changes were with `list_my_changes`, then restart the server to reset it.                                                                                   |
+| Server starts but `/mcp` lists no tools                         | Claude Code was not restarted after the registration was added to `~/.claude.json`. The absolute interpreter and script path are both required.                                                       |
 
 
 ---
