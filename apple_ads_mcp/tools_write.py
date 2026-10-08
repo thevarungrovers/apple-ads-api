@@ -77,6 +77,7 @@ from apple_ads_mcp.client import (
 )
 from apple_ads_mcp.guardrails import (
     Check,
+    check_bid_settable,
     check_campaign_in_scope,
     check_ceiling,
     check_count,
@@ -189,12 +190,22 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             days=7,
         )
 
-    def serving_warning(display_status: str | None, kind: str) -> list[str]:
-        if display_status == "RUNNING":
+    def serving_warning(entity_status: str | None, kind: str) -> list[str]:
+        """Warn from the ENTITY's serving status, not its campaign's.
+
+        A keyword under a paused ad group reads AD_GROUP_ON_HOLD while its
+        campaign reads RUNNING. Warning off the campaign would shout about live
+        traffic that this entity cannot receive -- and a warning that cries wolf
+        is one people learn to scroll past.
+        """
+        if entity_status == "RUNNING":
             return [f"This {kind} IS SERVING TODAY -- the change takes effect on live traffic."]
-        if display_status in (None, "unknown_default_open_api"):
-            return [f"Could not determine whether this {kind} is serving."]
-        return [f"This {kind} is {display_status}, so it is not spending right now."]
+        if entity_status in (None, "unknown_default_open_api"):
+            return [f"Could not determine whether this {kind} is serving. Treat it as live."]
+        return [
+            f"This {kind} is {entity_status}, so it is not spending right now. The "
+            f"change takes effect whenever it next serves."
+        ]
 
     def build_preview(
         *,
@@ -209,6 +220,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         before_num: Decimal | None,
         after_num: Decimal | None,
         campaign: Any,
+        entity_serving: str | None,
         metrics: Metrics7d | None,
         projected: Decimal,
         checks: list[Check],
@@ -218,7 +230,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
     ) -> ChangePreview:
         checks = list(checks) + [check_projected_delta(state.limits, projected)]
         blocked = any_failed(checks)
-        campaign_name, campaign_budget, serving = campaign_facts(campaign)
+        campaign_name, campaign_budget, campaign_serving = campaign_facts(campaign)
         token = state.previews.mint(tool, [item], projected, blocked)
         return ChangePreview(
             preview_token=token,
@@ -234,7 +246,8 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             campaign_id=str(campaign.id) if campaign is not None else None,
             campaign_name=campaign_name,
             campaign_daily_budget=campaign_budget,
-            campaign_serving_status=serving,
+            campaign_serving_status=campaign_serving,
+            entity_serving_status=entity_serving,
             last_7d=metrics,
             projected_daily_spend_delta=str(projected),
             guardrail_checks=render_checks(checks),
@@ -260,6 +273,20 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
                 f"deciding again."
             )
 
+    def landed(observed: str | None, intended: str) -> bool:
+        """Did the value Apple echoed back actually become the one we asked for?
+
+        HTTP 200 DOES NOT MEAN APPLIED. Verified live 2026-10-08: a keyword-bid
+        PUT against an ad group on an automated bid strategy returns 200 with the
+        entity unchanged and nothing in the response saying so. Trusting the
+        status code reports a successful change that never happened -- and the
+        ledger then records an `after` the account never held, which makes every
+        later revert and reconcile wrong too.
+        """
+        if observed is None:
+            return False  # nothing echoed back is not evidence of success
+        return _numeric_or_text(observed) == _numeric_or_text(intended)
+
     def finish(
         entry_id: str,
         *,
@@ -275,10 +302,27 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         projected: Decimal,
         note: str = "",
     ) -> ApplyResult:
-        ledger.write_outcome(entry_id, outcome=ledger.APPLIED, observed_after=observed_after)
-        state.counters.record(projected)
+        applied = landed(observed_after, after)
+        ledger.write_outcome(
+            entry_id,
+            outcome=ledger.APPLIED if applied else ledger.FAILED,
+            observed_after=observed_after,
+            detail=""
+            if applied
+            else f"Apple answered 200 but echoed {observed_after!r}, not {after!r}",
+        )
+        if applied:
+            state.counters.record(projected)
+        failures = (
+            []
+            if applied
+            else [
+                f"Apple accepted the request but {field} is still {observed_after!r}, "
+                f"not {after!r}. Nothing changed."
+            ]
+        )
         return ApplyResult(
-            applied=True,
+            applied=applied,
             entry_id=entry_id,
             tool=tool,
             entity_type=entity_type,
@@ -291,7 +335,18 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             observed_after=observed_after,
             projected_daily_spend_delta=str(projected),
             session={k: str(v) for k, v in state.counters.snapshot().items()},
-            note=note or f"Undo with revert_change(entry_id='{entry_id}').",
+            failures=failures,
+            note=(
+                (note or f"Undo with revert_change(entry_id='{entry_id}').")
+                if applied
+                else (
+                    "NOT APPLIED. Apple returned success and left the value alone. "
+                    "For a keyword bid this usually means the ad group is on an "
+                    "automated bid strategy, where Apple sets the bids and a "
+                    "keyword bid is ignored. Recorded as failed, so revert_change "
+                    "will refuse it -- there is nothing to undo."
+                )
+            ),
         )
 
     def run_write(entry_id: str, method: str, **kwargs):
@@ -342,10 +397,10 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
                 "max_bid_increase_pct", before_num, after_num, state.limits.max_bid_increase_pct
             ),
             check_known_status("keyword_status_known", enum_value(keyword.status)),
+            check_bid_settable(_bid_strategy_type(ad_group)),
         ]
-        warnings = serving_warning(
-            enum_value(getattr(campaign, "display_status", None)), "campaign"
-        )
+        entity_serving = enum_value(keyword.display_status)
+        warnings = serving_warning(entity_serving, "keyword")
         if enum_value(keyword.status) != "ENABLED":
             warnings.append("The keyword itself is PAUSED, so this bid will not spend until it is enabled.")
 
@@ -361,6 +416,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             before_num=before_num,
             after_num=after_num,
             campaign=campaign,
+            entity_serving=entity_serving,
             metrics=metrics_block(spend, taps, impressions, installs),
             projected=projected,
             checks=checks,
@@ -493,6 +549,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
                     state.limits.max_bid_increase_pct,
                 ),
                 check_known_status("keyword_status_known", enum_value(keyword.status)),
+                check_bid_settable(_bid_strategy_type(ad_group)),
             ]
             all_checks.extend(checks)
             path = entity_path(campaign, ad_group, keyword.text)
@@ -512,6 +569,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
                     campaign_name=getattr(campaign, "name", None),
                     campaign_daily_budget=campaign_facts(campaign)[1],
                     campaign_serving_status=enum_value(getattr(campaign, "display_status", None)),
+                    entity_serving_status=enum_value(keyword.display_status),
                     last_7d=metrics_block(spend, taps, impressions, installs),
                     projected_daily_spend_delta=str(projected),
                     guardrail_checks=render_checks(checks),
@@ -697,9 +755,8 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             check_campaign_in_scope(state.limits, keyword.campaign_id),
             check_known_status("keyword_status_known", before),
         ]
-        warnings = serving_warning(
-            enum_value(getattr(campaign, "display_status", None)), "campaign"
-        )
+        entity_serving = enum_value(keyword.display_status)
+        warnings = serving_warning(entity_serving, "keyword")
         if target == "ENABLED":
             warnings.append(
                 "Enabling a keyword RESUMES spend on it. The projection shows 0 "
@@ -718,6 +775,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             before_num=None,
             after_num=None,
             campaign=campaign,
+            entity_serving=entity_serving,
             metrics=metrics_block(spend, taps, impressions, installs),
             projected=projected,
             checks=checks,
@@ -815,9 +873,8 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             check_campaign_in_scope(state.limits, ad_group.campaign_id),
             check_known_status("ad_group_status_known", before),
         ]
-        warnings = serving_warning(
-            enum_value(getattr(campaign, "display_status", None)), "campaign"
-        )
+        entity_serving = enum_value(ad_group.display_status)
+        warnings = serving_warning(entity_serving, "ad group")
         warnings.append(
             "This affects EVERY keyword in the ad group, not one of them."
         )
@@ -834,6 +891,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             before_num=None,
             after_num=None,
             campaign=campaign,
+            entity_serving=entity_serving,
             metrics=metrics_block(spend, taps, impressions, installs),
             projected=projected,
             checks=checks,
@@ -932,7 +990,8 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             check_campaign_in_scope(state.limits, campaign_id),
             check_known_status("campaign_status_known", before),
         ]
-        warnings = serving_warning(enum_value(campaign.display_status), "campaign")
+        entity_serving = enum_value(campaign.display_status)
+        warnings = serving_warning(entity_serving, "campaign")
         warnings.append("This stops or starts EVERY ad group and keyword in the campaign.")
 
         return build_preview(
@@ -947,6 +1006,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             before_num=None,
             after_num=None,
             campaign=campaign,
+            entity_serving=entity_serving,
             metrics=metrics_block(spend, taps, impressions, installs),
             projected=projected,
             checks=checks,
@@ -1059,7 +1119,8 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             ),
             check_known_status("campaign_status_known", enum_value(campaign.status)),
         ]
-        warnings = serving_warning(enum_value(campaign.display_status), "campaign")
+        entity_serving = enum_value(campaign.display_status)
+        warnings = serving_warning(entity_serving, "campaign")
         if before_num is not None and after_num < before_num:
             warnings.append(
                 "Lowering a daily budget can stop delivery part-way through today "
@@ -1078,6 +1139,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             before_num=before_num,
             after_num=after_num,
             campaign=campaign,
+            entity_serving=entity_serving,
             metrics=metrics_block(spend, taps, impressions, installs),
             projected=projected,
             checks=checks,
@@ -1223,6 +1285,9 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
                 campaign_name=getattr(campaign, "name", None),
                 campaign_daily_budget=campaign_facts(campaign)[1],
                 campaign_serving_status=enum_value(getattr(campaign, "display_status", None)),
+                entity_serving_status=enum_value(getattr(ad_group, "display_status", None))
+                if ad_group is not None
+                else enum_value(getattr(campaign, "display_status", None)),
                 projected_daily_spend_delta="0",
                 guardrail_checks=[],
                 blocked=False,
@@ -1248,7 +1313,8 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             "apply_negative_keywords_add", items, Decimal("0"), blocked
         )
         warnings = serving_warning(
-            enum_value(getattr(campaign, "display_status", None)), "campaign"
+            enum_value(getattr(ad_group or campaign, "display_status", None)),
+            "ad group" if ad_group is not None else "campaign",
         )
         warnings.append(
             "NOT idempotent: applying this twice creates duplicate negatives."
@@ -1405,9 +1471,8 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             check_campaign_in_scope(state.limits, negative.campaign_id),
             check_known_status("negative_keyword_status_known", before),
         ]
-        warnings = serving_warning(
-            enum_value(getattr(campaign, "display_status", None)), "campaign"
-        )
+        entity_serving = enum_value(getattr(campaign, "display_status", None))
+        warnings = serving_warning(entity_serving, "campaign")
         if target == "PAUSED":
             warnings.append(
                 "Pausing a NEGATIVE keyword stops excluding this term, so traffic "
@@ -1426,6 +1491,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             before_num=None,
             after_num=None,
             campaign=campaign,
+            entity_serving=entity_serving,
             metrics=None,
             projected=Decimal("0"),
             checks=checks,
@@ -1744,6 +1810,28 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
 
 
 # --- module-level helpers -----------------------------------------------------
+
+
+def _bid_strategy_type(ad_group: Any) -> str | None:
+    """MANUAL_CPT / MAX_CONVERSIONS / ... off an ad group, or None if unreadable."""
+    strategy = getattr(ad_group, "bid_strategy", None)
+    if strategy is None:
+        return None
+    return enum_value(getattr(strategy, "bid_strategy_type", None))
+
+
+def _numeric_or_text(value: str) -> str:
+    """Compare "0.01 CAD" with "0.01" by amount, and statuses by text.
+
+    Apple echoes money back with a currency and sometimes with different
+    trailing zeros ("0.0100"), so a string comparison would report a successful
+    write as a failure.
+    """
+    head = str(value).strip().split(" ")[0]
+    try:
+        return str(Decimal(head).normalize())
+    except Exception:
+        return str(value).strip().upper()
 
 
 def _status(raw: str, allowed: set[str], field: str = "status") -> str:

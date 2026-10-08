@@ -308,6 +308,37 @@ def check_known_status(name: str, raw_status: str | None) -> Check:
     )
 
 
+# Verified live 2026-10-08: under an automated bid strategy, Apple accepts a
+# keyword-bid PUT with HTTP 200 and leaves the bid unchanged. Nothing in the
+# response says it was ignored, so without this check the agent reports a
+# successful bid change that never happened.
+MANUAL_BID_STRATEGIES = frozenset({"MANUAL_CPT", "MANUAL_CPM"})
+
+
+def check_bid_settable(bid_strategy_type: str | None) -> Check:
+    """A keyword bid only means anything under a MANUAL bid strategy."""
+    if bid_strategy_type is None:
+        return Check(
+            "bid_is_settable",
+            False,
+            "could not read the ad group's bid strategy, so there is no way to tell "
+            "whether a keyword bid would be used at all",
+        )
+    settable = bid_strategy_type in MANUAL_BID_STRATEGIES
+    return Check(
+        "bid_is_settable",
+        settable,
+        f"ad group bid strategy is {bid_strategy_type}"
+        + (
+            ""
+            if settable
+            else " -- Apple sets the bids. A keyword-bid write is accepted with "
+            "HTTP 200 and then IGNORED, so this would report success and change "
+            "nothing. Change the ad group's bid strategy first, in the Apple Ads UI."
+        ),
+    )
+
+
 def check_count(limits: Limits, count: int) -> Check:
     passed = count <= limits.max_entities_per_call
     return Check(

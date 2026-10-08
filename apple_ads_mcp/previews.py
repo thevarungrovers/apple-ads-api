@@ -7,7 +7,11 @@ just returning `{"id": 123, "bid": "1.40"}`:
 
   entity_name                 -- "brand term" vs "competitor brand term"
   path                        -- which campaign and ad group it sits in
-  campaign_serving_status     -- whether this entity can spend money TODAY
+  entity_serving_status       -- whether THIS entity can spend money today. Not
+                                 the campaign's: a keyword under a paused ad
+                                 group cannot spend however healthy the campaign
+                                 looks, and reading the campaign's status alone
+                                 would warn about live traffic that does not exist
   projected_daily_spend_delta -- roughly how much more per day, as an upper bound
 
 `preview_token` is the other half. Every apply_* demands one, minted by its
@@ -74,8 +78,13 @@ class ChangePreview(BaseModel):
     campaign_name: str | None = Field(default=None)
     campaign_daily_budget: str | None = Field(default=None)
     campaign_serving_status: str | None = Field(
+        default=None, description="The CAMPAIGN's serving status"
+    )
+    entity_serving_status: str | None = Field(
         default=None,
-        description="RUNNING means this entity can spend money today",
+        description="This entity's OWN serving status -- RUNNING means it can spend "
+        "money today. A keyword under a paused ad group reads AD_GROUP_ON_HOLD "
+        "however healthy the campaign looks.",
     )
     last_7d: Metrics7d | None = Field(default=None)
     projected_daily_spend_delta: str = Field(
