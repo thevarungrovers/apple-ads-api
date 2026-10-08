@@ -181,6 +181,16 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             enum_value(campaign.display_status),
         )
 
+    def metrics_warning(metrics_error: str | None) -> list[str]:
+        """A projection built on a failed report is a confident 0.00. Say so."""
+        if not metrics_error:
+            return []
+        return [
+            "Could not read the last 7 days for this entity, so the 7d figures and "
+            f"projected_daily_spend_delta are 0 by default, NOT by measurement: "
+            f"{metrics_error[:200]}"
+        ]
+
     def metrics_block(spend: Decimal, taps: int, impressions: int, installs: int) -> Metrics7d:
         return Metrics7d(
             spend=str(spend),
@@ -384,8 +394,8 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         before_num = money_amount(keyword.bid)
         currency = money_currency(keyword.bid) or None
 
-        spend, taps, impressions, installs = entity_metrics_7d(
-            "apps_keyword_reports", "keywordId", keyword_id
+        spend, taps, impressions, installs, metrics_error = entity_metrics_7d(
+            "apps_keyword_reports", "keywordId", keyword_id, keyword.campaign_id
         )
         projected = project_bid_change(taps, before_num, after_num)
 
@@ -400,7 +410,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             check_bid_settable(_bid_strategy_type(ad_group)),
         ]
         entity_serving = enum_value(keyword.display_status)
-        warnings = serving_warning(entity_serving, "keyword")
+        warnings = serving_warning(entity_serving, "keyword") + metrics_warning(metrics_error)
         if enum_value(keyword.status) != "ENABLED":
             warnings.append("The keyword itself is PAUSED, so this bid will not spend until it is enabled.")
 
@@ -533,8 +543,8 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             ad_group, campaign = keyword_context(keyword)
             before_num = money_amount(keyword.bid)
             currency = money_currency(keyword.bid)
-            spend, taps, impressions, installs = entity_metrics_7d(
-                "apps_keyword_reports", "keywordId", keyword_id
+            spend, taps, impressions, installs, metrics_error = entity_metrics_7d(
+                "apps_keyword_reports", "keywordId", keyword_id, keyword.campaign_id
             )
             projected = project_bid_change(taps, before_num, after_num)
             total += projected
@@ -747,8 +757,8 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         if before == target:
             raise ToolError(f"keyword {keyword_id} is already {target}; nothing to change.")
 
-        spend, taps, impressions, installs = entity_metrics_7d(
-            "apps_keyword_reports", "keywordId", keyword_id
+        spend, taps, impressions, installs, metrics_error = entity_metrics_7d(
+            "apps_keyword_reports", "keywordId", keyword_id, keyword.campaign_id
         )
         projected = project_pause(spend) if target == "PAUSED" else Decimal("0")
         checks = [
@@ -756,7 +766,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             check_known_status("keyword_status_known", before),
         ]
         entity_serving = enum_value(keyword.display_status)
-        warnings = serving_warning(entity_serving, "keyword")
+        warnings = serving_warning(entity_serving, "keyword") + metrics_warning(metrics_error)
         if target == "ENABLED":
             warnings.append(
                 "Enabling a keyword RESUMES spend on it. The projection shows 0 "
@@ -865,8 +875,8 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         if before == target:
             raise ToolError(f"ad group {ad_group_id} is already {target}; nothing to change.")
 
-        spend, taps, impressions, installs = entity_metrics_7d(
-            "apps_ad_group_reports", "adGroupId", ad_group_id
+        spend, taps, impressions, installs, metrics_error = entity_metrics_7d(
+            "apps_ad_group_reports", "adGroupId", ad_group_id, ad_group.campaign_id
         )
         projected = project_pause(spend) if target == "PAUSED" else Decimal("0")
         checks = [
@@ -874,7 +884,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             check_known_status("ad_group_status_known", before),
         ]
         entity_serving = enum_value(ad_group.display_status)
-        warnings = serving_warning(entity_serving, "ad group")
+        warnings = serving_warning(entity_serving, "ad group") + metrics_warning(metrics_error)
         warnings.append(
             "This affects EVERY keyword in the ad group, not one of them."
         )
@@ -982,7 +992,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         if before == target:
             raise ToolError(f"campaign {campaign_id} is already {target}; nothing to change.")
 
-        spend, taps, impressions, installs = entity_metrics_7d(
+        spend, taps, impressions, installs, metrics_error = entity_metrics_7d(
             "apps_campaign_reports", "campaignId", campaign_id
         )
         projected = project_pause(spend) if target == "PAUSED" else Decimal("0")
@@ -991,7 +1001,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             check_known_status("campaign_status_known", before),
         ]
         entity_serving = enum_value(campaign.display_status)
-        warnings = serving_warning(entity_serving, "campaign")
+        warnings = serving_warning(entity_serving, "campaign") + metrics_warning(metrics_error)
         warnings.append("This stops or starts EVERY ad group and keyword in the campaign.")
 
         return build_preview(
@@ -1101,7 +1111,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         before_num = money_amount(current)
         currency = money_currency(current)
 
-        spend, taps, impressions, installs = entity_metrics_7d(
+        spend, taps, impressions, installs, metrics_error = entity_metrics_7d(
             "apps_campaign_reports", "campaignId", campaign_id
         )
         projected = project_budget_change(before_num, after_num)
@@ -1120,7 +1130,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             check_known_status("campaign_status_known", enum_value(campaign.status)),
         ]
         entity_serving = enum_value(campaign.display_status)
-        warnings = serving_warning(entity_serving, "campaign")
+        warnings = serving_warning(entity_serving, "campaign") + metrics_warning(metrics_error)
         if before_num is not None and after_num < before_num:
             warnings.append(
                 "Lowering a daily budget can stop delivery part-way through today "

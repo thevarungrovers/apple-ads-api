@@ -13,7 +13,8 @@ changes that will be refused.
 from __future__ import annotations
 
 import datetime as dt
-from decimal import Decimal
+import json
+from decimal import Decimal, InvalidOperation
 from typing import Annotated, Any
 
 from apple_ads_platform import (
@@ -289,19 +290,32 @@ def _window(days: int) -> tuple[dt.date, dt.date]:
     return end - dt.timedelta(days=days - 1), end
 
 
-def _metrics_row(metrics: Any, *, id_: Any = None, name: Any = None, extra: dict | None = None) -> ReportRow:
+def _json_money(value: Any) -> str:
+    """`{"amount": "1.20", "currency": "CAD"}` -> `"1.20 CAD"`."""
+    if not isinstance(value, dict):
+        return "-"
+    amount = value.get("amount")
+    if amount in (None, ""):
+        return "-"
+    return f"{amount} {value.get('currency') or ''}".strip()
+
+
+def _metrics_row(
+    metrics: dict | None, *, id_: Any = None, name: Any = None, extra: dict | None = None
+) -> ReportRow:
+    metrics = metrics or {}
     return ReportRow(
         id=str(id_) if id_ is not None else None,
         name=name,
         extra={k: str(v) for k, v in (extra or {}).items() if v is not None},
-        spend=format_money(getattr(metrics, "local_spend", None)),
-        impressions=getattr(metrics, "impressions", 0) or 0,
-        taps=getattr(metrics, "taps", 0) or 0,
-        installs=getattr(metrics, "total_installs", 0) or 0,
-        new_downloads=getattr(metrics, "total_new_downloads", 0) or 0,
-        redownloads=getattr(metrics, "total_redownloads", 0) or 0,
-        avg_cpt=format_money(getattr(metrics, "cpt", None)),
-        avg_cpi=format_money(getattr(metrics, "total_avg_cpi", None)),
+        spend=_json_money(metrics.get("localSpend")),
+        impressions=metrics.get("impressions") or 0,
+        taps=metrics.get("taps") or 0,
+        installs=metrics.get("totalInstalls") or 0,
+        new_downloads=metrics.get("totalNewDownloads") or 0,
+        redownloads=metrics.get("totalRedownloads") or 0,
+        avg_cpt=_json_money(metrics.get("cpt")),
+        avg_cpi=_json_money(metrics.get("totalAvgCPI")),
     )
 
 
@@ -312,55 +326,120 @@ def run_report(
     filters: list[Filter] | None = None,
     granularity: str = "DAILY",
     group_by: list[str] | None = None,
-) -> tuple[list[Any], Any, dt.date, dt.date]:
-    """One `apps_*_reports` call. Returns (rows, grand_total, start, end).
+    grand_total: bool = True,
+) -> tuple[list[dict], dict | None, dt.date, dt.date]:
+    """One `apps_*_reports` call, parsed from RAW JSON rather than the SDK's models.
 
-    `_request_timeout` is lifted to 60s here: a report is the one read in this API
-    that routinely outruns the client's 30s default.
+    Not a style choice. apple-ads-platform 1.109.0 generates
+    `ReportingKeyword.status` with the enum ('ACTIVE', 'PAUSED', 'DELETED') while
+    the live API returns 'ENABLED', and the generated validator RAISES on an
+    unrecognised value instead of falling back to its own
+    `unknown_default_open_api` placeholder. The whole keyword report therefore
+    fails to deserialize -- a client-side bug, with the response sitting there
+    intact. Other reporting models are likely to have the same mismatch.
+
+    Reports are read-only and get flattened into ReportRow regardless, so nothing
+    is lost by reading the JSON directly, and the server stops being hostage to
+    one wrong enum in a generated model.
+
+    `_request_timeout` is lifted to 60s: a report is the one read in this API that
+    routinely outruns the client's 30s default.
     """
     start, end = _window(days)
     response = call(
-        method,
+        f"{method}_without_preload_content",
         x_ap_context=context_header(),
         apps_reporting_request=AppsReportingRequest(
             time_range=TimeRange(start=start, end=end, granularity=granularity),
             filters=filters or None,
             group_by=group_by or None,
-            options=AppsOptions(include_rows=["GRAND_TOTAL"]),
+            options=AppsOptions(include_rows=["GRAND_TOTAL"]) if grand_total else None,
         ),
         _request_timeout=REPORT_TIMEOUT,
     )
-    result = unwrap(response, f"{entity} report")
-    rows = (getattr(result, "rows", None) or []) if result else []
-    summary = getattr(result, "summary", None) if result else None
-    return rows, getattr(summary, "grand_total", None), start, end
+    try:
+        payload = json.loads(response.data.decode("utf-8"))
+    except (ValueError, AttributeError, UnicodeDecodeError) as exc:
+        raise ToolError(f"could not parse the {entity} report response: {exc}") from exc
+
+    if payload.get("error"):
+        raise ToolError(f"Apple rejected the {entity} report request: {payload['error']}")
+
+    result = payload.get("result") or {}
+    return result.get("rows") or [], (result.get("summary") or {}).get("grandTotal"), start, end
 
 
 def report_filter(field: str, values: list[Any]) -> Filter:
+    """A reporting filter. Single values use EQUALS, not IN.
+
+    Verified live 2026-10-08: `campaignId filter only supports the EQUALS
+    operator for API users. Operator 'IN' is not allowed.` IN is accepted for
+    some fields and rejected for others, so sending EQUALS whenever there is one
+    value is the shape that works everywhere.
+    """
+    if len(values) == 1:
+        return Filter(field=field, operator="EQUALS", value=values[0])
     return Filter(field=field, operator="IN", value=list(values))
 
 
-def entity_metrics_7d(method: str, field: str, entity_id: int) -> tuple[Decimal, int, int, int]:
-    """(spend, taps, impressions, installs) over 7 days for one entity.
+def entity_metrics_7d(
+    method: str, id_key: str, entity_id: int, campaign_id: int | None = None
+) -> tuple[Decimal, int, int, int, str | None]:
+    """(spend, taps, impressions, installs, error) over 7 days for ONE entity.
 
-    Failure here is NOT fatal to a preview. A preview without 7-day numbers is
-    still worth showing -- it just loses the projection -- whereas a preview that
-    refuses to render because reporting hiccuped teaches you to skip previews.
+    Apple's reporting filters accept **campaignId and nothing else**: a keywordId
+    or adGroupId filter comes back `INVALID_FIELD_ATTRIBUTE: Filters contain
+    unsupported fields`. So the narrowing happens here, in Python, over the rows
+    of a campaign-level report -- which is also why campaign_id is required
+    rather than optional.
+
+    Failure is NOT fatal to a preview: a preview without 7-day numbers is still
+    worth showing, whereas one that refuses to render because reporting hiccuped
+    teaches you to skip previews. But it must not be SILENT either -- bare zeros
+    make a broken report look exactly like an entity that genuinely spent
+    nothing, and the projection built on it then reads 0.00 with total
+    confidence. The reason comes back as the fifth element so the preview can
+    say so out loud.
     """
+    # The CAMPAIGN report takes no filter at all -- even campaignId is rejected --
+    # so it is fetched whole and the row is picked out. The keyword and ad-group
+    # reports take campaignId and nothing else.
+    if id_key == "campaignId":
+        filters = None
+    elif campaign_id is None:
+        return Decimal("0"), 0, 0, 0, "no campaign id for this entity, so its report cannot be scoped"
+    else:
+        filters = [report_filter("campaignId", [campaign_id])]
+
     try:
-        _rows, grand_total, _start, _end = run_report(
-            method, field, days=7, filters=[report_filter(field, [entity_id])]
-        )
-    except ToolError:
-        return Decimal("0"), 0, 0, 0
-    if grand_total is None:
-        return Decimal("0"), 0, 0, 0
-    spend = money_amount(getattr(grand_total, "local_spend", None)) or Decimal("0")
+        rows, _grand_total, _start, _end = run_report(method, id_key, days=7, filters=filters)
+    except ToolError as exc:
+        return Decimal("0"), 0, 0, 0, str(exc)
+
+    metrics = next(
+        (
+            row.get("totalMetrics")
+            for row in rows
+            if str((row.get("metadata") or {}).get("id")) == str(entity_id)
+        ),
+        None,
+    )
+    if not metrics:
+        # The report succeeded and this entity is simply not in it, which over a
+        # 7-day window means no delivery. A genuine zero, not a failure.
+        return Decimal("0"), 0, 0, 0, None
+
+    raw = (metrics.get("localSpend") or {}).get("amount")
+    try:
+        spend = Decimal(str(raw)) if raw not in (None, "") else Decimal("0")
+    except InvalidOperation:
+        spend = Decimal("0")
     return (
         spend,
-        getattr(grand_total, "taps", 0) or 0,
-        getattr(grand_total, "impressions", 0) or 0,
-        getattr(grand_total, "total_installs", 0) or 0,
+        metrics.get("taps") or 0,
+        metrics.get("impressions") or 0,
+        metrics.get("totalInstalls") or 0,
+        None,
     )
 
 
@@ -770,10 +849,10 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         totalNewDownloads / totalRedownloads, and the bare `installs` key v3 used
         does not exist.
         """
-        filters = [report_filter("campaignId", [campaign_id])] if campaign_id else None
-        rows, grand_total, start, end = run_report(
-            "apps_campaign_reports", "campaign", days, filters
-        )
+        rows, grand_total, start, end = run_report("apps_campaign_reports", "campaign", days)
+        if campaign_id:
+            rows = [r for r in rows if str((r.get("metadata") or {}).get("id")) == str(campaign_id)]
+            grand_total = None  # Apple's total covers every campaign, not the one asked for
         return Report(
             entity="campaign",
             start=start.isoformat(),
@@ -781,9 +860,9 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             granularity="DAILY",
             rows=[
                 _metrics_row(
-                    row.total_metrics,
-                    id_=getattr(row.metadata, "id", None),
-                    name=getattr(row.metadata, "name", None),
+                    row.get("totalMetrics"),
+                    id_=(row.get("metadata") or {}).get("id"),
+                    name=(row.get("metadata") or {}).get("name"),
                 )
                 for row in rows
             ],
@@ -798,14 +877,15 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         ad_group_id: Annotated[int | None, Field(description="Limit to one ad group")] = None,
     ) -> Report:
         """Spend, impressions, taps and installs per ad group."""
-        filters = []
-        if campaign_id:
-            filters.append(report_filter("campaignId", [campaign_id]))
-        if ad_group_id:
-            filters.append(report_filter("adGroupId", [ad_group_id]))
+        # campaignId is the ONLY filter Apple accepts on these reports; an
+        # adGroupId filter is rejected outright. Everything else narrows here.
+        filters = [report_filter("campaignId", [campaign_id])] if campaign_id else None
         rows, grand_total, start, end = run_report(
-            "apps_ad_group_reports", "ad group", days, filters or None
+            "apps_ad_group_reports", "ad group", days, filters
         )
+        if ad_group_id:
+            rows = [r for r in rows if str((r.get("metadata") or {}).get("id")) == str(ad_group_id)]
+            grand_total = None
         return Report(
             entity="ad_group",
             start=start.isoformat(),
@@ -813,10 +893,10 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             granularity="DAILY",
             rows=[
                 _metrics_row(
-                    row.total_metrics,
-                    id_=getattr(row.metadata, "id", None),
-                    name=getattr(row.metadata, "name", None),
-                    extra={"campaign_id": getattr(row.metadata, "campaign_id", None)},
+                    row.get("totalMetrics"),
+                    id_=(row.get("metadata") or {}).get("id"),
+                    name=(row.get("metadata") or {}).get("name"),
+                    extra={"campaign_id": (row.get("metadata") or {}).get("campaignId")},
                 )
                 for row in rows
             ],
@@ -828,20 +908,33 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
     def keyword_report(
         days: Annotated[int, Field(description="Window ending today", ge=1, le=90)] = 7,
         campaign_id: Annotated[int | None, Field(description="Limit to one campaign")] = None,
-        ad_group_id: Annotated[int | None, Field(description="Limit to one ad group")] = None,
-        keyword_id: Annotated[int | None, Field(description="Limit to one keyword")] = None,
+        ad_group_id: Annotated[
+            int | None, Field(description="Narrow to one ad group (filtered after fetching)")
+        ] = None,
+        keyword_id: Annotated[
+            int | None, Field(description="Narrow to one keyword (filtered after fetching)")
+        ] = None,
     ) -> Report:
-        """Spend and conversions per keyword -- the input to any bid decision."""
-        filters = []
-        if campaign_id:
-            filters.append(report_filter("campaignId", [campaign_id]))
+        """Spend and conversions per keyword -- the input to any bid decision.
+
+        Apple only filters these reports by campaignId, so ad_group_id and
+        keyword_id narrow the rows after they arrive. Give campaign_id too when
+        you can; without it this pulls every campaign.
+        """
+        # campaignId is the ONLY filter Apple accepts here. A keywordId or
+        # adGroupId filter is rejected with INVALID_FIELD_ATTRIBUTE, so those two
+        # narrow the returned rows instead.
+        filters = [report_filter("campaignId", [campaign_id])] if campaign_id else None
+        rows, grand_total, start, end = run_report("apps_keyword_reports", "keyword", days, filters)
         if ad_group_id:
-            filters.append(report_filter("adGroupId", [ad_group_id]))
+            rows = [
+                r for r in rows
+                if str((r.get("metadata") or {}).get("adGroupId")) == str(ad_group_id)
+            ]
         if keyword_id:
-            filters.append(report_filter("keywordId", [keyword_id]))
-        rows, grand_total, start, end = run_report(
-            "apps_keyword_reports", "keyword", days, filters or None
-        )
+            rows = [r for r in rows if str((r.get("metadata") or {}).get("id")) == str(keyword_id)]
+        if ad_group_id or keyword_id:
+            grand_total = None  # Apple's total covers the campaign, not the subset
         return Report(
             entity="keyword",
             start=start.isoformat(),
@@ -849,13 +942,16 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             granularity="DAILY",
             rows=[
                 _metrics_row(
-                    row.total_metrics,
-                    id_=getattr(row.metadata, "id", None),
-                    name=getattr(row.metadata, "keyword", None),
+                    row.get("totalMetrics"),
+                    id_=(row.get("metadata") or {}).get("id"),
+                    name=(row.get("metadata") or {}).get("text"),
                     extra={
-                        "match_type": enum_value(getattr(row.metadata, "match_type", None)),
-                        "ad_group_id": getattr(row.metadata, "ad_group_id", None),
-                        "bid": format_money(getattr(row.metadata, "bid_amount", None)),
+                        "match_type": (row.get("metadata") or {}).get("matchType"),
+                        "ad_group_id": (row.get("metadata") or {}).get("adGroupId"),
+                        "ad_group": ((row.get("metadata") or {}).get("adGroup") or {}).get("name"),
+                        "status": (row.get("metadata") or {}).get("status"),
+                        "serving_status": (row.get("metadata") or {}).get("displayStatus"),
+                        "bid": _json_money((row.get("metadata") or {}).get("bid")),
                     },
                 )
                 for row in rows
@@ -875,14 +971,19 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         A row with no keyword id was served by Search Match, not by one of your
         keywords.
         """
-        filters = []
-        if campaign_id:
-            filters.append(report_filter("campaignId", [campaign_id]))
-        if ad_group_id:
-            filters.append(report_filter("adGroupId", [ad_group_id]))
+        filters = [report_filter("campaignId", [campaign_id])] if campaign_id else None
+        # SEARCHTERM reports accept GRAND_TOTAL *or* granular data, never both:
+        # "SEARCHTERM level reports supports only GRAND_TOTAL or granularity data,
+        # not both." The per-term rows are the whole point of this report, so the
+        # grand total is what gives way.
         rows, grand_total, start, end = run_report(
-            "apps_search_term_reports", "search term", days, filters or None
+            "apps_search_term_reports", "search term", days, filters, grand_total=False
         )
+        if ad_group_id:
+            rows = [
+                r for r in rows
+                if str((r.get("metadata") or {}).get("adGroupId")) == str(ad_group_id)
+            ]
         return Report(
             entity="search_term",
             start=start.isoformat(),
@@ -890,21 +991,25 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             granularity="DAILY",
             rows=[
                 _metrics_row(
-                    row.total_metrics,
-                    id_=getattr(row.metadata, "keyword_id", None),
-                    name=getattr(row.metadata, "search_term_text", None),
+                    row.get("totalMetrics"),
+                    id_=(row.get("metadata") or {}).get("keywordId"),
+                    name=(row.get("metadata") or {}).get("searchTermText")
+                    or (row.get("metadata") or {}).get("searchTerm"),
                     extra={
-                        "matched_keyword": getattr(row.metadata, "keyword", None),
-                        "match_type": enum_value(getattr(row.metadata, "match_type", None)),
-                        "ad_group_id": getattr(row.metadata, "ad_group_id", None),
+                        "matched_keyword": (row.get("metadata") or {}).get("keyword")
+                        or (row.get("metadata") or {}).get("text"),
+                        "match_type": (row.get("metadata") or {}).get("matchType")
+                        or (row.get("metadata") or {}).get("searchTermSource"),
+                        "ad_group_id": (row.get("metadata") or {}).get("adGroupId"),
                     },
                 )
                 for row in rows
             ],
-            grand_total=_metrics_row(grand_total, name="GRAND TOTAL") if grand_total else None,
+            grand_total=None,
             note=(
                 "A row with no keyword id was served by Search Match, not by a "
-                "keyword you set."
+                "keyword you set. No grand total: Apple refuses GRAND_TOTAL and "
+                "granular rows on the same SEARCHTERM request."
             ),
         )
 
