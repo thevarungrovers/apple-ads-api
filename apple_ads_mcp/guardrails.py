@@ -161,7 +161,11 @@ def writes_disabled() -> str | None:
 
 
 def disable_writes(reason: str = "") -> Path:
-    AUDIT_DIR.mkdir(mode=0o700, exist_ok=True)
+    # `.audit/` outlived the ledger that used to live in it: the change record
+    # moved to logs/apple-ads.db, but the kill switch is still a FILE here, on
+    # purpose -- see the note above KILL_SWITCH. Nothing else creates the
+    # directory now, so this is the only caller that has to.
+    ensure_audit_dir()
     KILL_SWITCH.write_text(reason or "writes disabled by hand\n")
     return KILL_SWITCH
 
