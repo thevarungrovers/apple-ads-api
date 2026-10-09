@@ -4,6 +4,7 @@
     ./venv/bin/python migrate_ledger.py            # show what would move
     ./venv/bin/python migrate_ledger.py --apply    # move it
     ./venv/bin/python migrate_ledger.py --verify   # compare the two afterwards
+    ./venv/bin/python migrate_ledger.py --apply --backups   # include changes.jsonl.*
 
 Idempotent: an entry_id already in the database is left exactly as it is, so
 re-running after new writes cannot roll one back to its state at migration
@@ -48,15 +49,49 @@ def preview() -> int:
     if unfinished:
         print(f"\n  note: {unfinished} entr{'y' if unfinished == 1 else 'ies'} "
               f"have no outcome -- they migrate as unfinished, which is correct.")
+
+    backups = ledger.legacy_backup_paths()
+    if backups:
+        print("\nbackup files beside it (--backups to include):")
+        for path in backups:
+            orphans = [
+                entry
+                for entry in ledger.fold_legacy_records(path)
+                if logdb.find_entry(str(entry["entry_id"])) is None
+            ]
+            print(f"  {path.name}: {len(orphans)} entr"
+                  f"{'y' if len(orphans) == 1 else 'ies'} in no other file")
+            for entry in orphans:
+                outcome, _ = ledger.reclassify_outcome(entry)
+                arrow = (
+                    f"  {entry.get('outcome')} -> {outcome}"
+                    if outcome != entry.get("outcome")
+                    else f"  {entry.get('outcome')}"
+                )
+                print(f"    {str(entry['entry_id'])[:8]}  {entry.get('tool')}"
+                      f"  {entry.get('after')!r} vs observed "
+                      f"{entry.get('observed_after')!r}{arrow}")
+
     print("\nAdd --apply to do it.")
     return 0
 
 
-def apply() -> int:
+def apply(include_backups: bool = False) -> int:
     result = ledger.import_legacy_jsonl()
     print(f"read {result['read']} entries from {ledger.LEGACY_LEDGER_PATH}")
     print(f"inserted {result['inserted']}, already present {result['already_present']}")
-    print(f"\nThe JSONL was not deleted. Nothing writes to it any more.")
+
+    if include_backups:
+        for path in ledger.legacy_backup_paths():
+            # reclassify=True only here. The live ledger was written by code
+            # that already ran the read-back check; these backups predate it.
+            backup = ledger.import_legacy_jsonl(path, reclassify=True)
+            print(f"\nread {backup['read']} entries from {path.name}")
+            print(f"inserted {backup['inserted']}, "
+                  f"already present {backup['already_present']}, "
+                  f"reclassified {backup['reclassified']}")
+
+    print("\nThe JSONL was not deleted. Nothing writes to it any more.")
     return 0
 
 
@@ -99,10 +134,16 @@ def main() -> int:
     group.add_argument(
         "--verify", action="store_true", help="check the database against the JSONL"
     )
+    parser.add_argument(
+        "--backups",
+        action="store_true",
+        help="also migrate .audit/changes.jsonl.* backups, re-deriving each "
+             "entry's outcome from its own read-back",
+    )
     args = parser.parse_args()
 
     if args.apply:
-        return apply()
+        return apply(include_backups=args.backups)
     if args.verify:
         return verify()
     return preview()

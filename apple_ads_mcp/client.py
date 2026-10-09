@@ -236,6 +236,39 @@ def format_money(value: Any) -> str:
     return f"{amount} {currency}".strip()
 
 
+def normalized_value(value: str) -> str:
+    """Compare "0.01 CAD" with "0.01" by amount, and statuses by text.
+
+    Apple echoes money back with a currency and sometimes with different
+    trailing zeros ("0.0100"), so a string comparison would report a successful
+    write as a failure.
+    """
+    head = str(value).strip().split(" ")[0]
+    try:
+        return str(Decimal(head).normalize())
+    except Exception:
+        return str(value).strip().upper()
+
+
+def landed(observed: str | None, intended: str) -> bool:
+    """Did the value Apple echoed back actually become the one we asked for?
+
+    HTTP 200 DOES NOT MEAN APPLIED. Verified live 2026-10-08: a keyword-bid PUT
+    against an ad group on an automated bid strategy returns 200 with the entity
+    unchanged and nothing in the response saying so. Trusting the status code
+    reports a successful change that never happened -- and the ledger then
+    records an `after` the account never held, which makes every later revert
+    and reconcile wrong too.
+
+    Lives here rather than inside tools_write so the ledger migration can
+    classify a historical entry by the SAME rule the live write path uses,
+    rather than by a second copy of it free to drift.
+    """
+    if observed is None:
+        return False  # nothing echoed back is not evidence of success
+    return normalized_value(observed) == normalized_value(intended)
+
+
 def parse_decimal(raw: str, field: str) -> Decimal:
     """Money arrives as a decimal STRING, never as cents-as-int.
 

@@ -451,6 +451,98 @@ def test_importing_twice_inserts_nothing_the_second_time():
     )
 
 
+def test_reclassify_demotes_an_applied_its_own_readback_contradicts():
+    """The real case this came from: HTTP 200, bid unchanged, recorded applied.
+
+    Importing that verbatim is not neutral -- revert_change acts only on
+    `applied`, so a wrong one becomes a revertable row and reverting it would
+    push a value back that the account never moved off.
+    """
+    entry = {
+        "entry_id": "x",
+        "tool": "apply_keyword_bid",
+        "after": "0.01",
+        "observed_after": "0 CAD",
+        "outcome": "applied",
+    }
+    outcome, detail = ledger.reclassify_outcome(entry)
+    assert outcome == ledger.FAILED
+    assert ledger.RECLASSIFIED in detail
+    assert "0 CAD" in detail and "0.01" in detail
+
+
+def test_reclassify_leaves_a_genuine_applied_alone():
+    # Apple echoes money back with a currency and extra zeros; that is the
+    # same value, not a failure.
+    for observed, after in [("0.0100 CAD", "0.01"), ("PAUSED", "PAUSED")]:
+        outcome, detail = ledger.reclassify_outcome(
+            {"after": after, "observed_after": observed, "outcome": "applied"}
+        )
+        assert outcome == "applied", (observed, after)
+        assert detail == ""
+
+
+def test_reclassify_does_not_promote_anything():
+    for recorded in ("failed", "partial", "refused", None):
+        outcome, _ = ledger.reclassify_outcome(
+            {"after": "0.01", "observed_after": "0.01", "outcome": recorded}
+        )
+        assert outcome == recorded, "reclassify only ever demotes"
+
+
+def test_an_unfinished_entry_is_not_reclassified_into_a_verdict():
+    outcome, _ = ledger.reclassify_outcome(
+        {"after": "0.01", "observed_after": None, "outcome": None}
+    )
+    assert outcome is None, "a write that never reported back stays unfinished"
+
+
+def test_reclassify_is_off_by_default_on_import():
+    use_temp_db()
+    source = pathlib.Path(_TEMP_DIRS[-1].name) / "wrong.jsonl"
+    source.write_text(
+        json.dumps(
+            {
+                "entry_id": "wrong-1", "record": "intent",
+                "ts": "2026-10-08T18:59:18+00:00", "tool": "apply_keyword_bid",
+                "entity_type": "keyword", "entity_id": 1, "entity_name": "k",
+                "path": "p", "field": "bid", "before": "0", "after": "0.01",
+                "campaign_id": 1, "projected_daily_spend_delta": "0",
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "entry_id": "wrong-1", "record": "outcome",
+                "ts": "2026-10-08T18:59:18+00:00", "outcome": "applied",
+                "observed_after": "0 CAD", "detail": "", "failures": [],
+            }
+        )
+        + "\n"
+    )
+
+    plain = ledger.import_legacy_jsonl(source)
+    assert plain["reclassified"] == 0
+    assert logdb.find_entry("wrong-1")["outcome"] == "applied", (
+        "a migration must not quietly rewrite history it was not asked to"
+    )
+
+    use_temp_db()
+    corrected = ledger.import_legacy_jsonl(source, reclassify=True)
+    assert corrected["reclassified"] == 1
+    entry = logdb.find_entry("wrong-1")
+    assert entry["outcome"] == "failed"
+    assert ledger.RECLASSIFIED in entry["outcome_detail"]
+
+
+def test_legacy_backup_paths_never_returns_the_live_ledger():
+    paths = ledger.legacy_backup_paths()
+    assert ledger.LEGACY_LEDGER_PATH not in paths, (
+        "the live ledger must not be migrated twice under a second name"
+    )
+    assert all(p.name.startswith("changes.jsonl.") for p in paths), paths
+
+
 def test_the_ledger_facade_keeps_the_keys_revert_change_reads():
     use_temp_db()
     entry_id = ledger.new_entry_id()

@@ -34,6 +34,24 @@ from apple_ads_mcp.guardrails import AUDIT_DIR
 #: The retired JSONL. Read for migration, never written.
 LEGACY_LEDGER_PATH = AUDIT_DIR / "changes.jsonl"
 
+
+def legacy_backup_paths() -> list[Path]:
+    """Hand-made copies of the ledger sitting beside it, oldest name first.
+
+    `.audit/changes.jsonl.pre-readback-fix` is the one that prompted this: the
+    ledger was rewritten when the read-back check was added, and an entry that
+    the new logic would have called `failed` was dropped from the live file
+    rather than reclassified. It exists in no other place, so a migration that
+    read only `changes.jsonl` would lose a real write for good.
+    """
+    if not AUDIT_DIR.exists():
+        return []
+    return sorted(
+        path
+        for path in AUDIT_DIR.glob("changes.jsonl.*")
+        if path.is_file() and path != LEGACY_LEDGER_PATH
+    )
+
 INTENT = "intent"
 OUTCOME = "outcome"
 
@@ -175,17 +193,64 @@ _KNOWN_KEYS = {
 }
 
 
-def import_legacy_jsonl(path: Path | None = None) -> dict[str, int]:
+#: Stamped into outcome_detail when an entry's recorded outcome contradicts
+#: its own read-back, so the correction is legible rather than silent.
+RECLASSIFIED = "reclassified at migration"
+
+
+def reclassify_outcome(entry: dict[str, Any]) -> tuple[str | None, str]:
+    """An entry's honest outcome, judged by the same rule the live path uses.
+
+    Entries written before the read-back check existed could record `applied`
+    on a write Apple had quietly ignored -- a keyword-bid PUT under an
+    automated bid strategy answers HTTP 200 with the bid unchanged. Importing
+    one verbatim is not neutral: `revert_change` acts only on `applied`, so a
+    wrong `applied` becomes a revertable row, and reverting it would push a
+    value "back" that the account never moved off.
+
+    So the outcome is re-derived from the evidence already in the entry rather
+    than trusted. `landed` is imported from `client` precisely so this is the
+    same comparison, not a second copy of it.
+    """
+    from apple_ads_mcp.client import landed
+
+    outcome = entry.get("outcome")
+    detail = str(entry.get("outcome_detail") or "")
+    if outcome != APPLIED:
+        return outcome, detail
+    after = entry.get("after")
+    if after is None:
+        return outcome, detail
+    observed = entry.get("observed_after")
+    if landed(None if observed is None else str(observed), str(after)):
+        return outcome, detail
+
+    note = (
+        f"{RECLASSIFIED}: recorded 'applied', but Apple echoed {observed!r}, "
+        f"not {after!r}"
+    )
+    return FAILED, f"{detail} ({note})".strip() if detail else note
+
+
+def import_legacy_jsonl(
+    path: Path | None = None, *, reclassify: bool = False
+) -> dict[str, int]:
     """Copy the retired JSONL into the database. Idempotent.
 
     An entry_id already present is left exactly as it is rather than refreshed:
     the database is the live record now, so a re-run after new writes must not
     roll one back to its state at migration time.
+
+    `reclassify` re-derives each entry's outcome from its own read-back before
+    inserting -- see `reclassify_outcome`. Off by default, because the live
+    ledger was written by code that already did this check and a migration
+    should not quietly rewrite history it was not asked to.
     """
     conn = logdb.connect()
     folded = fold_legacy_records(path)
     inserted = 0
     skipped = 0
+    corrected = 0
     for entry in folded:
         entry_id = str(entry["entry_id"])
         existing = conn.execute(
@@ -194,6 +259,11 @@ def import_legacy_jsonl(path: Path | None = None) -> dict[str, int]:
         if existing is not None:
             skipped += 1
             continue
+        if reclassify:
+            outcome, detail = reclassify_outcome(entry)
+            if outcome != entry.get("outcome"):
+                corrected += 1
+            entry = {**entry, "outcome": outcome, "outcome_detail": detail}
         extra = {k: v for k, v in entry.items() if k not in _KNOWN_KEYS}
         conn.execute(
             "INSERT INTO changes"
@@ -226,7 +296,12 @@ def import_legacy_jsonl(path: Path | None = None) -> dict[str, int]:
             ),
         )
         inserted += 1
-    return {"inserted": inserted, "already_present": skipped, "read": len(folded)}
+    return {
+        "inserted": inserted,
+        "already_present": skipped,
+        "read": len(folded),
+        "reclassified": corrected,
+    }
 
 
 def legacy_entries(since: dt.datetime | None = None) -> list[dict[str, Any]]:

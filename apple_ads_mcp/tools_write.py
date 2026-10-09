@@ -80,6 +80,7 @@ from apple_ads_mcp.client import (
     enum_value,
     entity_path,
     format_money,
+    landed,
     money_amount,
     money_currency,
     parse_decimal,
@@ -293,20 +294,6 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
                 f"Ads UI. Re-run the preview and look at the new numbers before "
                 f"deciding again."
             )
-
-    def landed(observed: str | None, intended: str) -> bool:
-        """Did the value Apple echoed back actually become the one we asked for?
-
-        HTTP 200 DOES NOT MEAN APPLIED. Verified live 2026-10-08: a keyword-bid
-        PUT against an ad group on an automated bid strategy returns 200 with the
-        entity unchanged and nothing in the response saying so. Trusting the
-        status code reports a successful change that never happened -- and the
-        ledger then records an `after` the account never held, which makes every
-        later revert and reconcile wrong too.
-        """
-        if observed is None:
-            return False  # nothing echoed back is not evidence of success
-        return _numeric_or_text(observed) == _numeric_or_text(intended)
 
     def finish(
         entry_id: str,
@@ -2128,20 +2115,6 @@ def _default_bid_blast_radius(ad_group_id: int) -> list[str]:
         f"the default bid and are repriced by this change; {own} carry their own bid "
         f"and are NOT affected."
     ]
-
-
-def _numeric_or_text(value: str) -> str:
-    """Compare "0.01 CAD" with "0.01" by amount, and statuses by text.
-
-    Apple echoes money back with a currency and sometimes with different
-    trailing zeros ("0.0100"), so a string comparison would report a successful
-    write as a failure.
-    """
-    head = str(value).strip().split(" ")[0]
-    try:
-        return str(Decimal(head).normalize())
-    except Exception:
-        return str(value).strip().upper()
 
 
 def _status(raw: str, allowed: set[str], field: str = "status") -> str:

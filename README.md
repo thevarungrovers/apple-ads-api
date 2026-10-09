@@ -145,6 +145,7 @@ clientId and `iss` for the teamId, and they must not be "tidied" together.
 ./venv/bin/python migrate_ledger.py                # preview
 ./venv/bin/python migrate_ledger.py --apply
 ./venv/bin/python migrate_ledger.py --verify       # compare the two
+./venv/bin/python migrate_ledger.py --apply --backups   # also changes.jsonl.*
 
 # Daily campaign performance (spend, impressions, taps, installs, avg CPT)
 ./venv/bin/python fetch_campaign_report.py                     # last 7 days
@@ -543,6 +544,23 @@ back, and the case that actually needs evidence is the one that did not — a
 crash or a timeout, where the mutation may well have landed at Apple's end and
 nothing local would ever say so. A row whose `outcome` is null is the signal
 "something may have changed; go and look".
+
+**One entry was reclassified on the way in.** `.audit/` held a hand-made
+backup, `changes.jsonl.pre-readback-fix`, holding one keyword-bid write
+that existed in no other file: the ledger was rewritten when the read-back
+check was added, and that entry was dropped rather than corrected. It recorded
+`applied` while its own `observed_after` said `0 CAD` against an intended
+`0.01` — the `MAX_CONVERSIONS` case above. `migrate_ledger.py --backups`
+imports it as **`failed`**, with the reason in `outcome_detail`.
+
+Verbatim import would not have been the neutral choice. `revert_change` acts
+only on entries marked `applied`, so a wrong one becomes a *revertable* row,
+and reverting it would have pushed that keyword's bid "back" to `0` when it
+never left `0`. The reclassification uses `client.landed()` — the same
+comparison the live write path uses, which is why that function lives in
+`client` rather than inside `tools_write`. It only ever demotes, never
+promotes, and it is off by default: the live ledger was written by code that
+already ran this check.
 
 That is an INSERT followed by an UPDATE, deliberately not an upsert. In
 `ON CONFLICT ... DO UPDATE`, `excluded.col` is the value that *would* have been
