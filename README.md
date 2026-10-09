@@ -184,8 +184,8 @@ for campaign in campaigns:
 
 ## Driving this from an AI agent
 
-`apple_ads_mcp/` is a stdio **MCP server** named `apple-ads`. It exposes 36 tools:
-19 read-only, and 8 `preview_*`/`apply_*` pairs plus `revert_change`.
+`apple_ads_mcp/` is a stdio **MCP server** named `apple-ads`. It exposes 38 tools:
+19 read-only, and 9 `preview_*`/`apply_*` pairs plus `revert_change`.
 
 ### The authorization model
 
@@ -242,11 +242,20 @@ undocumented. `tests/test_tool_surface.py` pins the registered tool-name set to 
   preview, no bound and no ledger line. The read-only `budget_recommendations`
   tool shows the advice; acting on it goes through the normal preview/apply path
 
-Two tools are **deferred, not dropped**, because the API does not yet support
-them cleanly: ad group default bid (`AdGroupUpdate` has no `defaultBid` field;
-the bid appears to sit under `bidStrategy.bid`, unverified) and shared budgets
-(`shared_budgets_id_put` takes no `x_ap_context`, so there is no way to say which
-ad account an update belongs to).
+One tool is **deferred, not dropped**, because the API does not support it
+cleanly: shared budgets (`shared_budgets_id_put` takes no `x_ap_context`, so
+there is no way to say which ad account an update belongs to).
+
+The **ad group default bid** was deferred alongside it until 2026-10-09, on the
+grounds that `AdGroupUpdate` has no `defaultBid` field and the bid only appeared
+to sit under `bidStrategy.bid`. That shape is now verified against the live API —
+`GET /v1/adgroups/{id}` returns `bidStrategy: {bidStrategyType, bidStrategyGoal,
+bid}` — so `preview_ad_group_default_bid` / `apply_ad_group_default_bid` exist.
+The write echoes `bidStrategyType` and `bidStrategyGoal` back unchanged next to
+the new bid: `bidStrategy` is a nested object, and a `PUT` carrying only `bid`
+risks Apple replacing the whole object and dropping the strategy with it. This is
+the only bid a Search Tab or Search Match ad group has, since neither carries
+keywords, and the preview says so in its warnings.
 
 `destructive_hint=True` is set on exactly two tools — the campaign pause and the
 campaign budget. Pausing a keyword is reversible, and marking it destructive would
@@ -255,20 +264,21 @@ working.
 
 ### A write can be in scope and still be a no-op
 
-**Keyword bids only mean anything under a manual bid strategy.** If the ad group
-is on `MAX_CONVERSIONS` or `MAX_ENGAGEMENTS`, Apple sets the bids, and a
-keyword-bid `PUT` is accepted with **HTTP 200 and then discarded** — same status
-code, same response shape, bid unchanged, nothing anywhere saying it was ignored.
+**Bids only mean anything under a manual bid strategy.** If the ad group is on
+`MAX_CONVERSIONS` or `MAX_ENGAGEMENTS`, Apple sets the bids, and a bid `PUT` is
+accepted with **HTTP 200 and then discarded** — same status code, same response
+shape, bid unchanged, nothing anywhere saying it was ignored. This is true of the
+ad group's own default bid exactly as it is of a keyword bid.
 
-`preview_keyword_bid` therefore reads the parent ad group's `bidStrategy` and
-blocks on a `bid_is_settable` check before anyone is asked to approve a change
-that cannot land:
+`preview_keyword_bid` and `preview_ad_group_default_bid` therefore read the ad
+group's `bidStrategy` and block on a `bid_is_settable` check before anyone is
+asked to approve a change that cannot land:
 
 ```
 FAIL bid_is_settable: ad group bid strategy is MAX_CONVERSIONS -- Apple sets the
-     bids. A keyword-bid write is accepted with HTTP 200 and then IGNORED, so this
-     would report success and change nothing. Change the ad group's bid strategy
-     first, in the Apple Ads UI.
+     bids. A write to the ad group default bid is accepted with HTTP 200 and then
+     IGNORED, so this would report success and change nothing. Change the ad
+     group's bid strategy first, in the Apple Ads UI.
 ```
 
 Switching an ad group to `MANUAL_CPT` is a campaign-strategy decision, not a
@@ -371,6 +381,7 @@ Rules key on the tool name, as `mcp__apple-ads__<tool>`, in the
       "mcp__apple-ads__preview_keyword_bids_bulk",
       "mcp__apple-ads__preview_keyword_status",
       "mcp__apple-ads__preview_ad_group_status",
+      "mcp__apple-ads__preview_ad_group_default_bid",
       "mcp__apple-ads__preview_campaign_status",
       "mcp__apple-ads__preview_campaign_daily_budget",
       "mcp__apple-ads__preview_negative_keywords_add",

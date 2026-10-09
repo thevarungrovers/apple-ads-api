@@ -53,7 +53,8 @@ right now. A mistake here costs money today, not at the next deploy.
 
 HOW TO CHANGE SOMETHING
   1. Read first. get_keyword / list_keywords / keyword_report tell you what the
-     current value is and what it has been doing.
+     current value is and what it has been doing; get_ad_group / list_ad_groups
+     do the same for an ad group's own default bid.
   2. Call the matching preview_* tool. It returns a readable before/after, the
      campaign and ad group the entity sits in, whether that campaign is serving
      today, and an upper bound on the daily spend change.
