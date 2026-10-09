@@ -23,11 +23,19 @@ NOT EXPOSED, deliberately:
     and deletion would be the only irreversible operation in scope.
   - apply_daily_budget_recommendations -- one call that moves real money with no
     preview, no bound and no ledger line.
-  - ad group default bid -- AdGroupUpdate carries no defaultBid field. The bid
-    appears to live under bidStrategy.bid, which is unverified against the live
-    API, so the tool is DEFERRED rather than guessed at.
   - shared budgets -- shared_budgets_id_put takes no x_ap_context argument at
     all, so there is no way to say which ad account an update belongs to.
+
+THE AD GROUP DEFAULT BID was on that list until 2026-10-09, on the grounds that
+`AdGroupUpdate` has no `defaultBid` field and the bid only *appeared* to live at
+`bidStrategy.bid`. Verified against the live API on that date: GET /v1/adgroups/
+{id} returns `bidStrategy: {bidStrategyType, bidStrategyGoal, bid}`, and
+`AdGroupUpdate.bid_strategy` mirrors it, so the pair is now exposed. The write
+sends bidStrategyType and bidStrategyGoal back unchanged alongside the new bid,
+because bidStrategy is a NESTED object: a PUT carrying only `bid` risks Apple
+replacing the whole object and dropping the strategy with it, which would move
+the ad group onto a different bidding model nobody approved. It is the only bid
+a Search Tab or Search Match ad group has, since neither carries keywords.
 
 Enforcement is structural: there is no `request(method, path, body)` passthrough,
 so an unregistered operation is unreachable rather than merely undocumented.
@@ -43,6 +51,9 @@ from typing import Annotated, Any
 from apple_ads_platform import (
     AdGroupStatus,
     AdGroupUpdate,
+    BidStrategyGoal,
+    BidStrategyType,
+    BidStrategyUpdate,
     BulkKeywordUpdate,
     BulkNegativeKeywordCreate,
     CampaignStatus,
@@ -311,6 +322,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         observed_after: str | None,
         projected: Decimal,
         note: str = "",
+        failure_note: str = "",
     ) -> ApplyResult:
         applied = landed(observed_after, after)
         ledger.write_outcome(
@@ -350,11 +362,14 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
                 (note or f"Undo with revert_change(entry_id='{entry_id}').")
                 if applied
                 else (
-                    "NOT APPLIED. Apple returned success and left the value alone. "
-                    "For a keyword bid this usually means the ad group is on an "
-                    "automated bid strategy, where Apple sets the bids and a "
-                    "keyword bid is ignored. Recorded as failed, so revert_change "
-                    "will refuse it -- there is nothing to undo."
+                    failure_note
+                    or (
+                        "NOT APPLIED. Apple returned success and left the value alone. "
+                        "For a keyword bid this usually means the ad group is on an "
+                        "automated bid strategy, where Apple sets the bids and a "
+                        "keyword bid is ignored. Recorded as failed, so revert_change "
+                        "will refuse it -- there is nothing to undo."
+                    )
                 )
             ),
         )
@@ -972,6 +987,174 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             after=item["after"],
             observed_after=enum_value(getattr(updated, "status", None)) if updated else None,
             projected=pending.projected_delta,
+        )
+
+    # --- ad group default bid ------------------------------------------------
+
+    @mcp.tool(title="Preview an ad group default bid change (no write)", annotations=PREVIEW)
+    def preview_ad_group_default_bid(
+        ad_group_id: Annotated[int, Field(description="Apple ad group id")],
+        new_bid: Annotated[
+            str,
+            Field(
+                description='New default bid as a decimal string in major units, e.g. "3.00"'
+            ),
+        ],
+    ) -> ChangePreview:
+        """Show what changing an ad group's default bid would do. Writes nothing.
+
+        The default bid is what every keyword in the ad group pays unless it
+        carries a bid of its own -- and in a Search Tab or Search Match ad group,
+        which has no keywords at all, it is the ONLY bid. The blast radius is
+        therefore wider than a keyword bid, so the warnings say how many keywords
+        this actually reprices and how many override it.
+        """
+        after_num = parse_decimal(new_bid, "new_bid")
+        ad_group = client.get_ad_group(ad_group_id)
+        campaign = client.get_campaign(ad_group.campaign_id) if ad_group.campaign_id else None
+        current_bid = _ad_group_bid(ad_group)
+        before_num = money_amount(current_bid)
+        # An ad group with no bid set yet has no currency to borrow, so fall back
+        # to the campaign's budget currency rather than sending a null one.
+        currency = money_currency(current_bid) or _campaign_currency(campaign)
+
+        spend, taps, impressions, installs, metrics_error = entity_metrics_7d(
+            "apps_ad_group_reports", "adGroupId", ad_group_id, ad_group.campaign_id
+        )
+        projected = project_bid_change(taps, before_num, after_num)
+
+        checks = [
+            check_campaign_in_scope(state.limits, ad_group.campaign_id),
+            check_currency(state.limits, currency),
+            check_ceiling("max_bid", after_num, state.limits.max_bid, currency or ""),
+            check_pct_increase(
+                "max_bid_increase_pct", before_num, after_num, state.limits.max_bid_increase_pct
+            ),
+            check_known_status("ad_group_status_known", enum_value(ad_group.status)),
+            check_bid_settable(_bid_strategy_type(ad_group), "ad group default bid"),
+        ]
+        entity_serving = enum_value(ad_group.display_status)
+        warnings = serving_warning(entity_serving, "ad group") + metrics_warning(metrics_error)
+        # No "the ad group is paused" line here: serving_warning() already says it
+        # from display_status. The keyword tools add one because a keyword's own
+        # status is genuinely separate from its ad group's serving status; an ad
+        # group's is not, so a second line would be the same fact twice.
+        warnings.extend(_default_bid_blast_radius(ad_group_id))
+        if before_num is None:
+            warnings.append(
+                "This ad group reports no default bid today, so there is no previous "
+                "value to put back and revert_change will refuse this entry. Note the "
+                "current state somewhere before approving."
+            )
+
+        return build_preview(
+            tool="apply_ad_group_default_bid",
+            entity_type="ad_group",
+            entity_id=ad_group_id,
+            entity_name=ad_group.name,
+            path=entity_path(campaign, ad_group),
+            field="default_bid",
+            before=format_money(current_bid),
+            after=f"{after_num} {currency or ''}".strip(),
+            before_num=before_num,
+            after_num=after_num,
+            campaign=campaign,
+            entity_serving=entity_serving,
+            metrics=metrics_block(spend, taps, impressions, installs),
+            projected=projected,
+            checks=checks,
+            warnings=warnings,
+            note=(
+                "The default bid lives at bidStrategy.bid; the write sends this ad "
+                "group's existing bidStrategyType and bidStrategyGoal back unchanged "
+                "alongside it, so the bidding model does not move. "
+                "projected_daily_spend_delta is an UPPER BOUND: it assumes tap volume "
+                "is unchanged, which a bid change is precisely intended to alter. Use "
+                "it to catch a 100x typo, not as a forecast."
+            ),
+            item={
+                "ad_group_id": ad_group_id,
+                "before": str(before_num) if before_num is not None else None,
+                "after": str(after_num),
+                "currency": currency,
+                "name": ad_group.name,
+                "campaign_id": ad_group.campaign_id,
+                "path": entity_path(campaign, ad_group),
+                "bid_strategy_type": _bid_strategy_type(ad_group),
+                "bid_strategy_goal": _bid_strategy_goal(ad_group),
+            },
+        )
+
+    @mcp.tool(
+        title="Apply an ad group default bid change (CHANGES WHAT THIS AD GROUP COSTS)",
+        annotations=APPLY,
+    )
+    def apply_ad_group_default_bid(
+        preview_token: Annotated[
+            str, Field(description="The token returned by preview_ad_group_default_bid")
+        ],
+    ) -> ApplyResult:
+        """Write the ad group default bid the matching preview described. Live account."""
+        pending = state.previews.take(preview_token, "apply_ad_group_default_bid")
+        item = pending.items[0]
+        begin_apply(pending, pending.projected_delta)
+
+        ad_group = client.get_ad_group(item["ad_group_id"])
+        current = money_amount(_ad_group_bid(ad_group))
+        confirm_unchanged(
+            str(current) if current is not None else "none",
+            item["before"] if item["before"] is not None else "none",
+            f"ad group {item['ad_group_id']} default bid",
+        )
+
+        entry_id = ledger.new_entry_id()
+        ledger.write_intent(
+            entry_id,
+            tool="apply_ad_group_default_bid",
+            entity_type="ad_group",
+            entity_id=item["ad_group_id"],
+            entity_name=item["name"],
+            path=item["path"],
+            field="default_bid",
+            before=item["before"],
+            after=item["after"],
+            campaign_id=item["campaign_id"],
+            projected_daily_spend_delta=str(pending.projected_delta),
+        )
+        response = run_write(
+            entry_id,
+            "adgroups_id_put",
+            id=str(item["ad_group_id"]),
+            x_ap_context=context_header(),
+            ad_group_update=AdGroupUpdate(
+                bid_strategy=_bid_strategy_update(
+                    item["after"],
+                    item["currency"],
+                    item.get("bid_strategy_type"),
+                    item.get("bid_strategy_goal"),
+                )
+            ),
+        )
+        updated = unwrap(response, "ad group update")
+        return finish(
+            entry_id,
+            tool="apply_ad_group_default_bid",
+            entity_type="ad_group",
+            entity_id=item["ad_group_id"],
+            entity_name=item["name"],
+            path=item["path"],
+            field="default_bid",
+            before=item["before"] or "none",
+            after=item["after"],
+            observed_after=format_money(_ad_group_bid(updated)) if updated else None,
+            projected=pending.projected_delta,
+            failure_note=(
+                "NOT APPLIED. Apple returned success and left the default bid alone. "
+                "That usually means the ad group is on an automated bid strategy "
+                "(MAX_CONVERSIONS / MAX_ENGAGEMENTS), where Apple sets the bids and a "
+                "written one is accepted and ignored. Recorded as failed, so "
+                "revert_change will refuse it -- there is nothing to undo."
+            ),
         )
 
     # --- campaign status -----------------------------------------------------
@@ -1641,6 +1824,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             "apply_keyword_bid": _revert_keyword_bid,
             "apply_keyword_status": _revert_keyword_status,
             "apply_ad_group_status": _revert_ad_group_status,
+            "apply_ad_group_default_bid": _revert_ad_group_default_bid,
             "apply_campaign_status": _revert_campaign_status,
             "apply_campaign_daily_budget": _revert_campaign_budget,
             "apply_negative_keyword_pause": _revert_negative_status,
@@ -1752,6 +1936,36 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             new_entry_id, entry, before, after, enum_value(getattr(updated, "status", None))
         )
 
+    def _revert_ad_group_default_bid(entry, before, after) -> ApplyResult:
+        ad_group_id = int(entry["entity_id"])
+        ad_group = client.get_ad_group(ad_group_id)
+        current_bid = _ad_group_bid(ad_group)
+        current = money_amount(current_bid)
+        confirm_unchanged(
+            str(current) if current is not None else "none",
+            str(after),
+            f"ad group {ad_group_id} default bid",
+        )
+        new_entry_id = _begin_revert(entry, before, after, "default_bid")
+        response = run_write(
+            new_entry_id,
+            "adgroups_id_put",
+            id=str(ad_group_id),
+            x_ap_context=context_header(),
+            ad_group_update=AdGroupUpdate(
+                bid_strategy=_bid_strategy_update(
+                    before,
+                    money_currency(current_bid),
+                    _bid_strategy_type(ad_group),
+                    _bid_strategy_goal(ad_group),
+                )
+            ),
+        )
+        updated = unwrap(response, "ad group update")
+        return _revert_result(
+            new_entry_id, entry, before, after, format_money(_ad_group_bid(updated))
+        )
+
     def _revert_campaign_status(entry, before, after) -> ApplyResult:
         campaign_id = int(entry["entity_id"])
         campaign = client.get_campaign(campaign_id)
@@ -1828,6 +2042,92 @@ def _bid_strategy_type(ad_group: Any) -> str | None:
     if strategy is None:
         return None
     return enum_value(getattr(strategy, "bid_strategy_type", None))
+
+
+def _bid_strategy_goal(ad_group: Any) -> str | None:
+    """TAP / INSTALL / ... off an ad group, or None if unreadable."""
+    strategy = getattr(ad_group, "bid_strategy", None)
+    if strategy is None:
+        return None
+    return enum_value(getattr(strategy, "bid_strategy_goal", None))
+
+
+def _ad_group_bid(ad_group: Any) -> Any:
+    """The `Money` at `bidStrategy.bid`, or None.
+
+    There is no `defaultBid` field on an ad group or on AdGroupUpdate; the bid
+    lives inside the nested bidStrategy object. Verified against the live API
+    2026-10-09, and `tools_read._ad_group_row` reads it from the same place.
+    """
+    strategy = getattr(ad_group, "bid_strategy", None)
+    if strategy is None:
+        return None
+    return getattr(strategy, "bid", None)
+
+
+def _bid_strategy_update(
+    amount: str,
+    currency: str | None,
+    strategy_type: str | None,
+    strategy_goal: str | None,
+) -> BidStrategyUpdate:
+    """The new bid, with the ad group's existing strategy echoed back unchanged.
+
+    `bidStrategy` is a NESTED object, and Apple's PUT merges at the top level.
+    Sending `{"bidStrategy": {"bid": ...}}` alone therefore risks replacing the
+    whole object and dropping bidStrategyType with it -- which would move the ad
+    group onto a different bidding model, a far larger change than the one in the
+    preview. Echoing both fields back makes the write a no-op for everything
+    except the number a human approved.
+    """
+    kwargs: dict[str, Any] = {"bid": to_money(amount, currency)}
+    if strategy_type:
+        kwargs["bid_strategy_type"] = BidStrategyType(strategy_type)
+    if strategy_goal:
+        kwargs["bid_strategy_goal"] = BidStrategyGoal(strategy_goal)
+    return BidStrategyUpdate(**kwargs)
+
+
+def _campaign_currency(campaign: Any) -> str | None:
+    """The campaign's budget currency, for an ad group that has no bid yet."""
+    budget = getattr(campaign, "daily_budget", None) if campaign is not None else None
+    return money_currency(getattr(budget, "value", None)) if budget is not None else None
+
+
+def _default_bid_blast_radius(ad_group_id: int) -> list[str]:
+    """How many keywords this default bid actually governs.
+
+    A keyword carrying a bid of its own ignores the ad group default, so "this
+    reprices 40 keywords" would be false where 38 are explicitly bid. Degrades to
+    a warning that says so rather than failing the preview: the rest of the
+    preview is still worth reading if this one query fails.
+    """
+    from apple_ads_mcp.client import eq_filter, query
+
+    try:
+        response = call(
+            "keywords_query_post",
+            x_ap_context=context_header(),
+            query_request=query(page_size=1000, filters=[eq_filter("adGroupId", ad_group_id)]),
+        )
+        rows = [k for k in (unwrap(response, "keywords") or []) if not k.deleted]
+    except ToolError as exc:
+        return [
+            "Could not list this ad group's keywords, so this preview cannot say how "
+            f"many of them the default bid governs: {str(exc)[:160]}"
+        ]
+    if not rows:
+        return [
+            "This ad group has NO keywords, so the default bid is the only bid it "
+            "has -- every impression it wins is priced off this one number. That is "
+            "normal for a Search Tab or Search Match ad group."
+        ]
+    own = sum(1 for k in rows if money_amount(getattr(k, "bid", None)) is not None)
+    return [
+        f"This ad group has {len(rows)} keyword(s): {len(rows) - own} fall back to "
+        f"the default bid and are repriced by this change; {own} carry their own bid "
+        f"and are NOT affected."
+    ]
 
 
 def _numeric_or_text(value: str) -> str:
