@@ -1,8 +1,8 @@
 """Re-exec the current script under venv/ when it was launched with a bare `python3`.
 
-The dependencies (PyJWT, cryptography, requests, python-dotenv) live in this
-directory's venv, so `python3 test_connection.py` would otherwise die with
-`ModuleNotFoundError: No module named 'cryptography'`. Rather than make everyone
+The dependencies (apple-ads-platform, PyJWT, cryptography, python-dotenv) live
+in this directory's venv, so `python3 test_platform_connection.py` would
+otherwise die with `ModuleNotFoundError: No module named 'cryptography'`. Rather than make everyone
 remember the ./venv/bin/python prefix, the entry-point scripts call ensure_venv()
 before importing anything third-party.
 
@@ -18,7 +18,7 @@ import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 VENV_PYTHON = HERE / "venv" / "bin" / "python"
-REQUIRED_MODULES = ("jwt", "cryptography", "requests", "dotenv")
+REQUIRED_MODULES = ("jwt", "cryptography", "dotenv", "apple_ads_platform")
 REENTRY_GUARD = "APPLE_ADS_VENV_REEXEC"
 
 

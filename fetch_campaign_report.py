@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pull daily campaign performance from Apple Search Ads and print/save it.
+"""Pull daily campaign performance from the Apple Ads Platform API and print/save it.
 
 Column names mirror the Performance CSV that marketing exports by hand, so this
 output reconciles against apple_ads_daily row for row:
@@ -8,10 +8,13 @@ output reconciles against apple_ads_daily row for row:
     New Downloads (Total) -> totalNewDownloads
     Redownloads (Total)   -> totalRedownloads
 
-Apple's v5 field names are NOT the bare `installs` / `newDownloads` /
-`redownloads` that the v3 API used; those keys are simply absent from a v5
-response and silently read as empty. Verified against the live response on
-2026-08-28.
+Install metrics are named `totalInstalls` / `totalNewDownloads` /
+`totalRedownloads`. The bare `installs` / `newDownloads` / `redownloads` keys the
+v3 API used do not exist, and Apple returns absent keys silently rather than
+erroring, so a wrong name reads as an empty column rather than as a failure.
+
+Ported from v5 to the Platform API on 2026-10-09 and diffed against the v5
+output for the same window before v5 was removed -- the two agreed row for row.
 
   ./venv/bin/python fetch_campaign_report.py                    # last 7 days
   ./venv/bin/python fetch_campaign_report.py --days 30
@@ -24,6 +27,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import json
 import pathlib
 import sys
 
@@ -31,11 +35,10 @@ from _bootstrap import ensure_venv
 
 ensure_venv()  # re-exec under venv/ if launched with a bare `python3`
 
-import requests
+from apple_ads_platform import AppsOptions, AppsReportingRequest, TimeRange
 
-from apple_ads_client import AppleAdsClient, AppleAdsError
-from generate_client_secret import ConfigError
-from get_token import TokenError
+from apple_ads_mcp.client import REPORT_TIMEOUT, call, context_header
+from apple_ads_mcp.config import ConfigError, resolve_ad_account_id
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPORTS_DIR = HERE / "reports"
@@ -63,16 +66,64 @@ def amount(bucket: dict, key: str) -> str:
     return (bucket.get(key) or {}).get("amount", "")
 
 
-def flatten(report: dict) -> list[dict]:
-    """Turn Apple's nested row/granularity response into flat daily records."""
-    response = (report.get("data") or {}).get("reportingDataResponse") or {}
-    records = []
+def fetch(start: dt.date, end: dt.date, granularity: str) -> dict:
+    """POST /reports/apps/campaigns, returned as raw JSON.
 
-    for row in response.get("row") or []:
+    Read through `*_without_preload_content` rather than the SDK's response
+    models on purpose: apple-ads-platform 1.109.0 generates some reporting enums
+    that the live API contradicts, and its validators raise instead of falling
+    back, so a correct response can fail to deserialize client-side. This script
+    flattens the payload anyway, so the models buy nothing.
+    """
+    response = call(
+        "apps_campaign_reports_without_preload_content",
+        x_ap_context=context_header(),
+        apps_reporting_request=AppsReportingRequest(
+            time_range=TimeRange(start=start, end=end, granularity=granularity),
+            options=AppsOptions(include_rows=["GRAND_TOTAL"]),
+        ),
+        _request_timeout=REPORT_TIMEOUT,
+    )
+    payload = json.loads(response.data.decode("utf-8"))
+    if payload.get("error"):
+        raise ConfigError(f"Apple rejected the report request: {payload['error']}")
+    return payload
+
+
+def _report_currency(report: dict) -> str:
+    """The first currency anywhere in the response.
+
+    Needed because on a ZERO-DELIVERY day the Platform API omits `localSpend`
+    entirely, where v5 returned {"amount": "0", "currency": "CAD"}. Reading the
+    absent key would blank both columns and make a quiet day look like missing
+    data rather than a day with no spend.
+    """
+    for row in (report.get("result") or {}).get("rows") or []:
+        for bucket in (row.get("granularMetrics") or []) + [row.get("totalMetrics")]:
+            currency = ((bucket or {}).get("localSpend") or {}).get("currency")
+            if currency:
+                return currency
+    return ""
+
+
+def flatten(report: dict) -> list[dict]:
+    """Turn Apple's nested row/granularity response into flat daily records.
+
+    Platform API names differ from v5's in four places and are otherwise
+    identical: `granularMetrics` (was `granularity`), `totalMetrics` (was
+    `total`), `cpt` (was `avgCPT`) and `cpm` (was `avgCPM`). The campaign id and
+    name also move from metadata.campaignId/campaignName to metadata.id/name.
+    """
+    records = []
+    fallback_currency = _report_currency(report)
+
+    for row in (report.get("result") or {}).get("rows") or []:
         metadata = row.get("metadata") or {}
-        # With granularity set, metrics live under `granularity`; without it a
-        # single aggregate sits under `total` instead.
-        buckets = row.get("granularity") or ([row.get("total")] if row.get("total") else [])
+        # With a granularity set, metrics live under `granularMetrics`; without
+        # one a single aggregate sits under `totalMetrics` instead.
+        buckets = row.get("granularMetrics") or (
+            [row.get("totalMetrics")] if row.get("totalMetrics") else []
+        )
 
         for bucket in buckets:
             if not bucket:
@@ -80,17 +131,20 @@ def flatten(report: dict) -> list[dict]:
             spend = bucket.get("localSpend") or {}
             records.append({
                 "date": bucket.get("date", ""),
-                "campaign_id": metadata.get("campaignId", ""),
-                "campaign_name": metadata.get("campaignName", ""),
-                "currency": spend.get("currency", ""),
-                "spend": spend.get("amount", ""),
+                "campaign_id": metadata.get("id", ""),
+                "campaign_name": metadata.get("name", ""),
+                # A day with no delivery carries no localSpend at all, so these
+                # two are defaulted rather than read as blank -- "0 CAD spent"
+                # and "no data" are different claims.
+                "currency": spend.get("currency") or fallback_currency,
+                "spend": spend.get("amount", "0"),
                 "impressions": bucket.get("impressions", 0),
                 "taps": bucket.get("taps", 0),
                 # ttr and the install rates are raw RATIOS here (0.0042), not the
                 # percentages the CSV export shows. Do not multiply by 100 before
                 # comparing the two, and do not sum them -- re-derive from totals.
                 "ttr": bucket.get("ttr", ""),
-                "avg_cpt": amount(bucket, "avgCPT"),
+                "avg_cpt": amount(bucket, "cpt"),
                 "installs_total": bucket.get("totalInstalls", 0),
                 "new_downloads_total": bucket.get("totalNewDownloads", 0),
                 "redownloads_total": bucket.get("totalRedownloads", 0),
@@ -99,7 +153,7 @@ def flatten(report: dict) -> list[dict]:
                 "tap_installs": bucket.get("tapInstalls", 0),
                 "view_installs": bucket.get("viewInstalls", 0),
                 "avg_cpi_total": amount(bucket, "totalAvgCPI"),
-                "avg_cpm": amount(bucket, "avgCPM"),
+                "avg_cpm": amount(bucket, "cpm"),
                 "install_rate_total": bucket.get("totalInstallRate", ""),
             })
 
@@ -156,20 +210,18 @@ def main() -> int:
         return 1
 
     try:
-        client = AppleAdsClient()
-        report = client.campaign_report(
-            start.isoformat(), end.isoformat(), granularity=args.granularity
-        )
-    except (ConfigError, TokenError, AppleAdsError) as exc:
+        ad_account = resolve_ad_account_id()
+        report = fetch(start, end, args.granularity)
+    except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    except requests.RequestException as exc:
-        print(f"error: network failure calling Apple: {exc}", file=sys.stderr)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
 
     records = flatten(report)
-    print(f"Apple Search Ads — campaigns, {start} to {end} ({args.granularity}), "
-          f"org {client.org_id}\n")
+    print(f"Apple Ads — campaigns, {start} to {end} ({args.granularity}), "
+          f"ad account {ad_account}\n")
 
     if not records:
         print("No rows returned. Apple only reports days with delivery, so an empty "

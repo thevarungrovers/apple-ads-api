@@ -15,7 +15,7 @@ Apple's end and nothing local would ever say so. An `intent` with no `outcome`
 is exactly the signal "something may have changed; go and look".
 
 Appends are `open(path, "a")` plus a single `json.dumps(...) + "\\n"` under
-`fcntl.flock`, so a concurrent `apple_ads_client.py --apply` run writing to the
+`fcntl.flock`, so a concurrent `apple_ads_cli.py --apply` run writing to the
 same file cannot interleave half a record into the middle of ours.
 """
 

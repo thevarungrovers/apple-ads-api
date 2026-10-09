@@ -4,36 +4,41 @@ OAuth (client-credentials) access to the Apple Ads account: campaign performance
 pulled programmatically instead of exported by hand, plus an **MCP server** so an
 AI agent can read the account and propose changes a human approves one at a time.
 
-## Two APIs, one repo
+## One API
 
-Apple is replacing the v5 Campaign Management API with the Ads Platform API. Both
-are here, against the same credentials, for as long as the old one lasts.
+Everything talks to the **Apple Ads Platform API** at `https://api.ads.apple.com/v1`
+through Apple's official `apple-ads-platform` client.
 
-| | v5 — `api.searchads.apple.com/api/v5` | Platform API — `api.ads.apple.com/v1` |
-| --- | --- | --- |
-| Status | **sunsets 2027-01-26** | current |
-| Client | hand-rolled `requests` (`apple_ads_client.py`) | Apple's `apple-ads-platform` SDK |
-| Context header | `X-AP-Context: orgId=<id>` | `X-AP-Context: adAccountId=<id>;` *(trailing semicolon)* |
-| Addressed by | `APPLE_ADS_ORG_ID` | `APPLE_ADS_AD_ACCOUNT_ID` — **a different value** |
-| Used by | `test_connection.py`, `fetch_campaign_report.py`, `fetch_ad_structure.py`, `resolve_attribution.py`, the break-glass CLI | `test_platform_connection.py`, `apple_ads_mcp/` |
+The older Campaign Management **v5** API (`api.searchads.apple.com/api/v5`)
+sunsets on **2027-01-26**, and this repo used to carry a hand-rolled client for
+it alongside the new one. That client was retired on 2026-10-09, while v5 was
+still answering — deliberately, because **a port can only be verified while both
+APIs still work**. Each script was diffed against its v5 output on the same
+window before the old one was deleted:
 
-**Auth is identical** between them — same ES256 JWT, same token endpoint, same
-`private-key.pem`, same three credentials. Only the host and the context header
-differ.
+- `fetch_campaign_report.py` — identical for every complete day. The only rows
+  that differed were *today's*, by one impression, because the day was still
+  accumulating; re-running showed it climbing 123 → 124 → 125 while spend, taps
+  and installs held.
+- `fetch_ad_structure.py` — same 1 campaign, 5 ad groups and 34 keyword ids. The
+  32 field differences were all vocabulary, not data (below).
 
-The v5 scripts are deliberately left untouched and unshimmed. The migration gate
-is read parity: `campaign_report` from the MCP server and
-`fetch_campaign_report.py` return the same spend, taps, installs and CPT for the
-same window (verified 2026-10-08 — 1,375.33 CAD, 251 taps, 303 installs, CPT
-5.4794, identical to four decimal places). Once that has held for a while, the v5
-scripts can move over; until then, two clients is the cheaper risk.
+A port done after the sunset would have been one nobody could check.
 
-> **The client secret expires 180 days after it is generated.** That is Apple's
-> hard maximum and there is no renewal, no warning, and no grace period. When it
-> lapses, the token endpoint returns a bare `invalid_client` that looks exactly
-> like a wrong-credentials bug. See [Rotation and expiry](#rotation-and-expiry).
+### Two renames to know about
 
----
+The Platform API uses different words for the same states, which matters if you
+compare a new `ad_structure.json` against one saved before the migration:
+
+| v5 | Platform API |
+| --- | --- |
+| keyword `status: ACTIVE` | `status: ENABLED` |
+| `servingStatus: NOT_RUNNING` | `displayStatus: PAUSED` |
+| `supplySources`, `countriesOrRegions` | `targeting.supplyPlacement`, `targeting.countryOrRegion` — singular, each `{include: [...]}` |
+| `X-AP-Context: orgId=<id>` | `X-AP-Context: adAccountId=<id>;` — **different value**, trailing semicolon |
+
+Nothing in this repo compares those strings, so the rename is cosmetic here. It
+would not be in anything downstream that does.
 
 ## How the authentication works
 
@@ -44,23 +49,22 @@ source of "it worked yesterday" problems.
 | #   | What                                                                                 | Lifetime                   | Handled by                               |
 | --- | ------------------------------------------------------------------------------------ | -------------------------- | ---------------------------------------- |
 | 1   | **Client secret** — a self-signed ES256 JWT, produced locally from `private-key.pem` | **180 days** (Apple's cap) | `generate_client_secret.py`              |
-| 2   | **Access token** — obtained by POSTing that secret to Apple                          | **3600 s**                 | `get_token.py` (cached + auto-refreshed) |
-| 3   | **API call** — `Authorization: Bearer …` + a context header                          | per request                | `apple_ads_client.py` (v5), `apple_ads_mcp/client.py` (Platform) |
+| 2   | **Access token** — obtained by POSTing that secret to Apple                          | **3600 s**                 | the SDK's `TokenManager` (in-process, auto-refreshed) |
+| 3   | **API call** — `Authorization: Bearer …` + `X-AP-Context: adAccountId=<id>;`          | per request                | `apple_ads_mcp/client.py` |
 
 
-The context header is the one part that differs between the two APIs: v5 wants
-`orgId=<id>`, the Platform API wants `adAccountId=<id>;` with a trailing
-semicolon. A wrong format is a 401/403 on every call that carries it, while
-`/me/acls` keeps working — that is the one endpoint taking no context at all,
-which is why both health checks call it first.
+The context header is `adAccountId=<id>;` — with the trailing semicolon, and
+with the **ad account id, not the org id**. A wrong format is a 401/403 on every
+call that carries it, while `/acls` keeps working: that is the one endpoint
+taking no context at all, which is why the health check calls it first.
 
 Apple never sees the private key. It verifies our signature against the public
 key registered in the Apple Ads UI.
 
 The client secret is deliberately **not** stored on disk: it is cheap to
 re-derive from `private-key.pem` plus the three values in `.env`, so
-`get_token.py` signs one in memory whenever it needs it. Only the short-lived
-access token is cached (`.token_cache.json`, mode 600).
+the SDK re-derives it in memory on every token fetch, so a long-running server
+can never age out of its own secret. Nothing is cached on disk.
 
 ---
 
@@ -86,7 +90,7 @@ cp .env.example .env
 $EDITOR .env          # paste clientId, teamId, keyId, orgId
 
 # 3. Verify the v5 chain
-./venv/bin/python test_connection.py
+./venv/bin/python test_platform_connection.py
 
 # 4. Verify the Platform API chain AND discover your adAccountId.
 #    Step 5 prints the APPLE_ADS_AD_ACCOUNT_ID line to paste into .env.
@@ -113,7 +117,7 @@ the one the packages went into.
 `APPLE_ADS_AD_ACCOUNT_ID` is **not** the org id. Apple returns them as two
 separate fields (`id` and `orgId`) on the same ACL record, and the Platform API
 wants the former. Do not read it off the UI and do not guess it — step 5 of
-`test_platform_connection.py` reads it back from `GET /me/acls` and prints the
+`test_platform_connection.py` reads it back from `GET /acls` and prints the
 line to paste into `.env`. Writing to the wrong account is not an error Apple
 will catch for you.
 
@@ -133,9 +137,8 @@ clientId and `iss` for the teamId, and they must not be "tidied" together.
 ## Usage
 
 ```bash
-# End-to-end health checks, one rung at a time
-./venv/bin/python test_connection.py            # v5 chain
-./venv/bin/python test_platform_connection.py   # Platform API chain + adAccountId
+# End-to-end health check, one rung at a time
+./venv/bin/python test_platform_connection.py   # files -> key -> secret -> token -> adAccountId -> API
 
 # The MCP server's own surface check — no network, no Apple
 ./venv/bin/python tests/test_tool_surface.py
@@ -155,31 +158,30 @@ clientId and `iss` for the teamId, and they must not be "tidied" together.
 ./venv/bin/python resolve_attribution.py rows.csv --by-ad-group
 ./venv/bin/python resolve_attribution.py rows.csv --csv reports/out.csv
 
-# Any GET endpoint, raw JSON
-python3 apple_ads_client.py acls
-python3 apple_ads_client.py campaigns
+# Any endpoint, raw JSON (see break-glass below)
+./venv/bin/python apple_ads_cli.py acls
+./venv/bin/python apple_ads_cli.py campaigns/query -X POST -d '{}'
 
-# Credential/token inspection (neither prints a secret unless asked)
-python3 generate_client_secret.py          # shows exp + days remaining
-python3 get_token.py --status              # cache state, no network call
-python3 get_token.py --force               # force a refresh
-python3 get_token.py --clear               # drop the cached token
+# How many days before the client secret expires
+./venv/bin/python generate_client_secret.py
 ```
 
-From Python:
+`--print` on `generate_client_secret.py` emits the raw JWT. It is off by default
+so a credential does not land in terminal scrollback or shell history by
+accident.
+
+From Python, reuse the server's own client layer rather than writing a second one:
 
 ```python
-from apple_ads_client import AppleAdsClient
+from apple_ads_mcp.client import call, context_header, unwrap, query
 
-client = AppleAdsClient()                 # orgId comes from .env
-print(client.acls())
-print(client.campaigns())
-print(client.campaign_report("2026-08-01", "2026-08-28"))
+campaigns = unwrap(
+    call("campaigns_query_post", x_ap_context=context_header(), query_request=query()),
+    "campaigns",
+)
+for campaign in campaigns:
+    print(campaign.id, campaign.name, campaign.status)
 ```
-
-`--print` on `generate_client_secret.py` / `get_token.py` emits the raw
-credential. It is off by default so secrets do not land in terminal scrollback
-or shell history by accident.
 
 ---
 
@@ -472,7 +474,7 @@ and is never cached.
 ### The ledger
 
 `.audit/changes.jsonl`, mode 600, `.audit/` gitignored because the entries carry
-real entity ids. Append-only, under `flock`, so a concurrent `apple_ads_client.py`
+real entity ids. Append-only, under `flock`, so a concurrent `apple_ads_cli.py`
 run cannot interleave.
 
 **Two lines per write**, linked by `entry_id`: an `intent` written *before* the
@@ -518,15 +520,17 @@ write.
 
 ## Writing to the account from the CLI (break-glass)
 
-The MCP server above is the normal path. This CLI stays as the deliberate
-break-glass route for anything the MCP surface refuses to expose — creating a
-campaign, deleting a negative keyword, any endpoint with no tool. It is v5, it is
-driven by a human typing flags, and it has none of the preview, ledger or
-guardrail machinery.
+The MCP server above is the normal path. `apple_ads_cli.py` is the other half of
+that bargain: the server exposes a deliberately narrow surface, so when you need
+something it refuses to expose — create a campaign, delete a negative keyword,
+call an endpoint nobody has wrapped — you reach for this instead of widening the
+agent's surface.
 
-The client reads by default and refuses to write. A mutating call on a client
-that was not opened for writes raises `WriteBlocked` **before the request leaves
-the process**, so nothing reaches Apple.
+What makes that safe is **who is driving**. The MCP server is reachable by an
+agent and has to assume the caller may be wrong, which is why it has preview
+tokens, guardrails and a ledger. This is a shell command: it lives in a human's
+scrollback, under a human's hands, and its guard is the one an agent could
+trivially defeat — a flag.
 
 That default matters more here than on most APIs: Apple runs **no sandbox** for
 campaign management. There is no test org and no staging account. The only thing
@@ -543,41 +547,44 @@ Two flags gate a write, and they answer different questions:
 
 ```bash
 # Dry run: exactly what would be sent, no network call
-python3 apple_ads_client.py campaigns -X POST -d @new-campaign.json
+./venv/bin/python apple_ads_cli.py campaigns -X POST -d @new-campaign.json
 
 # Send it
-python3 apple_ads_client.py campaigns -X POST -d @new-campaign.json --apply
+./venv/bin/python apple_ads_cli.py campaigns -X POST -d @new-campaign.json --apply
 
 # Pause a campaign that is currently serving — needs the second flag
-python3 apple_ads_client.py campaigns/1234567890 -X PUT \
+./venv/bin/python apple_ads_cli.py campaigns/1234567890 -X PUT \
     -d '{"status":"PAUSED"}' --apply --confirm-live
 ```
 
 Before applying a write whose path names an existing campaign, the CLI reads that
-campaign back and refuses if its `servingStatus` is `RUNNING`, unless
+campaign back and refuses if its `displayStatus` is `RUNNING`, unless
 `--confirm-live` is also present. `POST /campaigns` creates a new campaign and
 matches no existing id, so it is not gated on that.
 
-From Python:
+`POST` on its own does not mean "write". This API uses POST for every
+query-by-selector and every report, and all of them end in `/query` —
+`campaigns/query`, `reports/apps/campaigns/query`, `change-history/query`. So the
+CLI classifies by path as well as by method:
 
 ```python
-from apple_ads_client import AppleAdsClient, WriteBlocked
-
-AppleAdsClient().post("campaigns", payload)                   # raises WriteBlocked
-AppleAdsClient(allow_writes=True).post("campaigns", payload)  # sends it
+PUT / PATCH / DELETE   -> always a mutation
+POST                   -> a mutation UNLESS the path ends in /query
+GET                    -> never
 ```
 
-`POST` on its own does not mean "write". Apple uses it for two endpoints that only
-read — reporting (`reports/...`) and the `/find` selectors — so the client
-classifies by path as well as by method. `AppleAdsClient.is_mutation(method, path)`
-is that decision, exposed so a caller can ask before it calls.
+That one rule covers all 80 resource paths in the SDK. (v5 needed two patterns to
+say the same thing: a `reports/` prefix *or* a `/find` suffix.)
+
+`/acls` and `/me` are the only endpoints that take **no** context header — they
+answer "who is this credential and what can it reach", which is exactly the
+question you ask when the context itself is what you doubt. Note the path is
+`/acls`, not `/me/acls`.
 
 The role on the credential has the last word: a write succeeds only if the ACL
-role allows it. `python3 apple_ads_client.py acls` prints the role.
+role allows it. `./venv/bin/python apple_ads_cli.py acls` prints the role.
 
 ---
-
-
 
 ## Rotation and expiry
 
@@ -589,7 +596,7 @@ Nothing to do in the Apple UI. The key pair and the three `.env` values are
 unchanged; only the JWT's `iat`/`exp` move:
 
 ```bash
-python3 get_token.py --force
+./venv/bin/python test_platform_connection.py
 ```
 
 That re-signs the secret and fetches a new access token in one step. To check
@@ -600,7 +607,7 @@ python3 generate_client_secret.py     # prints "valid for N days"
 ```
 
 Worth a calendar reminder ~2 weeks before the 180 days elapse.
-`test_connection.py` also warns when fewer than 14 days remain.
+`test_platform_connection.py` also warns when fewer than 14 days remain.
 
 ### Rotating the key pair (only if the key is compromised or the clientId is lost)
 
@@ -616,8 +623,7 @@ chmod 600 private-key.new.pem
 # 3. Swap the files and update .env with the new clientId / teamId / keyId
 mv private-key.new.pem private-key.pem
 mv public-key.new.pem  public-key.pem
-python3 get_token.py --clear
-python3 test_connection.py
+./venv/bin/python test_platform_connection.py
 
 # 4. Only once that passes: delete the OLD API client in the Apple Ads UI.
 ```
@@ -639,11 +645,11 @@ openssl dgst -sha256 public-key.pem      # the two digests must be identical
 | Symptom                                               | Cause                                                                                                                                                                                               |
 | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ModuleNotFoundError: No module named 'cryptography'` / `'mcp'` / `'apple_ads_platform'` | Wrong interpreter. Run everything as `./venv/bin/python …`, or `conda activate apple-ads`. If `cryptography` is older than 50, `pip install -r requirements.txt` to fix the floor.                |
-| `invalid_client` from the token endpoint              | Secret past its 180 days (most likely); or `sub`/`iss` swapped; or the API client was revoked. `get_token.py` prints this checklist on failure.                                                     |
+| `invalid_client` from the token endpoint              | Secret past its 180 days (most likely); or `sub`/`iss` swapped; or the API client was revoked. `generate_client_secret.py` shows the days remaining.                                                |
 | API section missing at ads.apple.com                  | The account needs the **Account Admin** or **API Account Manager** role on the org.                                                                                                                 |
 | clientId lost                                         | Not recoverable — generate a new API client (full key rotation above).                                                                                                                              |
 | 401 on an API call                                    | Handled automatically: the client force-refreshes the token and retries exactly once. A second 401 is a real credential problem.                                                                    |
-| Works for `/acls`, fails for everything else          | Missing or wrong `X-AP-Context`. `/acls` is the only endpoint that does not take it — which is why `test_connection.py` calls it without one, so a bad orgId cannot masquerade as a bad credential. |
+| Works for `/acls`, fails for everything else          | Missing or wrong `X-AP-Context`. `/acls` and `/me` are the only endpoints that do not take it — which is why the health check calls `/acls` first, so a bad adAccountId cannot masquerade as a bad credential. |
 | Empty report, no error                                | Apple only reports days with delivery. No spend in the window is a valid empty response, not a failure.                                                                                             |
 | A metric column is blank for every row                | A wrong v5 field name. Apple returns absent keys silently rather than erroring — see the reconciliation caveats below.                                                                              |
 
@@ -678,23 +684,20 @@ openssl dgst -sha256 public-key.pem      # the two digests must be identical
 | `environment.yml`           | Conda environment definition.                                                                                                                                                        |
 | `requirements.txt`          | Pinned from `pip freeze`. `cryptography` must stay **>= 50**.                                                                                                                         |
 | `guardrails.toml`           | **Committed.** Write bounds for the MCP server, so raising a limit is a visible diff.                                                                                                |
-| `generate_client_secret.py` | Signs the 180-day ES256 client secret.                                                                                                                                               |
-| `get_token.py`              | Trades it for an access token; caches and auto-refreshes.                                                                                                                            |
-| `apple_ads_client.py`       | API wrapper — auth headers, `X-AP-Context`, 401 retry. Reads by default; writes need `allow_writes` / `--apply`.                                                                                                                               |
-| `test_connection.py`        | 7-step end-to-end verification of the **v5** chain.                                                                                                                                  |
-| `test_platform_connection.py` | Same ladder against the **Platform API**; step 5 discovers `APPLE_ADS_AD_ACCOUNT_ID`.                                                                                              |
+| `generate_client_secret.py` | Owns `.env` parsing for the whole repo, and prints the days left on the client secret.                                                                                              |
+| `apple_ads_cli.py`          | Break-glass CLI — any endpoint, human-driven. Dry run by default; writes need `--apply` (and `--confirm-live` on a serving campaign).                                                 |
+| `test_platform_connection.py` | 7-step end-to-end verification; step 5 discovers `APPLE_ADS_AD_ACCOUNT_ID`.                                                                                                        |
 | `apple_ads_mcp/`            | The `apple-ads` MCP server. `config` / `client` / `guardrails` / `ledger` / `previews` / `tools_read` / `tools_write` / `server`.                                                     |
 | `tests/test_tool_surface.py` | Pins the registered tool-name set, so the write surface cannot widen by accident.                                                                                                   |
 | `fetch_campaign_report.py`  | Daily campaign performance → table and CSV.                                                                                                                                          |
 | `fetch_ad_structure.py`     | Campaign → ad group → keyword tree, as a name lookup.                                                                                                                                |
 | `resolve_attribution.py`    | Joins `attribution_apple_search_ads` rows to that tree, with a verification pass.                                                                                                    |
-| `_bootstrap.py`             | Safety net: if the active interpreter is missing the four packages, re-execs the script under a local `venv/` should one exist. A no-op in a correctly configured conda environment. |
-| `.token_cache.json`         | Cached access token for the **v5** scripts, mode 600. Gitignored, safe to delete. The Platform client manages its own token in-process and never touches this file.                   |
+| `_bootstrap.py`             | Safety net: if the active interpreter is missing the dependencies, re-execs the script under a local `venv/` should one exist. The MCP server deliberately does **not** call it.     |
 | `.audit/changes.jsonl`      | The MCP server's append-only write ledger, mode 600. Gitignored. `.audit/DISABLE_WRITES` is the kill switch.                                                                          |
 
 
-`.gitignore` excludes `*.pem`, `.env*` (except `.env.example`), the token cache,
-`venv/`, `reports/` and `.audit/`. Before any commit, confirm with `git status`
+`.gitignore` excludes `*.pem`, `.env*` (except `.env.example`), `venv/`,
+`reports/` and `.audit/`. Before any commit, confirm with `git status`
 that no key, `.env`, report or ledger is staged; `git check-ignore -v <path>`
 shows which rule covers a given file.
 
