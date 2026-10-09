@@ -40,6 +40,7 @@ from apple_ads_platform.auth.errors import AuthError
 from apple_ads_platform.builder import AppleAdsClientBuilder
 from mcp.server.mcpserver.exceptions import ToolError
 
+from apple_ads_mcp import logdb
 from apple_ads_mcp.config import load_config, private_key_pem, resolve_ad_account_id
 
 # Read calls are cheap and chatty; reports are neither.
@@ -121,16 +122,21 @@ def call(method_name: str, /, **kwargs: Any) -> Any:
     Every exception leaving here is a ToolError, because that is the only
     exception type the MCP SDK renders back to the model verbatim; anything else
     becomes an opaque UnexpectedToolError and the model is told nothing useful.
+
+    This is the chokepoint every caller shares -- the MCP tools and the fetch
+    scripts both -- so it is also where each outbound call is logged. A 401
+    retry is logged as a second row, because it IS a second request to Apple
+    and a log that hid it would understate what the account actually saw.
     """
     try:
-        return getattr(get_api(), method_name)(**kwargs)
+        return _invoke(method_name, kwargs)
     except ApiException as exc:
         if exc.status in (401, 403):
             # Could be an expired/revoked token, could be the context header. One
             # rebuild distinguishes them: if it was the header, this fails again.
             reset_api()
             try:
-                return getattr(get_api(), method_name)(**kwargs)
+                return _invoke(method_name, kwargs)
             except ApiException as retry_exc:
                 raise ToolError(_describe(method_name, retry_exc)) from retry_exc
         raise ToolError(_describe(method_name, exc)) from exc
@@ -140,6 +146,21 @@ def call(method_name: str, /, **kwargs: Any) -> Any:
         raise
     except Exception as exc:
         raise ToolError(f"{method_name} failed to reach Apple: {type(exc).__name__}: {exc}") from exc
+
+
+def _invoke(method_name: str, kwargs: dict[str, Any]) -> Any:
+    """One attempt at one SDK method, logged to the database.
+
+    Separated from `call()` so the 401 rebuild-and-retry produces two rows
+    rather than one; the logger itself never raises, so a failure here is the
+    API's, not the log's.
+    """
+    with logdb.record_api_call(method_name, request=kwargs) as slot:
+        try:
+            return getattr(get_api(), method_name)(**kwargs)
+        except ApiException as exc:
+            slot["http_status"] = getattr(exc, "status", None)
+            raise
 
 
 def _describe(method_name: str, exc: ApiException) -> str:

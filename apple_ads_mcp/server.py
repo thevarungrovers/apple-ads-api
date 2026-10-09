@@ -36,7 +36,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from mcp.server.mcpserver import MCPServer  # noqa: E402
 
-from apple_ads_mcp import __version__, tools_read, tools_write  # noqa: E402
+from apple_ads_mcp import __version__, logdb, tools_read, tools_write  # noqa: E402
 from apple_ads_mcp.guardrails import Limits, SessionCounters, load_limits  # noqa: E402
 from apple_ads_mcp.previews import PreviewStore  # noqa: E402
 
@@ -125,8 +125,12 @@ mcp = MCPServer(
     lifespan=lifespan,
 )
 
-tools_read.register(mcp, STATE)
-tools_write.register(mcp, STATE)
+# Registered through the instrumented wrapper so every tool call lands in
+# logs/apple-ads.db. `mcp` itself is what gets run; the wrapper only intercepts
+# the decorator, so the server object the SDK sees is unchanged.
+_registrar = logdb.InstrumentedServer(mcp)
+tools_read.register(_registrar, STATE)
+tools_write.register(_registrar, STATE)
 
 
 def main() -> None:
