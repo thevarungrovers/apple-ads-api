@@ -13,8 +13,12 @@ __pycache__/
 # Report output
 reports/
 
-# Write ledger and kill switch (contains real entity ids)
+# Kill switch, and the retired JSONL ledger kept as a frozen backup
 .audit/
+
+# The log database: every tool call, API call and mutation (real entity ids).
+# -wal and -shm are WAL sidecars; they are never worth committing either.
+logs/
 
 # Guardrail overrides are committed; local experiments are not
 guardrails.local.toml
