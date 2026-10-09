@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """End-to-end check of the Apple Ads **Platform API** chain, one rung at a time.
 
-The sibling of test_connection.py, which checks the v5 API. Same ladder, same
-reasoning: each step is a narrower failure than the one after it, so the first
-FAIL tells you where the problem actually is instead of leaving a single opaque
-error.
+The only health check in the repo: the v5 one it used to sit beside was retired
+with that API's client on 2026-10-09. Each step is a narrower failure than the
+one after it, so the first FAIL tells you where the problem actually is instead
+of leaving a single opaque error.
 
   1. local files and .env are present and coherent
   2. the private key is really EC P-256
@@ -361,7 +361,7 @@ def run(window_days: int) -> int:
               f"script -- step 1 will confirm it.{RESET}")
     else:
         print(f"{DIM}Next: start the MCP server, or compare step 7 against "
-              f"`fetch_campaign_report.py --days {window_days}` (v5).{RESET}")
+              f"`fetch_campaign_report.py --days {window_days}`.{RESET}")
     return 0
 
 
