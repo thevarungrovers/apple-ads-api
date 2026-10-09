@@ -1,7 +1,32 @@
-# Apple Search Ads API
+# Apple Ads API
 
-OAuth (client-credentials) access to the Apple Ads **Campaign Management API v5**,
-so campaign performance can be pulled programmatically instead of exported by hand.
+OAuth (client-credentials) access to the Apple Ads account: campaign performance
+pulled programmatically instead of exported by hand, plus an **MCP server** so an
+AI agent can read the account and propose changes a human approves one at a time.
+
+## Two APIs, one repo
+
+Apple is replacing the v5 Campaign Management API with the Ads Platform API. Both
+are here, against the same credentials, for as long as the old one lasts.
+
+| | v5 — `api.searchads.apple.com/api/v5` | Platform API — `api.ads.apple.com/v1` |
+| --- | --- | --- |
+| Status | **sunsets 2027-01-26** | current |
+| Client | hand-rolled `requests` (`apple_ads_client.py`) | Apple's `apple-ads-platform` SDK |
+| Context header | `X-AP-Context: orgId=<id>` | `X-AP-Context: adAccountId=<id>;` *(trailing semicolon)* |
+| Addressed by | `APPLE_ADS_ORG_ID` | `APPLE_ADS_AD_ACCOUNT_ID` — **a different value** |
+| Used by | `test_connection.py`, `fetch_campaign_report.py`, `fetch_ad_structure.py`, `resolve_attribution.py`, the break-glass CLI | `test_platform_connection.py`, `apple_ads_mcp/` |
+
+**Auth is identical** between them — same ES256 JWT, same token endpoint, same
+`private-key.pem`, same three credentials. Only the host and the context header
+differ.
+
+The v5 scripts are deliberately left untouched and unshimmed. The migration gate
+is read parity: `campaign_report` from the MCP server and
+`fetch_campaign_report.py` return the same spend, taps, installs and CPT for the
+same window (verified 2026-10-08 — 1,375.33 CAD, 251 taps, 303 installs, CPT
+5.4794, identical to four decimal places). Once that has held for a while, the v5
+scripts can move over; until then, two clients is the cheaper risk.
 
 > **The client secret expires 180 days after it is generated.** That is Apple's
 > hard maximum and there is no renewal, no warning, and no grace period. When it
@@ -20,8 +45,14 @@ source of "it worked yesterday" problems.
 | --- | ------------------------------------------------------------------------------------ | -------------------------- | ---------------------------------------- |
 | 1   | **Client secret** — a self-signed ES256 JWT, produced locally from `private-key.pem` | **180 days** (Apple's cap) | `generate_client_secret.py`              |
 | 2   | **Access token** — obtained by POSTing that secret to Apple                          | **3600 s**                 | `get_token.py` (cached + auto-refreshed) |
-| 3   | **API call** — `Authorization: Bearer …` + `X-AP-Context: orgId=22648740`            | per request                | `apple_ads_client.py`                    |
+| 3   | **API call** — `Authorization: Bearer …` + a context header                          | per request                | `apple_ads_client.py` (v5), `apple_ads_mcp/client.py` (Platform) |
 
+
+The context header is the one part that differs between the two APIs: v5 wants
+`orgId=<id>`, the Platform API wants `adAccountId=<id>;` with a trailing
+semicolon. A wrong format is a 401/403 on every call that carries it, while
+`/me/acls` keeps working — that is the one endpoint taking no context at all,
+which is why both health checks call it first.
 
 Apple never sees the private key. It verifies our signature against the public
 key registered in the Apple Ads UI.
@@ -37,8 +68,8 @@ access token is cached (`.token_cache.json`, mode 600).
 
 ## Setup
 
-Requires a conda environment with four packages: `pyjwt`, `cryptography`,
-`requests`, `python-dotenv`.
+Python **3.12+** (`apple-ads-platform`'s floor; the repo's `venv/` runs 3.13).
+`cryptography` must be **>= 50** — an older pin will break the Platform API client.
 
 ```bash
 cd apple-ads-api
@@ -52,10 +83,14 @@ conda activate apple-ads
 
 # 2. Credentials
 cp .env.example .env
-$EDITOR .env          # paste clientId, teamId, keyId
+$EDITOR .env          # paste clientId, teamId, keyId, orgId
 
-# 3. Verify the whole chain
-python3 test_connection.py
+# 3. Verify the v5 chain
+./venv/bin/python test_connection.py
+
+# 4. Verify the Platform API chain AND discover your adAccountId.
+#    Step 5 prints the APPLE_ADS_AD_ACCOUNT_ID line to paste into .env.
+./venv/bin/python test_platform_connection.py
 ```
 
 `conda list | grep -E 'pyjwt|cryptography|requests|dotenv'` confirms the four
@@ -66,12 +101,25 @@ the one the packages went into.
 `.env` holds:
 
 
-| Variable              | Where it comes from                             |
-| --------------------- | ----------------------------------------------- |
-| `APPLE_ADS_CLIENT_ID` | shown **once** when the API client is generated |
-| `APPLE_ADS_TEAM_ID`   | Apple Ads UI, API client list                   |
-| `APPLE_ADS_KEY_ID`    | Apple Ads UI, API client list                   |
-| `APPLE_ADS_ORG_ID`    | `22648740`                                      |
+| Variable                        | Required | Where it comes from                                                                       |
+| ------------------------------- | -------- | ----------------------------------------------------------------------------------------- |
+| `APPLE_ADS_CLIENT_ID`           | yes      | shown **once** when the API client is generated                                           |
+| `APPLE_ADS_TEAM_ID`             | yes      | Apple Ads UI, API client list                                                             |
+| `APPLE_ADS_KEY_ID`              | yes      | Apple Ads UI, API client list                                                             |
+| `APPLE_ADS_ORG_ID`              | yes      | Apple Ads UI, Account Settings. Used by the **v5** scripts as `X-AP-Context: orgId=<id>`   |
+| `APPLE_ADS_AD_ACCOUNT_ID`       | for the Platform API | **discovered, not looked up** — run `test_platform_connection.py`            |
+| `APPLE_ADS_DEFAULT_CAMPAIGN_ID` | no       | default for `fetch_ad_structure.py --campaign`, so no real id has to be typed             |
+
+`APPLE_ADS_AD_ACCOUNT_ID` is **not** the org id. Apple returns them as two
+separate fields (`id` and `orgId`) on the same ACL record, and the Platform API
+wants the former. Do not read it off the UI and do not guess it — step 5 of
+`test_platform_connection.py` reads it back from `GET /me/acls` and prints the
+line to paste into `.env`. Writing to the wrong account is not an error Apple
+will catch for you.
+
+Nothing in this repo defaults any of these. `load_config()` raises `ConfigError`
+on a missing value, which is the correct failure: this repo is public, so a real
+id has nowhere to live except `.env`, which is gitignored.
 
 
 `clientId` and `teamId` are usually the **same** `SEARCHADS.<uuid>` string. That
@@ -85,22 +133,27 @@ clientId and `iss` for the teamId, and they must not be "tidied" together.
 ## Usage
 
 ```bash
-# End-to-end health check: files → key → secret → token → ACL → campaigns → report
-python3 test_connection.py
+# End-to-end health checks, one rung at a time
+./venv/bin/python test_connection.py            # v5 chain
+./venv/bin/python test_platform_connection.py   # Platform API chain + adAccountId
+
+# The MCP server's own surface check — no network, no Apple
+./venv/bin/python tests/test_tool_surface.py
 
 # Daily campaign performance (spend, impressions, taps, installs, avg CPT)
-python3 fetch_campaign_report.py                     # last 7 days
-python3 fetch_campaign_report.py --days 30 --csv     # writes reports/*.csv
-python3 fetch_campaign_report.py --start 2026-08-01 --end 2026-08-28
+./venv/bin/python fetch_campaign_report.py                     # last 7 days
+./venv/bin/python fetch_campaign_report.py --days 30 --csv     # writes reports/*.csv
+./venv/bin/python fetch_campaign_report.py --start 2026-08-01 --end 2026-08-28
 
 # Resolve ad ids -> names (campaign / ad group / keyword tree)
-python3 fetch_ad_structure.py                        # table to stdout
-python3 fetch_ad_structure.py --campaign 2144331926 --save
+./venv/bin/python fetch_ad_structure.py                        # table to stdout
+./venv/bin/python fetch_ad_structure.py --campaign 1234567890 --save
+./venv/bin/python fetch_ad_structure.py --save                 # defaults to $APPLE_ADS_DEFAULT_CAMPAIGN_ID
 
 # Which user came from which ad group / keyword
-python3 resolve_attribution.py reports/attribution_rows.csv
-python3 resolve_attribution.py rows.csv --by-ad-group
-python3 resolve_attribution.py rows.csv --csv reports/out.csv
+./venv/bin/python resolve_attribution.py reports/attribution_rows.csv
+./venv/bin/python resolve_attribution.py rows.csv --by-ad-group
+./venv/bin/python resolve_attribution.py rows.csv --csv reports/out.csv
 
 # Any GET endpoint, raw JSON
 python3 apple_ads_client.py acls
@@ -130,7 +183,255 @@ or shell history by accident.
 
 ---
 
-## Writing to the account
+## Driving this from an AI agent
+
+`apple_ads_mcp/` is a stdio **MCP server** named `apple-ads`. It exposes 36 tools:
+19 read-only, and 8 `preview_*`/`apply_*` pairs plus `revert_change`.
+
+### The authorization model
+
+There is no `--confirm-live` here, because an agent can type a flag as easily as
+a human can. **The authorization gate is Claude Code's own per-tool-call
+permission prompt** — the moment a human sees what is about to happen and says
+yes.
+
+That only works if the prompt is worth reading, which drives two choices:
+
+**Separate `preview_*` and `apply_*` tools, never a `dry_run` parameter.**
+Claude Code's permission rules key on the **tool name**. Separate names let you
+permanently allowlist every `preview_*` and never allowlist a single `apply_*`.
+With a `dry_run` flag, one "always allow" clicked during a harmless preview would
+silently authorise every future real write — exactly the failure being guarded
+against.
+
+**Every `apply_*` demands a `preview_token`** minted by its matching preview. The
+token is single-use, expires after 10 minutes, and is refused if the entity's
+*current* value no longer matches the one the preview recorded. That last check is
+a TOCTOU guard: between the preview and the approval, somebody in the Apple Ads UI
+may have moved the same bid. It also guarantees a readable preview always sits
+directly above the approval prompt — an `apply_*` can never be called cold.
+
+A preview answers the four questions that make an approval a judgement rather
+than a reflex:
+
+| Field | Why it is there |
+| --- | --- |
+| `entity_name` | `'competitor brand term'`, not `keyword 1234567890` |
+| `path` | `Campaign 'X' > AdGroup 'Y' > Keyword 'z'` |
+| `entity_serving_status` | whether **this** entity can spend money today. Not the campaign's: a keyword under a paused ad group reads `AD_GROUP_ON_HOLD` while its campaign reads `RUNNING` |
+| `projected_daily_spend_delta` | an upper bound on the extra daily spend |
+
+Projections are labelled upper bounds and are for catching a 100× typo, not for
+forecasting: a bid change assumes tap volume is unchanged, which is precisely what
+it is meant to alter. A budget change is exact — it is the cap itself moving.
+
+### What it can and cannot do
+
+In scope: keyword bids (single and bulk), keyword / ad group / campaign
+pause-enable, campaign daily budgets, adding negative keywords and pausing them.
+
+**Out of scope, structurally.** There is no `request(method, path, body)`
+passthrough, so an operation with no tool is *unreachable*, not merely
+undocumented. `tests/test_tool_surface.py` pins the registered tool-name set to a
+`frozenset` and asserts the forbidden API method names appear nowhere in
+`tools_write.py`, so the surface cannot widen by accident:
+
+- creating or deleting campaigns, ad groups, ads, creatives, assets
+- **deleting** negative keywords — pausing achieves the same outcome reversibly,
+  and deletion would be the only irreversible operation in scope
+- `apply_daily_budget_recommendations` — one call that moves real money with no
+  preview, no bound and no ledger line. The read-only `budget_recommendations`
+  tool shows the advice; acting on it goes through the normal preview/apply path
+
+Two tools are **deferred, not dropped**, because the API does not yet support
+them cleanly: ad group default bid (`AdGroupUpdate` has no `defaultBid` field;
+the bid appears to sit under `bidStrategy.bid`, unverified) and shared budgets
+(`shared_budgets_id_put` takes no `x_ap_context`, so there is no way to say which
+ad account an update belongs to).
+
+`destructive_hint=True` is set on exactly two tools — the campaign pause and the
+campaign budget. Pausing a keyword is reversible, and marking it destructive would
+train you to click through the loud prompts, which is how loud prompts stop
+working.
+
+### A write can be in scope and still be a no-op
+
+**Keyword bids only mean anything under a manual bid strategy.** If the ad group
+is on `MAX_CONVERSIONS` or `MAX_ENGAGEMENTS`, Apple sets the bids, and a
+keyword-bid `PUT` is accepted with **HTTP 200 and then discarded** — same status
+code, same response shape, bid unchanged, nothing anywhere saying it was ignored.
+
+`preview_keyword_bid` therefore reads the parent ad group's `bidStrategy` and
+blocks on a `bid_is_settable` check before anyone is asked to approve a change
+that cannot land:
+
+```
+FAIL bid_is_settable: ad group bid strategy is MAX_CONVERSIONS -- Apple sets the
+     bids. A keyword-bid write is accepted with HTTP 200 and then IGNORED, so this
+     would report success and change nothing. Change the ad group's bid strategy
+     first, in the Apple Ads UI.
+```
+
+Switching an ad group to `MANUAL_CPT` is a campaign-strategy decision, not a
+scripting one, so the server will not do it for you. Check with `list_ad_groups`
+— the `default_bid` column comes from `bidStrategy.bid`.
+
+This is also why *every* write verifies its read-back rather than trusting the
+status code; see [The ledger](#the-ledger).
+
+### Money
+
+Always a **decimal string in major units**: `"1.20"` is one dollar twenty. Never
+cents as an integer — `"120"` would be a hundredfold error, and the argument is
+rendered verbatim in the prompt a human approves. A `max_bid` ceiling catches it
+as a second line of defence.
+
+### Registration
+
+```json
+"apple-ads": {
+  "command": "/Users/you/dev/apple-ads-api/venv/bin/python",
+  "args": ["/Users/you/dev/apple-ads-api/apple_ads_mcp/server.py"]
+}
+```
+
+in the global `mcpServers` block of `~/.claude.json`. **Absolute interpreter,
+absolute script path** — never a bare `python3`, and not `-m`: the launching
+process's PATH and cwd are not yours.
+
+Credentials stay in `.env` (mode 600) and **not** in the registration's `env`
+block. `~/.claude.json` is a config file that gets backed up, copied between
+machines and pasted into issues; `.env` is already the one place credentials
+live, and splitting them across two files means rotating them in two places.
+
+---
+
+### Reading data: Apple's filter rules are narrower than they look
+
+The read tools hide this, but anyone extending them will hit it. Verified against
+the live API, not the SDK's models:
+
+| Call | What it actually accepts |
+| --- | --- |
+| `apps_campaign_reports` | **no filter at all** — even `campaignId` is rejected |
+| `apps_keyword_reports`, `apps_ad_group_reports`, `apps_search_term_reports` | `campaignId` and **nothing else**; `keywordId` and `adGroupId` are rejected with `INVALID_FIELD_ATTRIBUTE` |
+| any report filter | `EQUALS` with a scalar. `IN` is refused for API users |
+| `apps_search_term_reports` | `GRAND_TOTAL` **or** granular rows, never both |
+| `negative_keywords_query_post` | requires an `adGroupId` condition. A `campaignId` filter alone is a 400 |
+| `query_audit_summary` | `eventTime` as a `BETWEEN` range **and** a required `entityType`, one type per call |
+
+So the API call is scoped by campaign (or not at all) and every other narrowing
+happens client-side, over the rows that come back. `keyword_report(ad_group_id=…)`
+works; it just filters after fetching, and drops the grand total because Apple's
+covers the whole campaign rather than the subset you asked for.
+
+Two consequences worth knowing:
+
+- **Campaign-level negative keywords are not listable.** They belong to no ad
+  group, and the query endpoint demands one. `list_negative_keywords` sweeps a
+  campaign's ad groups, so it finds everything attached to an ad group and
+  nothing attached to the campaign itself. Check the Apple Ads UI if you need
+  certainty.
+- **Reports are parsed from raw JSON**, not through the SDK's response models.
+  `apple-ads-platform` 1.109.0 generates `ReportingKeyword.status` with the enum
+  `('ACTIVE','PAUSED','DELETED')` while the live API returns `ENABLED`, and the
+  generated validator *raises* rather than falling back to its own
+  `unknown_default_open_api` placeholder — so the whole keyword report fails to
+  deserialize with the response sitting there intact. The tools reshape reports
+  into their own row type anyway, so reading the JSON directly costs nothing and
+  stops the server being hostage to one wrong enum in generated code.
+
+---
+
+## Guardrails and the ledger
+
+### Bounds
+
+`guardrails.toml` is **committed on purpose**. Every limit is also a code
+constant in `apple_ads_mcp/guardrails.py`; the file only overrides them. The
+point of committing it is that raising a limit becomes a visible diff with an
+author and a date, rather than an env var someone exported once and nobody can
+find. A misspelled key is an error at startup, not a silently ignored line.
+
+The per-session counters matter more than the per-call ones. A `max_bid` ceiling
+does nothing to stop a runaway loop making 400 individually-legal changes;
+`max_applies_per_session` and `max_projected_session_delta` do. They live in
+memory and reset only when the server restarts — a counter that survived a
+restart would make an ordinary new session start out already half-spent.
+
+`ALLOWED_CAMPAIGN_IDS` pins writes to a set of campaigns. Campaign ids are real
+identifiers, so they go in `.env` as `APPLE_ADS_ALLOWED_CAMPAIGN_IDS`, not in the
+committed TOML. Pin it to one pilot campaign for the first week, then widen.
+
+`get_guardrails` is a read-only tool, so the agent can learn its own limits
+*before* proposing something that will be refused.
+
+### Kill switch
+
+```bash
+touch .audit/DISABLE_WRITES          # halts every apply_* within one tool call
+echo "paused during the sale" > .audit/DISABLE_WRITES   # with a reason
+rm .audit/DISABLE_WRITES             # re-enable
+```
+
+A **file**, not an environment variable, because a long-lived stdio server never
+sees a variable exported after it started. The check runs inside every `apply_*`
+and is never cached.
+
+### The ledger
+
+`.audit/changes.jsonl`, mode 600, `.audit/` gitignored because the entries carry
+real entity ids. Append-only, under `flock`, so a concurrent `apple_ads_client.py`
+run cannot interleave.
+
+**Two lines per write**, linked by `entry_id`: an `intent` written *before* the
+API call leaves the process, and an `outcome` written after it returns. The pair
+is the whole point. A single line written afterwards records only the writes that
+came back, and the case that actually needs evidence is the one that did not — a
+crash or a timeout, where the mutation may well have landed at Apple's end and
+nothing local would ever say so. An `intent` with no `outcome` is the signal
+"something may have changed; go and look".
+
+**HTTP 200 does not mean applied.** Every write compares the value Apple echoed
+back against the one that was asked for, and records `failed` when they differ.
+This is not theoretical: a keyword-bid PUT against an ad group on an automated
+bid strategy (`MAX_CONVERSIONS`) returns 200 with the bid unchanged and nothing
+in the response saying it was ignored. Bulk writes additionally parse Apple's
+per-item `success`/`error` against the `correlationId` set on each request item,
+and a mixed result is recorded as `partial`, never as a bare success.
+
+### Undo, and finding out what else changed
+
+`revert_change(entry_id)` writes the old value back. It refuses unless the entry
+is recorded as `applied`, refuses an entry already reverted, and re-reads the
+entity first: if its current value is no longer what the entry said it was left
+at, somebody else has moved it since and reverting would silently overwrite
+*their* change. It appends a new entry rather than erasing the old one.
+
+`reconcile_ledger(days)` compares the local ledger with Apple's own audit trail
+and reports two classes:
+
+- `local_without_apple` — a write we recorded that Apple has no record of
+- **`apple_without_local`** — the valuable one: changes Apple recorded that this
+  server did **not** make, which means something else moved the account. Apple
+  labels them, so a person in the Apple Ads UI shows up as `userType: CUSTOMER`
+  against the server's `CUSTOMER_API`.
+
+The join is on entity id, which Apple exposes in each audit summary's `metas`.
+It runs on demand rather than per write: Apple's change *detail* endpoint needs a
+composite `EntityType.entityId.txnId` you cannot construct without querying the
+summary first, so making it a per-write dependency would double the cost of every
+write.
+
+---
+
+## Writing to the account from the CLI (break-glass)
+
+The MCP server above is the normal path. This CLI stays as the deliberate
+break-glass route for anything the MCP surface refuses to expose — creating a
+campaign, deleting a negative keyword, any endpoint with no tool. It is v5, it is
+driven by a human typing flags, and it has none of the preview, ledger or
+guardrail machinery.
 
 The client reads by default and refuses to write. A mutating call on a client
 that was not opened for writes raises `WriteBlocked` **before the request leaves
@@ -157,7 +458,7 @@ python3 apple_ads_client.py campaigns -X POST -d @new-campaign.json
 python3 apple_ads_client.py campaigns -X POST -d @new-campaign.json --apply
 
 # Pause a campaign that is currently serving — needs the second flag
-python3 apple_ads_client.py campaigns/2144331926 -X PUT \
+python3 apple_ads_client.py campaigns/1234567890 -X PUT \
     -d '{"status":"PAUSED"}' --apply --confirm-live
 ```
 
@@ -246,7 +547,7 @@ openssl dgst -sha256 public-key.pem      # the two digests must be identical
 
 | Symptom                                               | Cause                                                                                                                                                                                               |
 | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ModuleNotFoundError: No module named 'cryptography'` | The active conda environment is not the one the packages were installed into. `conda activate apple-ads`, or `python3 -m pip install -r requirements.txt` into the current one.                     |
+| `ModuleNotFoundError: No module named 'cryptography'` / `'mcp'` / `'apple_ads_platform'` | Wrong interpreter. Run everything as `./venv/bin/python …`, or `conda activate apple-ads`. If `cryptography` is older than 50, `pip install -r requirements.txt` to fix the floor.                |
 | `invalid_client` from the token endpoint              | Secret past its 180 days (most likely); or `sub`/`iss` swapped; or the API client was revoked. `get_token.py` prints this checklist on failure.                                                     |
 | API section missing at ads.apple.com                  | The account needs the **Account Admin** or **API Account Manager** role on the org.                                                                                                                 |
 | clientId lost                                         | Not recoverable — generate a new API client (full key rotation above).                                                                                                                              |
@@ -254,6 +555,20 @@ openssl dgst -sha256 public-key.pem      # the two digests must be identical
 | Works for `/acls`, fails for everything else          | Missing or wrong `X-AP-Context`. `/acls` is the only endpoint that does not take it — which is why `test_connection.py` calls it without one, so a bad orgId cannot masquerade as a bad credential. |
 | Empty report, no error                                | Apple only reports days with delivery. No spend in the window is a valid empty response, not a failure.                                                                                             |
 | A metric column is blank for every row                | A wrong v5 field name. Apple returns absent keys silently rather than erroring — see the reconciliation caveats below.                                                                              |
+
+### MCP server
+
+| Symptom                                                        | Cause                                                                                                                                                                                                 |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ConfigError: .env has no value for APPLE_ADS_AD_ACCOUNT_ID`    | Expected the first time. Run `test_platform_connection.py` — step 5 reads it back from Apple and prints the line to paste. Nothing guesses it.                                                        |
+| Every tool that takes the context header returns 401/403, but `whoami` works | The `X-AP-Context` is wrong. `whoami` is the only call that sends none. Check the trailing semicolon: `adAccountId=<id>;`                                                                 |
+| `apply_*` says `preview_token … is unknown or already used`     | Tokens are single-use and expire after 10 minutes. Re-run the preview. This is working as intended, not a bug.                                                                                        |
+| `apply_*` says the value "is now X, but the preview recorded Y" | The TOCTOU guard. Something changed the entity between the preview and the approval — often a person in the Apple Ads UI. Re-run the preview and look at the new numbers before deciding again.       |
+| `applied: false` with "Apple returned success and left the value alone" | A write Apple accepted and discarded. For a keyword bid this is almost always an automated bid strategy — see [A write can be in scope and still be a no-op](#a-write-can-be-in-scope-and-still-be-a-no-op). |
+| A preview shows `projected_daily_spend_delta: 0.00` with a warning about "0 by default, NOT by measurement" | The 7-day report for that entity failed, so the projection has no data behind it. The warning carries Apple's reason. Treat the zero as unknown, not as "spends nothing". |
+| `writes are disabled: …`                                        | The kill switch. `rm .audit/DISABLE_WRITES`.                                                                                                                                                         |
+| `session limit reached: N applies already made`                 | The per-session counter. Check what those changes were with `list_my_changes`, then restart the server to reset it.                                                                                   |
+| Server starts but `/mcp` lists no tools                         | Claude Code was not restarted after the registration was added to `~/.claude.json`. The absolute interpreter and script path are both required.                                                       |
 
 
 ---
@@ -267,24 +582,38 @@ openssl dgst -sha256 public-key.pem      # the two digests must be identical
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `private-key.pem`           | EC P-256 signing key, mode 600. **Never commit, print or transmit.**                                                                                                                 |
 | `public-key.pem`            | Registered with Apple. Safe to share.                                                                                                                                                |
-| `.env`                      | clientId / teamId / keyId / orgId. Gitignored.                                                                                                                                       |
+| `.env`                      | Every credential **and every real id**. Gitignored — see the environment table above.                                                                                                |
+| `.env.example`              | The committed template: key names and empty values, never a real id.                                                                                                                 |
 | `environment.yml`           | Conda environment definition.                                                                                                                                                        |
-| `requirements.txt`          | Same four packages, for `pip install -r` into an existing environment.                                                                                                               |
+| `requirements.txt`          | Pinned from `pip freeze`. `cryptography` must stay **>= 50**.                                                                                                                         |
+| `guardrails.toml`           | **Committed.** Write bounds for the MCP server, so raising a limit is a visible diff.                                                                                                |
 | `generate_client_secret.py` | Signs the 180-day ES256 client secret.                                                                                                                                               |
 | `get_token.py`              | Trades it for an access token; caches and auto-refreshes.                                                                                                                            |
 | `apple_ads_client.py`       | API wrapper — auth headers, `X-AP-Context`, 401 retry. Reads by default; writes need `allow_writes` / `--apply`.                                                                                                                               |
-| `test_connection.py`        | 7-step end-to-end verification.                                                                                                                                                      |
+| `test_connection.py`        | 7-step end-to-end verification of the **v5** chain.                                                                                                                                  |
+| `test_platform_connection.py` | Same ladder against the **Platform API**; step 5 discovers `APPLE_ADS_AD_ACCOUNT_ID`.                                                                                              |
+| `apple_ads_mcp/`            | The `apple-ads` MCP server. `config` / `client` / `guardrails` / `ledger` / `previews` / `tools_read` / `tools_write` / `server`.                                                     |
+| `tests/test_tool_surface.py` | Pins the registered tool-name set, so the write surface cannot widen by accident.                                                                                                   |
 | `fetch_campaign_report.py`  | Daily campaign performance → table and CSV.                                                                                                                                          |
 | `fetch_ad_structure.py`     | Campaign → ad group → keyword tree, as a name lookup.                                                                                                                                |
 | `resolve_attribution.py`    | Joins `attribution_apple_search_ads` rows to that tree, with a verification pass.                                                                                                    |
 | `_bootstrap.py`             | Safety net: if the active interpreter is missing the four packages, re-execs the script under a local `venv/` should one exist. A no-op in a correctly configured conda environment. |
-| `.token_cache.json`         | Cached access token, mode 600. Gitignored, safe to delete.                                                                                                                           |
+| `.token_cache.json`         | Cached access token for the **v5** scripts, mode 600. Gitignored, safe to delete. The Platform client manages its own token in-process and never touches this file.                   |
+| `.audit/changes.jsonl`      | The MCP server's append-only write ledger, mode 600. Gitignored. `.audit/DISABLE_WRITES` is the kill switch.                                                                          |
 
 
 `.gitignore` excludes `*.pem`, `.env*` (except `.env.example`), the token cache,
-`venv/` and `reports/`. Before any commit, confirm with `git status` that no key,
-`.env` or report is staged; `git check-ignore -v <path>` shows which rule covers
-a given file.
+`venv/`, `reports/` and `.audit/`. Before any commit, confirm with `git status`
+that no key, `.env`, report or ledger is staged; `git check-ignore -v <path>`
+shows which rule covers a given file.
+
+**This repository is public.** No real identifier belongs in a tracked file — not
+the org id, not the ad account id, not a campaign id, and not the company name.
+None of them is a credential (all are inert without `private-key.pem`), but they
+have no reason to be committed either. They live in `.env`, which is gitignored;
+`.env.example` carries the key names with empty values. Nothing in the code
+defaults any of them, so a missing value is a loud `ConfigError` rather than a
+silent substitution.
 
 ---
 

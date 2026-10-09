@@ -10,8 +10,8 @@ output reconciles against apple_ads_daily row for row:
 
 Apple's v5 field names are NOT the bare `installs` / `newDownloads` /
 `redownloads` that the v3 API used; those keys are simply absent from a v5
-response and silently read as empty. Verified against the live response for
-org 22648740 on 2026-08-28.
+response and silently read as empty. Verified against the live response on
+2026-08-28.
 
   ./venv/bin/python fetch_campaign_report.py                    # last 7 days
   ./venv/bin/python fetch_campaign_report.py --days 30

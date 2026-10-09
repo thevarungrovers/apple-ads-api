@@ -1,12 +1,21 @@
 # Conda equivalent of requirements.txt.
 #   conda env create -f environment.yml
 #   conda activate apple-ads
+#
+# python>=3.12 and cryptography>=50 are both floors set by apple-ads-platform.
+# mcp needs >=3.10, so 3.12 satisfies everything.
 name: apple-ads
 channels:
   - conda-forge
 dependencies:
-  - python>=3.10
-  - cryptography>=42
+  - python>=3.12
+  - cryptography>=50.0
   - requests>=2.31
   - python-dotenv>=1.0
   - pyjwt>=2.8
+  - pymysql>=1.1
+  - pip
+  - pip:
+      # Not on conda-forge; installed into the same env by pip.
+      - apple-ads-platform==1.109.0
+      - mcp==2.3.0

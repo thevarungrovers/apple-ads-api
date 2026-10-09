@@ -1,10 +1,47 @@
+# Regenerated from the venv with `./venv/bin/pip freeze`.
+#
+# cryptography must stay >= 50: apple-ads-platform 1.109.0 requires it, and the
+# old `cryptography==41.0.5` pin in this file would have DOWNGRADED a working venv
+# and broken the Platform API client on the next `pip install -r requirements.txt`.
+#
+# Two API clients live here on purpose. See README "Two APIs, one repo":
+#   - requests / PyJWT      -> the v5 scripts (api.searchads.apple.com, sunsets 2027-01-26)
+#   - apple-ads-platform    -> the Platform API (api.ads.apple.com/v1) and the MCP server
+#   - mcp                   -> the stdio MCP server in apple_ads_mcp/
+annotated-types==0.8.0
+anyio==4.15.1
+apple-ads-platform==1.109.0
+attrs==26.1.0
 certifi==2026.7.22
 cffi==2.1.1
 charset-normalizer==3.5.1
-cryptography==41.0.5
+click==8.5.0
+cryptography==50.0.1
+h11==0.16.0
+httpcore2==2.13.1
+httpx2==2.13.1
 idna==3.19
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+mcp==2.3.0
+mcp-types==2.3.0
+opentelemetry-api==1.45.1
 pycparser==3.0
+pydantic==2.14.0
+pydantic_core==2.50.0
 PyJWT==2.13.0
+PyMySQL==1.2.3
+python-dateutil==2.9.0.post0
 python-dotenv==1.2.3
+python-multipart==0.0.32
+referencing==0.37.0
 requests==2.34.2
+rpds-py==2026.9.1
+six==1.17.0
+sse-starlette==3.5.0
+starlette==1.7.0
+truststore==0.10.4
+typing-inspection==0.4.4
+typing_extensions==4.16.0
 urllib3==2.7.0
+uvicorn==0.54.0

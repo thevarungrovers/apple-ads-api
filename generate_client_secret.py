@@ -36,9 +36,24 @@ ENV_FILE = HERE / ".env"
 AUDIENCE = "https://appleid.apple.com"
 ALGORITHM = "ES256"
 MAX_LIFETIME = dt.timedelta(days=180)  # Apple's documented hard maximum
-DEFAULT_ORG_ID = "22648740"
 
-REQUIRED_KEYS = ("APPLE_ADS_CLIENT_ID", "APPLE_ADS_TEAM_ID", "APPLE_ADS_KEY_ID")
+# Every real identifier lives in .env, which is gitignored. Nothing here carries a
+# default: this repo is public, and a hardcoded org id would be committed the moment
+# someone edited the file. A missing value raises ConfigError, which is the correct
+# failure -- guessing an account id is how you write to the wrong account.
+REQUIRED_KEYS = (
+    "APPLE_ADS_CLIENT_ID",
+    "APPLE_ADS_TEAM_ID",
+    "APPLE_ADS_KEY_ID",
+    "APPLE_ADS_ORG_ID",
+)
+
+# NOT in REQUIRED_KEYS on purpose. APPLE_ADS_AD_ACCOUNT_ID belongs to the Platform
+# API (api.ads.apple.com/v1), and it is NOT the org id -- AclAdAccount carries `id`
+# and `orgId` as separate fields. It is discovered by test_platform_connection.py,
+# which has to be able to run with the key absent. The MCP layer enforces it
+# separately; see apple_ads_mcp/config.py:resolve_ad_account_id().
+AD_ACCOUNT_KEY = "APPLE_ADS_AD_ACCOUNT_ID"
 
 
 class ConfigError(RuntimeError):
@@ -50,15 +65,13 @@ def load_config() -> dict[str, str]:
     if not ENV_FILE.exists():
         raise ConfigError(
             f"{ENV_FILE.name} not found. Copy .env.example to .env and fill in the "
-            "clientId / teamId / keyId shown by ads.apple.com."
+            "clientId / teamId / keyId / orgId shown by ads.apple.com."
         )
 
     config = {k: (v or "").strip() for k, v in dotenv_values(ENV_FILE).items()}
     missing = [k for k in REQUIRED_KEYS if not config.get(k)]
     if missing:
         raise ConfigError(f"{ENV_FILE.name} has no value for: {', '.join(missing)}")
-    if not config.get("APPLE_ADS_ORG_ID"):
-        config["APPLE_ADS_ORG_ID"] = DEFAULT_ORG_ID
     return config
 
 
