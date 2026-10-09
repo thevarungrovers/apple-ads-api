@@ -89,11 +89,8 @@ conda activate apple-ads
 cp .env.example .env
 $EDITOR .env          # paste clientId, teamId, keyId, orgId
 
-# 3. Verify the v5 chain
-./venv/bin/python test_platform_connection.py
-
-# 4. Verify the Platform API chain AND discover your adAccountId.
-#    Step 5 prints the APPLE_ADS_AD_ACCOUNT_ID line to paste into .env.
+# 3. Verify the whole chain AND discover your adAccountId.
+#    Rung 5 of 7 prints the APPLE_ADS_AD_ACCOUNT_ID line to paste into .env.
 ./venv/bin/python test_platform_connection.py
 ```
 
@@ -110,7 +107,7 @@ the one the packages went into.
 | `APPLE_ADS_CLIENT_ID`           | yes      | shown **once** when the API client is generated                                           |
 | `APPLE_ADS_TEAM_ID`             | yes      | Apple Ads UI, API client list                                                             |
 | `APPLE_ADS_KEY_ID`              | yes      | Apple Ads UI, API client list                                                             |
-| `APPLE_ADS_ORG_ID`              | yes      | Apple Ads UI, Account Settings. Used by the **v5** scripts as `X-AP-Context: orgId=<id>`   |
+| `APPLE_ADS_ORG_ID`              | yes      | Apple Ads UI, Account Settings. Narrows the ACL candidates when `test_platform_connection.py` discovers your `adAccountId` — it cannot decide between them on its own |
 | `APPLE_ADS_AD_ACCOUNT_ID`       | for the Platform API | **discovered, not looked up** — run `test_platform_connection.py`            |
 | `APPLE_ADS_DEFAULT_CAMPAIGN_ID` | no       | default for `fetch_ad_structure.py --campaign`, so no real id has to be typed             |
 
@@ -651,7 +648,7 @@ openssl dgst -sha256 public-key.pem      # the two digests must be identical
 | 401 on an API call                                    | Handled automatically: the client force-refreshes the token and retries exactly once. A second 401 is a real credential problem.                                                                    |
 | Works for `/acls`, fails for everything else          | Missing or wrong `X-AP-Context`. `/acls` and `/me` are the only endpoints that do not take it — which is why the health check calls `/acls` first, so a bad adAccountId cannot masquerade as a bad credential. |
 | Empty report, no error                                | Apple only reports days with delivery. No spend in the window is a valid empty response, not a failure.                                                                                             |
-| A metric column is blank for every row                | A wrong v5 field name. Apple returns absent keys silently rather than erroring — see the reconciliation caveats below.                                                                              |
+| A metric column is blank for every row                | A wrong metric field name. Apple returns absent keys silently rather than erroring — see the reconciliation caveats below.                                                                              |
 
 ### MCP server
 
