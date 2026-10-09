@@ -311,18 +311,24 @@ def check_known_status(name: str, raw_status: str | None) -> Check:
 # Verified live 2026-10-08: under an automated bid strategy, Apple accepts a
 # keyword-bid PUT with HTTP 200 and leaves the bid unchanged. Nothing in the
 # response says it was ignored, so without this check the agent reports a
-# successful bid change that never happened.
+# successful bid change that never happened. The same is true of the ad group's
+# own default bid, which is why `what` exists rather than a second check.
 MANUAL_BID_STRATEGIES = frozenset({"MANUAL_CPT", "MANUAL_CPM"})
 
 
-def check_bid_settable(bid_strategy_type: str | None) -> Check:
-    """A keyword bid only means anything under a MANUAL bid strategy."""
+def check_bid_settable(bid_strategy_type: str | None, what: str = "keyword bid") -> Check:
+    """A bid only means anything under a MANUAL bid strategy.
+
+    Applies to the ad group's own default bid exactly as it does to a keyword
+    bid: under MAX_CONVERSIONS or MAX_ENGAGEMENTS Apple sets the bids, and one
+    written by hand is accepted and then ignored.
+    """
     if bid_strategy_type is None:
         return Check(
             "bid_is_settable",
             False,
             "could not read the ad group's bid strategy, so there is no way to tell "
-            "whether a keyword bid would be used at all",
+            f"whether the {what} would be used at all",
         )
     settable = bid_strategy_type in MANUAL_BID_STRATEGIES
     return Check(
@@ -332,7 +338,7 @@ def check_bid_settable(bid_strategy_type: str | None) -> Check:
         + (
             ""
             if settable
-            else " -- Apple sets the bids. A keyword-bid write is accepted with "
+            else f" -- Apple sets the bids. A write to the {what} is accepted with "
             "HTTP 200 and then IGNORED, so this would report success and change "
             "nothing. Change the ad group's bid strategy first, in the Apple Ads UI."
         ),
