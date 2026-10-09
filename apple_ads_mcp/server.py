@@ -74,7 +74,7 @@ creatives and assets; deleting negative keywords (pause them instead -- it is
 reversible and achieves the same thing); applying Apple's budget
 recommendations in one call. There is no generic request/passthrough tool, so if
 an operation is not listed it cannot be performed here. Use the break-glass CLI,
-`apple_ads_client.py ... --apply --confirm-live`, and tell the human you are
+`apple_ads_cli.py <path> -X PUT -d '{...}' --apply`, and tell the human you are
 doing so.
 
 Before proposing anything, get_guardrails tells you the bounds and how much of

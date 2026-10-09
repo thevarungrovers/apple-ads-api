@@ -5,14 +5,20 @@ The client secret is a *self-signed* JWT: we sign it locally with
 private-key.pem and Apple verifies it against the public key registered at
 ads.apple.com -> Account Settings -> API.
 
-This is NOT the access token -- see get_token.py for that. Apple caps the
-secret's lifetime at 180 days, and it does not renew itself: once `exp`
-passes, the token endpoint starts returning a bare `invalid_client`.
+This is NOT the access token. Apple caps the secret's lifetime at 180 days, and
+it does not renew itself: once `exp` passes, the token endpoint starts returning
+a bare `invalid_client`, which looks exactly like a wrong-credentials bug.
 
-The secret is never written to disk. It is cheap to re-derive from
-private-key.pem plus the three .env values, so get_token.py just calls
-build_client_secret() in-process whenever it needs one -- one less
-credential sitting in the working directory.
+Nothing here is on the hot path any more -- the Platform SDK mints its own
+client secret in-process on every token fetch, from the same private-key.pem.
+Two things keep this module around:
+
+  1. `load_config()` is the single source of truth for parsing .env, and
+     apple_ads_mcp/config.py re-exports it rather than growing a second parser
+     that could drift from this one.
+  2. Run it to see how many days the current key has left before that
+     `invalid_client` starts. That is the one failure the chain cannot
+     self-diagnose, because the error says nothing about expiry.
 """
 
 from __future__ import annotations

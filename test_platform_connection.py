@@ -10,7 +10,7 @@ error.
   2. the private key is really EC P-256
   3. the client secret signs, and is not near its 180-day expiry
   4. Apple issues an access token                -> credentials are valid
-  5. GET /me/acls lists our ad accounts          -> ** THIS ANSWERS adAccountId **
+  5. GET /acls lists our ad accounts          -> ** THIS ANSWERS adAccountId **
   6. POST /campaigns/find returns data           -> X-AP-Context works
   7. POST /reports/campaigns returns metrics     -> real reporting data
 
@@ -201,7 +201,7 @@ def run(window_days: int) -> int:
     # 5 -- ACL: THE adAccountId QUESTION ---------------------------------------
     # The only call in the whole API that takes no context header, which is what
     # makes it the right place to start: it cannot fail for header reasons.
-    step(5, "GET /me/acls  (no context header -- this is where adAccountId comes from)")
+    step(5, "GET /acls  (no context header -- this is where adAccountId comes from)")
     try:
         acl_response = api.get_user_acls()
     except ApiException as exc:

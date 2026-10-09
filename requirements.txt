@@ -1,20 +1,22 @@
 # Regenerated from the venv with `./venv/bin/pip freeze`.
 #
-# cryptography must stay >= 50: apple-ads-platform 1.109.0 requires it, and the
-# old `cryptography==41.0.5` pin in this file would have DOWNGRADED a working venv
-# and broken the Platform API client on the next `pip install -r requirements.txt`.
+# ONE API CLIENT as of 2026-10-09: the v5 scripts were retired and everything now
+# goes through apple-ads-platform against api.ads.apple.com/v1. `requests` went
+# with them -- the SDK uses urllib3, so nothing imports requests any more.
 #
-# Two API clients live here on purpose. See README "Two APIs, one repo":
-#   - requests / PyJWT      -> the v5 scripts (api.searchads.apple.com, sunsets 2027-01-26)
-#   - apple-ads-platform    -> the Platform API (api.ads.apple.com/v1) and the MCP server
-#   - mcp                   -> the stdio MCP server in apple_ads_mcp/
+# cryptography must stay >= 50: apple-ads-platform requires it, and the old
+# `cryptography==41.0.5` pin in this file would have DOWNGRADED a working venv.
+#
+#   apple-ads-platform  the Apple Ads Platform API client
+#   mcp                 the stdio MCP server in apple_ads_mcp/
+#   PyJWT               reading the client secret's expiry (generate_client_secret.py)
+#   PyMySQL             resolve_attribution.py's optional database path
 annotated-types==0.8.0
 anyio==4.15.1
 apple-ads-platform==1.109.0
 attrs==26.1.0
 certifi==2026.7.22
 cffi==2.1.1
-charset-normalizer==3.5.1
 click==8.5.0
 cryptography==50.0.1
 h11==0.16.0
@@ -35,7 +37,6 @@ python-dateutil==2.9.0.post0
 python-dotenv==1.2.3
 python-multipart==0.0.32
 referencing==0.37.0
-requests==2.34.2
 rpds-py==2026.9.1
 six==1.17.0
 sse-starlette==3.5.0

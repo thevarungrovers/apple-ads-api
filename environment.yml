@@ -10,7 +10,6 @@ channels:
 dependencies:
   - python>=3.12
   - cryptography>=50.0
-  - requests>=2.31
   - python-dotenv>=1.0
   - pyjwt>=2.8
   - pymysql>=1.1

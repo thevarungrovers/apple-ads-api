@@ -4,9 +4,6 @@
 .env.*
 !.env.example
 
-# Token cache
-.token_cache.json
-
 # Python
 venv/
 .venv/

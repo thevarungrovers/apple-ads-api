@@ -38,12 +38,8 @@ from _bootstrap import ensure_venv
 
 ensure_venv()  # re-exec under venv/ if launched with a bare `python3`
 
-import requests
-
-from apple_ads_client import AppleAdsClient, AppleAdsError
+from apple_ads_mcp.config import ConfigError
 from fetch_ad_structure import build_structure
-from generate_client_secret import ConfigError
-from get_token import TokenError
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPORTS_DIR = HERE / "reports"
@@ -175,12 +171,12 @@ def main() -> int:
         if args.structure:
             tree = json.loads(args.structure.read_text())
         else:
-            tree = build_structure(AppleAdsClient(), args.campaign)
-    except (ConfigError, TokenError, AppleAdsError) as exc:
+            tree = build_structure(args.campaign)
+    except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    except requests.RequestException as exc:
-        print(f"error: network failure calling Apple: {exc}", file=sys.stderr)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
 
     resolved, problems = resolve(rows, tree)

@@ -36,11 +36,15 @@ from _bootstrap import ensure_venv
 
 ensure_venv()  # re-exec under venv/ if launched with a bare `python3`
 
-import requests
-
-from apple_ads_client import AppleAdsClient, AppleAdsError
-from generate_client_secret import ConfigError, load_config
-from get_token import TokenError
+from apple_ads_mcp.client import (
+    context_header,
+    enum_value,
+    eq_filter,
+    query,
+    unwrap,
+)
+from apple_ads_mcp.client import call as api_call
+from apple_ads_mcp.config import ConfigError, load_config, resolve_ad_account_id
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPORTS_DIR = HERE / "reports"
@@ -50,36 +54,60 @@ REPORTS_DIR = HERE / "reports"
 NO_AD_SENTINEL = -1
 
 
-def build_structure(client: AppleAdsClient, campaign_ids: list[int] | None = None) -> dict:
-    """Walk campaigns -> ad groups -> keywords and return a flat lookup tree."""
-    campaigns = (client.campaigns().get("data") or [])
+def _rows(method: str, what: str, filters=None) -> list:
+    """One *_query_post call, unwrapped. page_size 1000 is Apple's ceiling."""
+    return unwrap(
+        api_call(
+            method,
+            x_ap_context=context_header(),
+            query_request=query(page_size=1000, filters=filters),
+        ),
+        what,
+    ) or []
+
+
+def build_structure(campaign_ids: list[int] | None = None) -> dict:
+    """Walk campaigns -> ad groups -> keywords and return a flat lookup tree.
+
+    Platform API notes, all of which differ from v5:
+      - `servingStatus` is now `displayStatus`.
+      - supplySources / countriesOrRegions moved under `targeting` and became
+        SINGULAR (supplyPlacement, countryOrRegion), each shaped {include: [...]}.
+      - Keywords are fetched by adGroupId filter rather than from a nested path.
+      - Enums deserialize to Python enum members, so anything written into the
+        JSON tree goes through enum_value() -- otherwise the saved file holds
+        "KeywordStatus.ENABLED" instead of "ENABLED" and every downstream string
+        comparison quietly fails.
+    """
+    campaigns = _rows("campaigns_query_post", "campaigns")
     if campaign_ids:
         wanted = {int(c) for c in campaign_ids}
-        campaigns = [c for c in campaigns if int(c["id"]) in wanted]
+        campaigns = [c for c in campaigns if int(c.id) in wanted]
 
     tree: dict = {"campaigns": {}, "ad_groups": {}, "keywords": {}}
 
     for campaign in campaigns:
-        cid = int(campaign["id"])
+        cid = int(campaign.id)
+        targeting = getattr(campaign, "targeting", None)
         tree["campaigns"][str(cid)] = {
             "id": cid,
-            "name": campaign.get("name"),
-            "status": campaign.get("status"),
-            "serving_status": campaign.get("servingStatus"),
-            "supply_sources": campaign.get("supplySources"),
-            "countries_or_regions": campaign.get("countriesOrRegions"),
+            "name": campaign.name,
+            "status": enum_value(campaign.status),
+            "serving_status": enum_value(campaign.display_status),
+            "supply_sources": _included(getattr(targeting, "supply_placement", None)),
+            "countries_or_regions": _included(getattr(targeting, "country_or_region", None)),
         }
 
-        for group in (client.ad_groups(cid).get("data") or []):
-            gid = int(group["id"])
-            keywords = client.targeting_keywords(cid, gid).get("data") or []
+        for group in _rows("adgroups_query_post", "ad groups", [eq_filter("campaignId", cid)]):
+            gid = int(group.id)
+            keywords = _rows("keywords_query_post", "keywords", [eq_filter("adGroupId", gid)])
             tree["ad_groups"][str(gid)] = {
                 "id": gid,
-                "name": group.get("name"),
+                "name": group.name,
                 "campaign_id": cid,
-                "campaign_name": campaign.get("name"),
-                "status": group.get("status"),
-                "serving_status": group.get("servingStatus"),
+                "campaign_name": campaign.name,
+                "status": enum_value(group.status),
+                "serving_status": enum_value(group.display_status),
                 # An ad group with no targeting keywords runs on Search Match
                 # alone. But Search Match can ALSO be switched on alongside
                 # explicit keywords (automatedKeywordsOptIn), and then a tap in
@@ -88,24 +116,32 @@ def build_structure(client: AppleAdsClient, campaign_ids: list[int] | None = Non
                 # here", or the join reports correct data as broken.
                 "keyword_count": len(keywords),
                 "search_match_only": len(keywords) == 0,
-                "search_match_opt_in": bool(group.get("automatedKeywordsOptIn")),
-                "search_match_possible": len(keywords) == 0 or bool(group.get("automatedKeywordsOptIn")),
+                "search_match_opt_in": bool(group.automated_keywords_opt_in),
+                "search_match_possible": len(keywords) == 0 or bool(group.automated_keywords_opt_in),
             }
 
             for keyword in keywords:
-                kid = int(keyword["id"])
+                kid = int(keyword.id)
                 tree["keywords"][str(kid)] = {
                     "id": kid,
-                    "text": keyword.get("text"),
-                    "match_type": keyword.get("matchType"),
-                    "status": keyword.get("status"),
+                    "text": keyword.text,
+                    "match_type": enum_value(keyword.match_type),
+                    "status": enum_value(keyword.status),
                     "ad_group_id": gid,
-                    "ad_group_name": group.get("name"),
+                    "ad_group_name": group.name,
                     "campaign_id": cid,
-                    "campaign_name": campaign.get("name"),
+                    "campaign_name": campaign.name,
                 }
 
     return tree
+
+
+def _included(targeting_data) -> list | None:
+    """The `include` list out of a Platform API targeting block."""
+    if targeting_data is None:
+        return None
+    values = getattr(targeting_data, "include", None)
+    return [enum_value(v) for v in values] if values else None
 
 
 def print_table(tree: dict) -> None:
@@ -159,13 +195,13 @@ def main() -> int:
             campaign_ids = [int(default)]
 
     try:
-        client = AppleAdsClient(config=config)
-        tree = build_structure(client, campaign_ids)
-    except (ConfigError, TokenError, AppleAdsError) as exc:
+        resolve_ad_account_id(config)
+        tree = build_structure(campaign_ids)
+    except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    except requests.RequestException as exc:
-        print(f"error: network failure calling Apple: {exc}", file=sys.stderr)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
 
     if args.json:
