@@ -139,6 +139,12 @@ clientId and `iss` for the teamId, and they must not be "tidied" together.
 
 # The MCP server's own surface check — no network, no Apple
 ./venv/bin/python tests/test_tool_surface.py
+./venv/bin/python tests/test_logdb.py              # the log database
+
+# Move the retired .audit/changes.jsonl ledger into logs/apple-ads.db
+./venv/bin/python migrate_ledger.py                # preview
+./venv/bin/python migrate_ledger.py --apply
+./venv/bin/python migrate_ledger.py --verify       # compare the two
 
 # Daily campaign performance (spend, impressions, taps, installs, avg CPT)
 ./venv/bin/python fetch_campaign_report.py                     # last 7 days
@@ -479,19 +485,70 @@ A **file**, not an environment variable, because a long-lived stdio server never
 sees a variable exported after it started. The check runs inside every `apply_*`
 and is never cached.
 
+### The log database
+
+Everything this repo does to Apple is recorded in one SQLite file,
+`logs/apple-ads.db`, mode 600, `logs/` gitignored. Three tables:
+
+| Table | One row per |
+|---|---|
+| `tool_calls` | MCP tool invocation, or one `apple_ads_cli.py` command |
+| `api_calls` | outbound call to Apple, pointing at the `tool_calls` row that caused it |
+| `changes` | mutation — the ledger, below |
+
+The link between the first two is the point. One tool call fans out to many API
+calls — `query_audit` loops over every entity type, `reconcile_ledger` pulls a
+thousand rows — so logging only at the API layer gives you N unrelated rows and
+no way to ask what the agent actually did.
+
+```sql
+-- the last 20 things the agent did, and what each cost in calls
+SELECT t.ts, t.tool_name, t.ok, t.duration_ms, COUNT(a.id) AS api_calls
+FROM tool_calls t LEFT JOIN api_calls a ON a.tool_call_id = t.id
+GROUP BY t.id ORDER BY t.ts DESC LIMIT 20;
+
+-- writes that started and never finished
+SELECT entry_id, ts, tool, entity_id FROM changes WHERE outcome IS NULL;
+```
+
+Three things worth knowing about how it is wired:
+
+- **The path comes from the package, never the working directory.** The MCP
+  server is spawned by Claude Code with *its* cwd, so a relative path would
+  scatter one database per directory the agent happened to start in.
+- **WAL, `busy_timeout`, `synchronous=FULL`.** The server is long-lived while
+  the CLI runs in a terminal, so two processes write at once; the default
+  journal mode hands the second one `database is locked`.
+- **Two error policies, on purpose.** Writes to `tool_calls` and `api_calls`
+  never raise — the server's stderr is invisible in normal use, so a logging
+  bug would be both fatal and silent. Writes to `changes` always raise, because
+  that table is the only record of a real-money mutation.
+
+The break-glass CLI is logged too. It does not go through
+`apple_ads_mcp.client.call()`, so it needed its own instrumentation — and it is
+the one path with no guardrails in front of it. It writes `api_calls` rows, not
+`changes` rows: a generic endpoint caller cannot know which field of which
+entity it just moved, and a ledger entry guessed from a URL would be worse than
+none.
+
 ### The ledger
 
-`.audit/changes.jsonl`, mode 600, `.audit/` gitignored because the entries carry
-real entity ids. Append-only, under `flock`, so a concurrent `apple_ads_cli.py`
-run cannot interleave.
+`logs/apple-ads.db`, the `changes` table. Mode 600, `logs/` gitignored because
+the rows carry real entity ids.
 
-**Two lines per write**, linked by `entry_id`: an `intent` written *before* the
-API call leaves the process, and an `outcome` written after it returns. The pair
-is the whole point. A single line written afterwards records only the writes that
-came back, and the case that actually needs evidence is the one that did not — a
+**Two phases per write**, on one row: an `intent` written *before* the API call
+leaves the process, and an `outcome` filled in after it returns. The pair is the
+whole point. A record written only afterwards captures the writes that came
+back, and the case that actually needs evidence is the one that did not — a
 crash or a timeout, where the mutation may well have landed at Apple's end and
-nothing local would ever say so. An `intent` with no `outcome` is the signal
+nothing local would ever say so. A row whose `outcome` is null is the signal
 "something may have changed; go and look".
+
+That is an INSERT followed by an UPDATE, deliberately not an upsert. In
+`ON CONFLICT ... DO UPDATE`, `excluded.col` is the value that *would* have been
+inserted, so a clause written to preserve the intent columns overwrites them
+instead — and only on the second pass, which is why
+`test_a_second_outcome_does_not_wipe_the_intent` applies an outcome twice.
 
 **HTTP 200 does not mean applied.** Every write compares the value Apple echoed
 back against the one that was asked for, and records `failed` when they differ.
@@ -695,19 +752,22 @@ openssl dgst -sha256 public-key.pem      # the two digests must be identical
 | `generate_client_secret.py` | Owns `.env` parsing for the whole repo, and prints the days left on the client secret.                                                                                              |
 | `apple_ads_cli.py`          | Break-glass CLI — any endpoint, human-driven. Dry run by default; writes need `--apply` (and `--confirm-live` on a serving campaign).                                                 |
 | `test_platform_connection.py` | 7-step end-to-end verification; step 5 discovers `APPLE_ADS_AD_ACCOUNT_ID`.                                                                                                        |
-| `apple_ads_mcp/`            | The `apple-ads` MCP server. `config` / `client` / `guardrails` / `ledger` / `previews` / `tools_read` / `tools_write` / `server`.                                                     |
+| `apple_ads_mcp/`            | The `apple-ads` MCP server. `config` / `client` / `guardrails` / `ledger` / `logdb` / `previews` / `tools_read` / `tools_write` / `server`.                                           |
 | `tests/test_tool_surface.py` | Pins the registered tool-name set, so the write surface cannot widen by accident.                                                                                                   |
+| `tests/test_logdb.py`       | 25 tests over the log database: the two-phase ledger, the two error policies, concurrency, and the JSONL migration.                                                                  |
+| `migrate_ledger.py`         | Moves the retired `.audit/changes.jsonl` into the database. Preview by default; `--apply`, `--verify`. Idempotent.                                                                   |
 | `fetch_campaign_report.py`  | Daily campaign performance → table and CSV.                                                                                                                                          |
 | `fetch_ad_structure.py`     | Campaign → ad group → keyword tree, as a name lookup.                                                                                                                                |
 | `resolve_attribution.py`    | Joins `attribution_apple_search_ads` rows to that tree, with a verification pass.                                                                                                    |
 | `_bootstrap.py`             | Safety net: if the active interpreter is missing the dependencies, re-execs the script under a local `venv/` should one exist. The MCP server deliberately does **not** call it.     |
-| `.audit/changes.jsonl`      | The MCP server's append-only write ledger, mode 600. Gitignored. `.audit/DISABLE_WRITES` is the kill switch.                                                                          |
+| `logs/apple-ads.db`         | The log database: `tool_calls`, `api_calls` and the `changes` ledger. Mode 600, gitignored.                                                                                          |
+| `.audit/`                   | `DISABLE_WRITES`, the kill switch. Also holds `changes.jsonl`, the retired ledger, kept frozen as a fallback — nothing writes to it.                                                 |
 
 
 `.gitignore` excludes `*.pem`, `.env*` (except `.env.example`), `venv/`,
-`reports/` and `.audit/`. Before any commit, confirm with `git status`
-that no key, `.env`, report or ledger is staged; `git check-ignore -v <path>`
-shows which rule covers a given file.
+`reports/`, `.audit/` and `logs/`. Before any commit, confirm with `git status`
+that no key, `.env`, report, log database or ledger is staged;
+`git check-ignore -v <path>` shows which rule covers a given file.
 
 **This repository is public.** No real identifier belongs in a tracked file — not
 the org id, not the ad account id, not a campaign id, and not the company name.
