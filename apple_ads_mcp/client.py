@@ -40,6 +40,7 @@ from apple_ads_platform.auth.errors import AuthError
 from apple_ads_platform.builder import AppleAdsClientBuilder
 from mcp.server.mcpserver.exceptions import ToolError
 
+from apple_ads_mcp import logdb
 from apple_ads_mcp.config import load_config, private_key_pem, resolve_ad_account_id
 
 # Read calls are cheap and chatty; reports are neither.
@@ -121,16 +122,21 @@ def call(method_name: str, /, **kwargs: Any) -> Any:
     Every exception leaving here is a ToolError, because that is the only
     exception type the MCP SDK renders back to the model verbatim; anything else
     becomes an opaque UnexpectedToolError and the model is told nothing useful.
+
+    This is the chokepoint every caller shares -- the MCP tools and the fetch
+    scripts both -- so it is also where each outbound call is logged. A 401
+    retry is logged as a second row, because it IS a second request to Apple
+    and a log that hid it would understate what the account actually saw.
     """
     try:
-        return getattr(get_api(), method_name)(**kwargs)
+        return _invoke(method_name, kwargs)
     except ApiException as exc:
         if exc.status in (401, 403):
             # Could be an expired/revoked token, could be the context header. One
             # rebuild distinguishes them: if it was the header, this fails again.
             reset_api()
             try:
-                return getattr(get_api(), method_name)(**kwargs)
+                return _invoke(method_name, kwargs)
             except ApiException as retry_exc:
                 raise ToolError(_describe(method_name, retry_exc)) from retry_exc
         raise ToolError(_describe(method_name, exc)) from exc
@@ -140,6 +146,21 @@ def call(method_name: str, /, **kwargs: Any) -> Any:
         raise
     except Exception as exc:
         raise ToolError(f"{method_name} failed to reach Apple: {type(exc).__name__}: {exc}") from exc
+
+
+def _invoke(method_name: str, kwargs: dict[str, Any]) -> Any:
+    """One attempt at one SDK method, logged to the database.
+
+    Separated from `call()` so the 401 rebuild-and-retry produces two rows
+    rather than one; the logger itself never raises, so a failure here is the
+    API's, not the log's.
+    """
+    with logdb.record_api_call(method_name, request=kwargs) as slot:
+        try:
+            return getattr(get_api(), method_name)(**kwargs)
+        except ApiException as exc:
+            slot["http_status"] = getattr(exc, "status", None)
+            raise
 
 
 def _describe(method_name: str, exc: ApiException) -> str:
@@ -213,6 +234,39 @@ def format_money(value: Any) -> str:
         return "-"
     currency = money_currency(value) or ""
     return f"{amount} {currency}".strip()
+
+
+def normalized_value(value: str) -> str:
+    """Compare "0.01 CAD" with "0.01" by amount, and statuses by text.
+
+    Apple echoes money back with a currency and sometimes with different
+    trailing zeros ("0.0100"), so a string comparison would report a successful
+    write as a failure.
+    """
+    head = str(value).strip().split(" ")[0]
+    try:
+        return str(Decimal(head).normalize())
+    except Exception:
+        return str(value).strip().upper()
+
+
+def landed(observed: str | None, intended: str) -> bool:
+    """Did the value Apple echoed back actually become the one we asked for?
+
+    HTTP 200 DOES NOT MEAN APPLIED. Verified live 2026-10-08: a keyword-bid PUT
+    against an ad group on an automated bid strategy returns 200 with the entity
+    unchanged and nothing in the response saying so. Trusting the status code
+    reports a successful change that never happened -- and the ledger then
+    records an `after` the account never held, which makes every later revert
+    and reconcile wrong too.
+
+    Lives here rather than inside tools_write so the ledger migration can
+    classify a historical entry by the SAME rule the live write path uses,
+    rather than by a second copy of it free to drift.
+    """
+    if observed is None:
+        return False  # nothing echoed back is not evidence of success
+    return normalized_value(observed) == normalized_value(intended)
 
 
 def parse_decimal(raw: str, field: str) -> Decimal:

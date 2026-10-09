@@ -1140,7 +1140,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         days: Annotated[int, Field(description="How far back to look", ge=1, le=365)] = 7,
         limit: Annotated[int, Field(description="Max entries", ge=1, le=500)] = 100,
     ) -> LedgerList:
-        """Every write this server attempted, from .audit/changes.jsonl.
+        """Every write this server attempted, from the `changes` table.
 
         An entry whose `outcome` is null is the one to look at: the write was
         started and nothing recorded how it ended, so it may have landed at

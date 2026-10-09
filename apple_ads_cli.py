@@ -40,6 +40,7 @@ ensure_venv()  # re-exec under venv/ if launched with a bare `python3`
 
 import urllib3
 
+from apple_ads_mcp import logdb
 from apple_ads_mcp.client import context_header, get_api
 from apple_ads_mcp.config import ConfigError, resolve_ad_account_id
 
@@ -111,16 +112,29 @@ def serving_campaign_id(path: str) -> str | None:
 
 
 def request(method: str, path: str, body: dict | None, token: str) -> tuple[int, str]:
+    """Send one raw request, and log it.
+
+    This path does NOT go through `apple_ads_mcp.client.call()`, so it would be
+    invisible to a log that only instrumented the SDK -- and it is the one path
+    with no guardrails in front of it, which makes it the path whose record
+    matters most. It writes an `api_calls` row, not a `changes` row: a generic
+    endpoint caller cannot know which field of which entity it just moved, and
+    a ledger entry guessed from a URL would be worse than none.
+    """
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     if needs_context(path):
         headers["X-AP-Context"] = context_header()
-    response = urllib3.PoolManager(timeout=urllib3.Timeout(connect=10.0, read=TIMEOUT)).request(
-        method.upper(),
-        f"{BASE_URL}/{path.strip('/')}",
-        body=json.dumps(body).encode() if body is not None else None,
-        headers=headers,
-    )
-    return response.status, response.data.decode("utf-8", "replace")
+    with logdb.record_api_call(method.upper(), path=path, request=body) as slot:
+        response = urllib3.PoolManager(
+            timeout=urllib3.Timeout(connect=10.0, read=TIMEOUT)
+        ).request(
+            method.upper(),
+            f"{BASE_URL}/{path.strip('/')}",
+            body=json.dumps(body).encode() if body is not None else None,
+            headers=headers,
+        )
+        slot["http_status"] = response.status
+        return response.status, response.data.decode("utf-8", "replace")
 
 
 def main() -> int:
@@ -139,6 +153,27 @@ def main() -> int:
                              "serving right now")
     args = parser.parse_args()
 
+    label = f"apple_ads_cli {args.method.upper()} {args.path.strip('/')}"
+    with logdb.record_tool_call(
+        label,
+        args={
+            "method": args.method.upper(),
+            "path": args.path,
+            "apply": args.apply,
+            "confirm_live": args.confirm_live,
+        },
+    ):
+        return _run(args)
+
+
+def _run(args: argparse.Namespace) -> int:
+    """Everything after argument parsing, so one command is one tool call.
+
+    A single invocation can send two requests -- the serving-campaign pre-check
+    GET and then the write itself -- and grouping them under one `tool_calls`
+    row is what makes the log read as "this command did this" rather than as
+    two unrelated requests that happened close together.
+    """
     try:
         body = load_body(args.data)
         account = resolve_ad_account_id()
