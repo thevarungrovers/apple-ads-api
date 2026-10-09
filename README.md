@@ -288,6 +288,8 @@ as a second line of defence.
 
 ### Registration
 
+Add it to the global `mcpServers` block of `~/.claude.json`:
+
 ```json
 "apple-ads": {
   "command": "/Users/you/dev/apple-ads-api/venv/bin/python",
@@ -295,14 +297,103 @@ as a second line of defence.
 }
 ```
 
-in the global `mcpServers` block of `~/.claude.json`. **Absolute interpreter,
-absolute script path** — never a bare `python3`, and not `-m`: the launching
-process's PATH and cwd are not yours.
+or equivalently:
+
+```bash
+claude mcp add --scope user apple-ads -- \
+    /Users/you/dev/apple-ads-api/venv/bin/python \
+    /Users/you/dev/apple-ads-api/apple_ads_mcp/server.py
+```
+
+`--scope` takes `local`, `user` or `project`. Use `user`. Avoid `project`: it
+writes a committed `.mcp.json`, and this repo is public, so that would publish
+absolute paths out of somebody's home directory for no benefit — everyone needs
+their own venv and their own credentials regardless.
+
+**Absolute interpreter, absolute script path** — never a bare `python3`, and not
+`-m`: the launching process's PATH and cwd are not yours.
 
 Credentials stay in `.env` (mode 600) and **not** in the registration's `env`
 block. `~/.claude.json` is a config file that gets backed up, copied between
 machines and pasted into issues; `.env` is already the one place credentials
 live, and splitting them across two files means rotating them in two places.
+
+Check it without restarting anything — this runs a real connection attempt:
+
+```bash
+claude mcp list | grep apple-ads
+# apple-ads: /…/venv/bin/python /…/apple_ads_mcp/server.py - ✔ Connected
+```
+
+A server registered mid-session shows `Connected` here while its tools are still
+absent from the session you are in. That is expected: the tool list is read at
+client startup, so restart Claude Code and `/mcp` will show all 36.
+
+> **The registration points at a path, not at a branch.** It is whatever is
+> checked out at that path right now. Merging changes nothing, but checking out
+> a branch from before `apple_ads_mcp/` existed makes the server disappear with
+> no error that mentions git.
+
+### Permissions: allowlist every `preview_*`, never an `apply_*`
+
+This is the step that makes the preview/apply split pay off, and it is easy to
+skip. Without it every read prompts too, and a human clicking through twenty
+harmless prompts is being trained for the one that matters.
+
+Rules key on the tool name, as `mcp__apple-ads__<tool>`, in the
+`permissions.allow` array of `~/.claude/settings.json` (or a project
+`.claude/settings.json`):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__apple-ads__whoami",
+      "mcp__apple-ads__list_campaigns",
+      "mcp__apple-ads__get_campaign",
+      "mcp__apple-ads__list_ad_groups",
+      "mcp__apple-ads__get_ad_group",
+      "mcp__apple-ads__list_keywords",
+      "mcp__apple-ads__get_keyword",
+      "mcp__apple-ads__list_negative_keywords",
+      "mcp__apple-ads__list_shared_budgets",
+      "mcp__apple-ads__campaign_report",
+      "mcp__apple-ads__ad_group_report",
+      "mcp__apple-ads__keyword_report",
+      "mcp__apple-ads__search_term_report",
+      "mcp__apple-ads__keyword_suggestions",
+      "mcp__apple-ads__budget_recommendations",
+      "mcp__apple-ads__list_recent_changes",
+      "mcp__apple-ads__get_guardrails",
+      "mcp__apple-ads__list_my_changes",
+      "mcp__apple-ads__reconcile_ledger",
+
+      "mcp__apple-ads__preview_keyword_bid",
+      "mcp__apple-ads__preview_keyword_bids_bulk",
+      "mcp__apple-ads__preview_keyword_status",
+      "mcp__apple-ads__preview_ad_group_status",
+      "mcp__apple-ads__preview_campaign_status",
+      "mcp__apple-ads__preview_campaign_daily_budget",
+      "mcp__apple-ads__preview_negative_keywords_add",
+      "mcp__apple-ads__preview_negative_keyword_pause"
+    ]
+  }
+}
+```
+
+Nine tool names are **deliberately absent** — the eight `apply_*` and
+`revert_change`. Every one of them stops and asks, with its preview sitting
+directly above the prompt.
+
+Two things not to do:
+
+- **Do not use a blanket `mcp__apple-ads` entry.** It approves the whole server,
+  writes included, which is the opposite of the point.
+- **Do not assume `mcp__apple-ads__preview_*` works.** Whether that wildcard is
+  honoured depends on your Claude Code version, and the failure is silent — the
+  prompt simply keeps appearing. The names are listed out above so there is
+  nothing to guess. If you do try the wildcard, confirm a preview runs without
+  prompting before relying on it.
 
 ---
 
