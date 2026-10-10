@@ -1,4 +1,4 @@
-# Apple Ads API
+# Apple Ads API  [![M8ven Score](https://m8ven.ai/badge/mcp/thevarungrovers-apple-ads-api-1859fz?v=c6361b979cbba3ee16039ff9702045bb)](https://m8ven.ai/mcp/thevarungrovers-apple-ads-api-1859fz?s=readme)
 
 OAuth (client-credentials) access to the Apple Ads account: campaign performance
 pulled programmatically instead of exported by hand, plus an **MCP server** so an

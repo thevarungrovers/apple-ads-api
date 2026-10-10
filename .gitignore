@@ -22,3 +22,5 @@ logs/
 
 # Guardrail overrides are committed; local experiments are not
 guardrails.local.toml
+
+.DS_Store
