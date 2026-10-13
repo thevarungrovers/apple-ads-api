@@ -146,6 +146,35 @@ def load_limits() -> Limits:
     )
 
 
+# --- read-only mode ----------------------------------------------------------
+
+READ_ONLY_ENV = "APPLE_ADS_READ_ONLY"
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def read_only_mode() -> bool:
+    """True when this process must publish no `apply_*` tool at all.
+
+    A FOURTH layer, and the only one that works no matter which client is
+    driving. Claude Code can allowlist tools by name, so there "never approve an
+    apply" is something the client can express. Claude Desktop, Cursor and Codex
+    have no equivalent -- their MCP config says which servers to run, not which
+    tools may be called -- so for them the only honest way to offer a read-only
+    install is for the server to publish no write tools in the first place. An
+    unregistered tool is unreachable, exactly as an unwritten one is.
+
+    Read from the PROCESS environment rather than from .env, and that is the
+    point: every client's MCP config has its own `env` block, so one checkout
+    can be read-only for one client and writable for another without two copies
+    of the repo or two sets of credentials.
+
+    Not the same thing as the kill switch. `DISABLE_WRITES` is a file, it stops
+    an already-published apply mid-session, and it is account-wide. This is set
+    once at startup, per client, and the tools simply never appear.
+    """
+    return os.environ.get(READ_ONLY_ENV, "").strip().lower() in _TRUTHY
+
+
 # --- kill switch -------------------------------------------------------------
 
 

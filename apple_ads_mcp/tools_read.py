@@ -1,4 +1,4 @@
-"""Read-only tools. Every one of them carries `read_only_hint=True`.
+"""Read-only tools. Every one of them declares all four tool hints.
 
 A read-only server is independently useful -- it is the whole "ask the agent what
 the account is doing" half of the job -- and it is the natural stopping point if
@@ -32,7 +32,7 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from apple_ads_mcp import client, ledger
-from apple_ads_mcp.guardrails import writes_disabled
+from apple_ads_mcp.guardrails import read_only_mode, writes_disabled
 from apple_ads_mcp.client import (
     REPORT_TIMEOUT,
     call,
@@ -46,8 +46,28 @@ from apple_ads_mcp.client import (
     unwrap,
 )
 
-READ_ONLY = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=True)
-LOCAL_ONLY = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False)
+# ALL FOUR HINTS, ALWAYS, ON EVERY TOOL. A hint left unset is published as
+# absent, and a client that cannot see one falls back on the spec's default --
+# which for `destructiveHint` is TRUE. So an omitted hint does not mean "unknown",
+# it means "assume the worst", and a plain `list_campaigns` ends up rendered with
+# the same warning as a budget change. Some tool directories reject the tool
+# outright. Spell every one of them out, even where the value looks obvious.
+#
+# READ_ONLY   reads Apple's API: no mutation, same answer twice, external service.
+# LOCAL_ONLY  answers from this process and the local ledger; touches no network,
+#             which is the only difference -- hence open_world_hint=False.
+READ_ONLY = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
+)
+LOCAL_ONLY = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
+)
 
 MAX_REPORT_DAYS = 90  # Apple's DAILY granularity window
 
@@ -232,6 +252,10 @@ class AuditList(BaseModel):
 
 
 class GuardrailReport(BaseModel):
+    read_only_server: bool = Field(
+        default=False,
+        description="True when this server published no apply_* tools at all",
+    )
     source: str
     kill_switch_active: bool
     kill_switch_reason: str | None
@@ -1113,7 +1137,9 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         """
         limits = state.limits
         reason = writes_disabled()
+        read_only = read_only_mode()
         return GuardrailReport(
+            read_only_server=read_only,
             source=limits.source,
             kill_switch_active=reason is not None,
             kill_switch_reason=reason,
@@ -1132,6 +1158,15 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             note=(
                 "An empty allowed_campaign_ids means every campaign is in scope. "
                 "Session counters reset only when the server restarts."
+                + (
+                    " THIS SERVER IS READ-ONLY: it published no apply_* tools and no "
+                    "revert_change, so nothing here can change the account. Previews "
+                    "still work -- use them to show a human exactly what you would "
+                    "change, and let them make it from a writable client or the Apple "
+                    "Ads UI."
+                    if read_only
+                    else ""
+                )
             ),
         )
 

@@ -97,6 +97,7 @@ from apple_ads_mcp.guardrails import (
     check_known_status,
     check_pct_increase,
     check_projected_delta,
+    read_only_mode,
     writes_disabled,
 )
 from apple_ads_mcp.previews import (
@@ -112,16 +113,40 @@ from apple_ads_mcp.previews import (
 )
 from apple_ads_mcp.tools_read import entity_metrics_7d
 
-# A preview is read-only and open to the world; it is safe to allowlist.
-PREVIEW = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=True)
+# All four hints on every one of these too -- see the note in tools_read.py for
+# why an omitted hint is worse than a wrong one.
+#
+# A preview reads Apple, mints a token in memory and writes nothing to the
+# account, so it is safe to allowlist: read_only_hint=True. The token it mints is
+# single-use, but calling a preview twice just produces a second token and
+# changes nothing anybody can observe at Apple's end, so idempotent_hint stays
+# True.
+PREVIEW = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
+)
 
 # An apply mutates. idempotent_hint=False because a token is single-use: calling
 # the same apply twice is not a no-op, it is an error the second time.
+# destructive_hint=False on this one: pausing and un-pausing are one call each,
+# and adding a negative keyword only ever adds. Marking a reversible action
+# destructive trains you to click through the loud prompts.
 APPLY = ToolAnnotations(
-    read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=True,
 )
+# destructive_hint=True only where the action moves money at campaign scale:
+# pausing a whole campaign stops every ad group under it, and a daily budget is
+# the ceiling on the day's spend.
 APPLY_DESTRUCTIVE = ToolAnnotations(
-    read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=True
+    read_only_hint=False,
+    destructive_hint=True,
+    idempotent_hint=False,
+    open_world_hint=True,
 )
 
 
@@ -161,6 +186,24 @@ class BulkApplyResult(BaseModel):
 
 
 def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitions
+    # Read-only mode: the `preview_*` tools still register, because a preview
+    # writes nothing and is the whole point of being able to say "here is what I
+    # would change". Every `apply_*` and `revert_change` is simply never handed
+    # to the registrar, so they are absent from tools/list and unreachable over
+    # MCP -- not refused at call time, ABSENT. See guardrails.read_only_mode().
+    read_only = read_only_mode()
+
+    def apply_tool(**kwargs):
+        """`mcp.tool(...)` for a write tool, or a no-op when read-only.
+
+        Returning the bare function leaves it defined and callable in-process --
+        which the tests rely on -- while registering nothing, so nothing crosses
+        the MCP boundary.
+        """
+        if read_only:
+            return lambda fn: fn
+        return mcp.tool(**kwargs)
+
     # --- shared machinery ----------------------------------------------------
 
     def guard_writes() -> None:
@@ -449,7 +492,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             },
         )
 
-    @mcp.tool(
+    @apply_tool(
         title="Apply a keyword bid change (CHANGES WHAT THIS KEYWORD COSTS)",
         annotations=APPLY,
     )
@@ -621,7 +664,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             note="One out-of-bounds item blocks the whole batch.",
         )
 
-    @mcp.tool(
+    @apply_tool(
         title="Apply several keyword bid changes (CHANGES WHAT THESE KEYWORDS COST)",
         annotations=APPLY,
     )
@@ -700,15 +743,33 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
                 failures.append(f"keyword {item['keyword_id']}: Apple returned no result for it")
                 lines.append(f"{item['keyword_id']} {item['text']!r}: NO RESULT RETURNED")
                 continue
-            if result.success:
-                succeeded += 1
-                lines.append(
-                    f"{item['keyword_id']} {item['text']!r}: {item['before']} -> "
-                    f"{format_money(getattr(result.result, 'bid', None))}"
-                )
-            else:
+            if not result.success:
                 failures.append(f"keyword {item['keyword_id']}: {result.error}")
                 lines.append(f"{item['keyword_id']} {item['text']!r}: FAILED -- {result.error}")
+                continue
+            # `result.success` is Apple's acknowledgement, NOT evidence the bid
+            # moved. Under an automated bid strategy Apple accepts the item,
+            # reports success and echoes the OLD bid back -- the same silent
+            # discard the single-keyword path guards with landed(). Counting
+            # that as applied would write an `after` into the ledger the account
+            # never held, and revert_change would then push a value back that it
+            # never moved off.
+            observed = format_money(getattr(result.result, "bid", None))
+            if landed(observed, item["after"]):
+                succeeded += 1
+                lines.append(
+                    f"{item['keyword_id']} {item['text']!r}: {item['before']} -> {observed}"
+                )
+            else:
+                failures.append(
+                    f"keyword {item['keyword_id']}: Apple reported success but the bid "
+                    f"is still {observed!r}, not {item['after']!r}. Nothing changed -- "
+                    f"usually an automated bid strategy, where Apple sets the bids and "
+                    f"a written one is accepted and ignored."
+                )
+                lines.append(
+                    f"{item['keyword_id']} {item['text']!r}: NOT APPLIED -- still {observed}"
+                )
 
         failed = len(pending.items) - succeeded
         outcome = (
@@ -803,7 +864,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             },
         )
 
-    @mcp.tool(title="Apply a keyword pause or enable (CHANGES LIVE DELIVERY)", annotations=APPLY)
+    @apply_tool(title="Apply a keyword pause or enable (CHANGES LIVE DELIVERY)", annotations=APPLY)
     def apply_keyword_status(
         preview_token: Annotated[
             str, Field(description="The token returned by preview_keyword_status")
@@ -919,7 +980,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             },
         )
 
-    @mcp.tool(
+    @apply_tool(
         title="Apply an ad group pause or enable (AFFECTS EVERY KEYWORD IN IT)",
         annotations=APPLY,
     )
@@ -1072,7 +1133,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             },
         )
 
-    @mcp.tool(
+    @apply_tool(
         title="Apply an ad group default bid change (CHANGES WHAT THIS AD GROUP COSTS)",
         annotations=APPLY,
     )
@@ -1204,7 +1265,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             },
         )
 
-    @mcp.tool(
+    @apply_tool(
         title="Apply a campaign pause or enable (STOPS OR STARTS A WHOLE CAMPAIGN)",
         annotations=APPLY_DESTRUCTIVE,
     )
@@ -1339,7 +1400,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             },
         )
 
-    @mcp.tool(
+    @apply_tool(
         title="Apply a campaign daily budget change (SPENDS MONEY)",
         annotations=APPLY_DESTRUCTIVE,
     )
@@ -1521,7 +1582,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             ),
         )
 
-    @mcp.tool(
+    @apply_tool(
         title="Apply negative keywords (EXCLUDES TRAFFIC; not idempotent)",
         annotations=APPLY,
     )
@@ -1691,7 +1752,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             },
         )
 
-    @mcp.tool(
+    @apply_tool(
         title="Apply a negative keyword pause or enable (CHANGES WHAT TRAFFIC IS EXCLUDED)",
         annotations=APPLY,
     )
@@ -1752,7 +1813,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
 
     # --- revert --------------------------------------------------------------
 
-    @mcp.tool(
+    @apply_tool(
         title="Undo one change from the ledger (writes the old value back)",
         annotations=APPLY,
     )
@@ -1773,6 +1834,16 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         is not exposed. Pause them instead.
         """
         guard_writes()
+        # A revert is a real write to the live account, so it is subject to the
+        # same per-session applies cap. Zero projected delta: a revert restores a
+        # value the account already held, so it cannot push the session's
+        # projected spend past anything. Without this, a loop could revert every
+        # applied entry in the ledger's whole window -- changes made in earlier
+        # sessions, which this session's counter has never seen -- with no bound
+        # at all.
+        reason = state.counters.would_exceed(Decimal("0"))
+        if reason:
+            raise ToolError(reason)
         entry = ledger.find_entry(entry_id)
         if entry is None:
             raise ToolError(f"no ledger entry {entry_id!r}. list_my_changes shows valid ids.")
@@ -1844,10 +1915,29 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
     def _revert_result(
         new_entry_id: str, entry: dict[str, Any], before: str, after: str, observed: str | None
     ) -> ApplyResult:
-        ledger.write_outcome(new_entry_id, outcome=ledger.APPLIED, observed_after=observed)
-        state.counters.record(Decimal("0"))
+        """Record how the revert went, by READ-BACK and not by HTTP status.
+
+        A revert is a write like any other, so HTTP 200 does not mean it landed
+        -- and a revert that Apple silently discarded is the worst kind to call
+        a success, because the operator is told the account is back where it was
+        and stops looking. It also has to be recorded as `failed` rather than
+        `applied` for a second reason: `reverted_entry_ids()` counts only
+        APPLIED reverts, so a failed one correctly leaves the original entry
+        revertable and the retry available.
+        """
+        applied = landed(observed, before)
+        ledger.write_outcome(
+            new_entry_id,
+            outcome=ledger.APPLIED if applied else ledger.FAILED,
+            observed_after=observed,
+            detail=""
+            if applied
+            else f"Apple answered 200 but echoed {observed!r}, not {before!r}",
+        )
+        if applied:
+            state.counters.record(Decimal("0"))
         return ApplyResult(
-            applied=True,
+            applied=applied,
             entry_id=new_entry_id,
             tool="revert_change",
             entity_type=str(entry.get("entity_type")),
@@ -1860,7 +1950,23 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             observed_after=observed,
             projected_daily_spend_delta="0",
             session={k: str(v) for k, v in state.counters.snapshot().items()},
-            note=f"Reverted entry {entry.get('entry_id')}.",
+            failures=[]
+            if applied
+            else [
+                f"Apple accepted the revert but the value is still {observed!r}, "
+                f"not {before!r}. Entry {entry.get('entry_id')} is NOT undone."
+            ],
+            note=(
+                f"Reverted entry {entry.get('entry_id')}."
+                if applied
+                else (
+                    f"NOT REVERTED. Apple returned success and left the value alone, "
+                    f"so entry {entry.get('entry_id')} still stands. For a bid this "
+                    f"usually means the ad group moved onto an automated bid strategy, "
+                    f"where Apple sets the bids. Recorded as failed, so the original "
+                    f"entry stays revertable once the cause is fixed."
+                )
+            ),
         )
 
     def _revert_keyword_bid(entry, before, after) -> ApplyResult:

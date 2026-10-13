@@ -20,7 +20,12 @@ Run it without touching Apple:
 
 from __future__ import annotations
 
+import ast
+import json
+import os
 import pathlib
+import re
+import subprocess
 import sys
 
 import anyio
@@ -91,6 +96,10 @@ EXPECTED_TOOLS = READ_TOOLS | PREVIEW_TOOLS | APPLY_TOOLS
 # to click through the loud prompts, which is how the loud prompts stop working.
 DESTRUCTIVE_TOOLS = frozenset({"apply_campaign_status", "apply_campaign_daily_budget"})
 
+# The only two tools that answer from this process without calling Apple, and so
+# the only two that carry open_world_hint=False.
+LOCAL_ONLY_TOOLS = frozenset({"get_guardrails", "list_my_changes"})
+
 # In scope for the credential, deliberately unreachable from here.
 FORBIDDEN_METHODS = (
     "campaigns_post",
@@ -119,6 +128,43 @@ FORBIDDEN_METHODS = (
 )
 
 
+def _live_strings(source: str) -> list[str]:
+    """Every string literal in the module EXCEPT docstrings.
+
+    The forbidden methods are always reached by NAME -- `call("keywords_id_put")`
+    -- so the string literals are precisely what has to be searched, and a scan
+    that strips them finds nothing however carefully it is written. Docstrings
+    are the one class of string to exclude: several of them name these methods
+    on purpose, to record why each is absent.
+
+    ast rather than tokenize: comments never reach the tree at all, a docstring
+    is identifiable by position rather than by guesswork, and the quoting used
+    (single, double, f-string prefix, concatenation) stops mattering.
+    """
+    tree = ast.parse(source)
+    docstrings = set()
+    for node in ast.walk(tree):
+        if not isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            continue
+        body = getattr(node, "body", None) or []
+        first = body[0] if body else None
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            docstrings.add(id(first.value))
+    return [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in docstrings
+    ]
+
+
 def _tools() -> dict:
     return {tool.name: tool for tool in anyio.run(mcp.list_tools)}
 
@@ -129,6 +175,55 @@ def test_tool_names_match_expected() -> None:
     removed = EXPECTED_TOOLS - names
     assert not added, f"tools were added without updating this test: {sorted(added)}"
     assert not removed, f"tools disappeared: {sorted(removed)}"
+
+
+ALL_HINTS = ("read_only_hint", "destructive_hint", "idempotent_hint", "open_world_hint")
+
+
+def test_every_tool_declares_all_four_hints() -> None:
+    """An omitted hint is not "unknown" -- it is the spec's default.
+
+    `destructiveHint` defaults to TRUE when absent, so a tool that forgets it is
+    published as possibly destructive and gets rendered with the same warning as
+    a budget change. Directories that index MCP servers reject a tool whose four
+    hints are not all present and boolean. Spell all four out, every time.
+    """
+    tools = _tools()
+    for name, tool in sorted(tools.items()):
+        annotations = tool.annotations
+        assert annotations is not None, f"{name} has no annotations at all"
+        for hint in ALL_HINTS:
+            value = getattr(annotations, hint, None)
+            assert isinstance(value, bool), (
+                f"{name}.{hint} is {value!r}, not an explicit True/False. "
+                f"An absent hint falls back on the spec default, which for "
+                f"destructiveHint is True."
+            )
+
+
+def test_hints_match_what_the_handler_actually_does() -> None:
+    """The hints are a claim about behaviour. Check the claim against the code."""
+    tools = _tools()
+    for name in READ_TOOLS | PREVIEW_TOOLS:
+        a = tools[name].annotations
+        assert a.read_only_hint is True, f"{name} reads only, but is not marked read_only_hint"
+        assert a.destructive_hint is False, f"{name} reads only, so it cannot be destructive"
+        assert a.idempotent_hint is True, f"{name} reads only, so it is idempotent"
+    for name in APPLY_TOOLS:
+        a = tools[name].annotations
+        assert a.read_only_hint is False, f"{name} writes, so it is not read-only"
+        assert a.idempotent_hint is False, (
+            f"{name} consumes a single-use preview_token, so a second identical "
+            f"call is an error rather than a no-op"
+        )
+    # Only the two local tools answer without touching Apple.
+    for name, tool in sorted(tools.items()):
+        expected_open_world = name not in LOCAL_ONLY_TOOLS
+        assert tool.annotations.open_world_hint is expected_open_world, (
+            f"{name} open_world_hint={tool.annotations.open_world_hint}; expected "
+            f"{expected_open_world}. Only {sorted(LOCAL_ONLY_TOOLS)} answer without "
+            f"calling Apple."
+        )
 
 
 def test_every_read_tool_is_marked_read_only() -> None:
@@ -169,16 +264,141 @@ def test_every_apply_tool_requires_a_preview_token() -> None:
 
 
 def test_out_of_scope_api_methods_are_unreachable() -> None:
-    source = (REPO_ROOT / "apple_ads_mcp" / "tools_write.py").read_text()
-    # Strip the module docstring: it NAMES the forbidden methods on purpose, to
-    # say why each one is absent.
-    body = source.split('"""', 2)[-1]
-    for method in FORBIDDEN_METHODS:
-        assert f'"{method}"' not in body, (
-            f"{method} is called from tools_write.py but is out of scope. If that "
-            f"is intentional, it needs a preview/apply pair, a ledger entry and a "
-            f"line in this list."
-        )
+    """No forbidden SDK method is named anywhere in the package, in any quoting.
+
+    Scans the WHOLE package, not just tools_write.py: `call()` lives in
+    client.py and takes a method NAME, so a forbidden operation reached from
+    tools_read.py or from a helper would be just as live, and a scan that looked
+    only at tools_write.py would not see it.
+
+    The earlier version matched the literal `"method"` in the raw source, which
+    single quotes would slip past. This looks at every non-docstring string in
+    the module instead, so the quoting cannot matter.
+
+    The match is on the WHOLE string, not a substring. `call()` takes the method
+    name as a complete string, while a tool's `note` field legitimately mentions
+    `shared_budgets_id_put` in a sentence explaining why it is absent -- and a
+    substring match would fail on that prose forever. A name assembled at
+    runtime would slip past this; the registered-tool frozenset above is the
+    boundary that does not depend on how a string was spelled.
+    """
+    forbidden = frozenset(FORBIDDEN_METHODS)
+    offenders = []
+    for path in sorted((REPO_ROOT / "apple_ads_mcp").glob("*.py")):
+        for text in _live_strings(path.read_text()):
+            if text.strip() in forbidden:
+                offenders.append(f"{path.name}: {text.strip()}")
+    assert not offenders, (
+        f"out-of-scope API methods are named in live code: {offenders}. If that is "
+        f"intentional, each needs a preview/apply pair, a ledger entry and a line "
+        f"removed from FORBIDDEN_METHODS."
+    )
+
+
+def test_installer_tool_list_matches_the_server() -> None:
+    """install.py hardcodes the tool names. Keep that list honest.
+
+    It has to hardcode them: it is stdlib-only on purpose, so that someone can
+    run it before the venv exists, which means it cannot import the server to
+    ask. The cost of that choice is a second copy of the tool set that can
+    drift -- and drifting the wrong way would silently allowlist a write tool.
+    This is the check that makes the copy safe.
+    """
+    import install
+
+    assert frozenset(install.SAFE_TOOLS) == READ_TOOLS | PREVIEW_TOOLS, (
+        "install.py's SAFE_TOOLS no longer matches the read and preview tools: "
+        f"{sorted(frozenset(install.SAFE_TOOLS) ^ (READ_TOOLS | PREVIEW_TOOLS))}"
+    )
+    assert frozenset(install.WRITE_TOOLS) == APPLY_TOOLS, (
+        "install.py's WRITE_TOOLS no longer matches the apply tools: "
+        f"{sorted(frozenset(install.WRITE_TOOLS) ^ APPLY_TOOLS)}"
+    )
+    assert not (frozenset(install.SAFE_TOOLS) & APPLY_TOOLS), (
+        "install.py would allowlist a tool that changes the account"
+    )
+    # And both halves still describe the server that actually registers.
+    registered = frozenset(_tools())
+    assert frozenset(install.SAFE_TOOLS) | frozenset(install.WRITE_TOOLS) == registered, (
+        "install.py does not account for every registered tool: "
+        f"{sorted(registered ^ (frozenset(install.SAFE_TOOLS) | frozenset(install.WRITE_TOOLS)))}"
+    )
+
+
+def test_installer_never_allowlists_a_write_tool() -> None:
+    """The generated Claude Code rules, checked as strings.
+
+    The rule format is `mcp__<server>__<tool>`, and a wildcard or a bare
+    `mcp__apple-ads` entry would approve the writes too. Assert on what the
+    installer actually produces rather than on what it intends.
+    """
+    import install
+
+    rules = [f"mcp__{install.SERVER_NAME}__{tool}" for tool in install.SAFE_TOOLS]
+    assert len(rules) == len(set(rules)), "duplicate permission rules"
+    for rule in rules:
+        assert "*" not in rule, f"{rule} is a wildcard; support for those varies by version"
+        tool = rule.rsplit("__", 1)[-1]
+        assert tool not in APPLY_TOOLS, f"{rule} would pre-approve a write"
+    assert f"mcp__{install.SERVER_NAME}" not in rules, (
+        "a bare server rule would approve every tool including the writes"
+    )
+
+
+def test_read_only_mode_publishes_no_write_tool() -> None:
+    """APPLE_ADS_READ_ONLY must remove every apply, and keep every preview.
+
+    Claude Code can allowlist tools by name, so there a read-only install is
+    something the CLIENT can express. Claude Desktop, Cursor and Codex have no
+    per-tool allowlist at all, so for them this is the only honest way to offer
+    one -- which makes it worth a test rather than a comment.
+
+    Run in a SUBPROCESS, not by setting os.environ here: this module already
+    imported the server, registration happens at import, and re-importing would
+    not re-register. A real child process is also what every client does.
+    """
+    env = {**os.environ, "APPLE_ADS_READ_ONLY": "1"}
+    script = (
+        "import sys, anyio, json;"
+        f"sys.path.insert(0, {str(REPO_ROOT)!r});"
+        "from apple_ads_mcp.server import mcp;"
+        "print(json.dumps(sorted(t.name for t in anyio.run(mcp.list_tools))))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", script], env=env, capture_output=True, text=True, check=True
+    )
+    names = frozenset(json.loads(out.stdout))
+
+    assert not (names & APPLY_TOOLS), (
+        f"read-only mode still publishes write tools: {sorted(names & APPLY_TOOLS)}. "
+        f"A client with no per-tool allowlist would be able to call them."
+    )
+    assert names == READ_TOOLS | PREVIEW_TOOLS, (
+        f"read-only mode should publish exactly the reads and previews; got "
+        f"{sorted(names ^ (READ_TOOLS | PREVIEW_TOOLS))} different"
+    )
+
+
+def test_readme_quotes_the_guardrail_text_verbatim() -> None:
+    """The README prints a real `bid_is_settable` failure. Keep it real.
+
+    Quoting a check's exact output is the clearest way to show what the server
+    does -- and the one documentation line that a reword of guardrails.py turns
+    into a lie with nothing to notice. This renders the check and compares.
+    """
+    from apple_ads_mcp.guardrails import check_bid_settable
+
+    rendered = " ".join(
+        check_bid_settable("MAX_CONVERSIONS", "ad group default bid").render().split()
+    )
+    readme = (REPO_ROOT / "README.md").read_text()
+    block = re.search(r"```\n(\s*FAIL bid_is_settable.*?)\n\s*```", readme, re.S)
+    assert block, "README no longer quotes a FAIL bid_is_settable block"
+    quoted = " ".join(block.group(1).split())
+    assert quoted == rendered, (
+        "README.md quotes a bid_is_settable failure that guardrails.py no longer "
+        f"produces.\n  README: {quoted}\n  actual: {rendered}"
+    )
 
 
 def test_there_is_no_generic_passthrough() -> None:
