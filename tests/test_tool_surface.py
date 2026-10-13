@@ -295,6 +295,56 @@ def test_out_of_scope_api_methods_are_unreachable() -> None:
     )
 
 
+def test_installer_tool_list_matches_the_server() -> None:
+    """install.py hardcodes the tool names. Keep that list honest.
+
+    It has to hardcode them: it is stdlib-only on purpose, so that someone can
+    run it before the venv exists, which means it cannot import the server to
+    ask. The cost of that choice is a second copy of the tool set that can
+    drift -- and drifting the wrong way would silently allowlist a write tool.
+    This is the check that makes the copy safe.
+    """
+    import install
+
+    assert frozenset(install.SAFE_TOOLS) == READ_TOOLS | PREVIEW_TOOLS, (
+        "install.py's SAFE_TOOLS no longer matches the read and preview tools: "
+        f"{sorted(frozenset(install.SAFE_TOOLS) ^ (READ_TOOLS | PREVIEW_TOOLS))}"
+    )
+    assert frozenset(install.WRITE_TOOLS) == APPLY_TOOLS, (
+        "install.py's WRITE_TOOLS no longer matches the apply tools: "
+        f"{sorted(frozenset(install.WRITE_TOOLS) ^ APPLY_TOOLS)}"
+    )
+    assert not (frozenset(install.SAFE_TOOLS) & APPLY_TOOLS), (
+        "install.py would allowlist a tool that changes the account"
+    )
+    # And both halves still describe the server that actually registers.
+    registered = frozenset(_tools())
+    assert frozenset(install.SAFE_TOOLS) | frozenset(install.WRITE_TOOLS) == registered, (
+        "install.py does not account for every registered tool: "
+        f"{sorted(registered ^ (frozenset(install.SAFE_TOOLS) | frozenset(install.WRITE_TOOLS)))}"
+    )
+
+
+def test_installer_never_allowlists_a_write_tool() -> None:
+    """The generated Claude Code rules, checked as strings.
+
+    The rule format is `mcp__<server>__<tool>`, and a wildcard or a bare
+    `mcp__apple-ads` entry would approve the writes too. Assert on what the
+    installer actually produces rather than on what it intends.
+    """
+    import install
+
+    rules = [f"mcp__{install.SERVER_NAME}__{tool}" for tool in install.SAFE_TOOLS]
+    assert len(rules) == len(set(rules)), "duplicate permission rules"
+    for rule in rules:
+        assert "*" not in rule, f"{rule} is a wildcard; support for those varies by version"
+        tool = rule.rsplit("__", 1)[-1]
+        assert tool not in APPLY_TOOLS, f"{rule} would pre-approve a write"
+    assert f"mcp__{install.SERVER_NAME}" not in rules, (
+        "a bare server rule would approve every tool including the writes"
+    )
+
+
 def test_read_only_mode_publishes_no_write_tool() -> None:
     """APPLE_ADS_READ_ONLY must remove every apply, and keep every preview.
 
