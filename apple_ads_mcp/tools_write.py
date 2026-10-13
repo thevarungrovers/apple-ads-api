@@ -724,15 +724,33 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
                 failures.append(f"keyword {item['keyword_id']}: Apple returned no result for it")
                 lines.append(f"{item['keyword_id']} {item['text']!r}: NO RESULT RETURNED")
                 continue
-            if result.success:
-                succeeded += 1
-                lines.append(
-                    f"{item['keyword_id']} {item['text']!r}: {item['before']} -> "
-                    f"{format_money(getattr(result.result, 'bid', None))}"
-                )
-            else:
+            if not result.success:
                 failures.append(f"keyword {item['keyword_id']}: {result.error}")
                 lines.append(f"{item['keyword_id']} {item['text']!r}: FAILED -- {result.error}")
+                continue
+            # `result.success` is Apple's acknowledgement, NOT evidence the bid
+            # moved. Under an automated bid strategy Apple accepts the item,
+            # reports success and echoes the OLD bid back -- the same silent
+            # discard the single-keyword path guards with landed(). Counting
+            # that as applied would write an `after` into the ledger the account
+            # never held, and revert_change would then push a value back that it
+            # never moved off.
+            observed = format_money(getattr(result.result, "bid", None))
+            if landed(observed, item["after"]):
+                succeeded += 1
+                lines.append(
+                    f"{item['keyword_id']} {item['text']!r}: {item['before']} -> {observed}"
+                )
+            else:
+                failures.append(
+                    f"keyword {item['keyword_id']}: Apple reported success but the bid "
+                    f"is still {observed!r}, not {item['after']!r}. Nothing changed -- "
+                    f"usually an automated bid strategy, where Apple sets the bids and "
+                    f"a written one is accepted and ignored."
+                )
+                lines.append(
+                    f"{item['keyword_id']} {item['text']!r}: NOT APPLIED -- still {observed}"
+                )
 
         failed = len(pending.items) - succeeded
         outcome = (
@@ -1797,6 +1815,16 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         is not exposed. Pause them instead.
         """
         guard_writes()
+        # A revert is a real write to the live account, so it is subject to the
+        # same per-session applies cap. Zero projected delta: a revert restores a
+        # value the account already held, so it cannot push the session's
+        # projected spend past anything. Without this, a loop could revert every
+        # applied entry in the ledger's whole window -- changes made in earlier
+        # sessions, which this session's counter has never seen -- with no bound
+        # at all.
+        reason = state.counters.would_exceed(Decimal("0"))
+        if reason:
+            raise ToolError(reason)
         entry = ledger.find_entry(entry_id)
         if entry is None:
             raise ToolError(f"no ledger entry {entry_id!r}. list_my_changes shows valid ids.")
@@ -1868,10 +1896,29 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
     def _revert_result(
         new_entry_id: str, entry: dict[str, Any], before: str, after: str, observed: str | None
     ) -> ApplyResult:
-        ledger.write_outcome(new_entry_id, outcome=ledger.APPLIED, observed_after=observed)
-        state.counters.record(Decimal("0"))
+        """Record how the revert went, by READ-BACK and not by HTTP status.
+
+        A revert is a write like any other, so HTTP 200 does not mean it landed
+        -- and a revert that Apple silently discarded is the worst kind to call
+        a success, because the operator is told the account is back where it was
+        and stops looking. It also has to be recorded as `failed` rather than
+        `applied` for a second reason: `reverted_entry_ids()` counts only
+        APPLIED reverts, so a failed one correctly leaves the original entry
+        revertable and the retry available.
+        """
+        applied = landed(observed, before)
+        ledger.write_outcome(
+            new_entry_id,
+            outcome=ledger.APPLIED if applied else ledger.FAILED,
+            observed_after=observed,
+            detail=""
+            if applied
+            else f"Apple answered 200 but echoed {observed!r}, not {before!r}",
+        )
+        if applied:
+            state.counters.record(Decimal("0"))
         return ApplyResult(
-            applied=True,
+            applied=applied,
             entry_id=new_entry_id,
             tool="revert_change",
             entity_type=str(entry.get("entity_type")),
@@ -1884,7 +1931,23 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             observed_after=observed,
             projected_daily_spend_delta="0",
             session={k: str(v) for k, v in state.counters.snapshot().items()},
-            note=f"Reverted entry {entry.get('entry_id')}.",
+            failures=[]
+            if applied
+            else [
+                f"Apple accepted the revert but the value is still {observed!r}, "
+                f"not {before!r}. Entry {entry.get('entry_id')} is NOT undone."
+            ],
+            note=(
+                f"Reverted entry {entry.get('entry_id')}."
+                if applied
+                else (
+                    f"NOT REVERTED. Apple returned success and left the value alone, "
+                    f"so entry {entry.get('entry_id')} still stands. For a bid this "
+                    f"usually means the ad group moved onto an automated bid strategy, "
+                    f"where Apple sets the bids. Recorded as failed, so the original "
+                    f"entry stays revertable once the cause is fixed."
+                )
+            ),
         )
 
     def _revert_keyword_bid(entry, before, after) -> ApplyResult:

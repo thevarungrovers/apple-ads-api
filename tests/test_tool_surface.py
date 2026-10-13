@@ -20,7 +20,9 @@ Run it without touching Apple:
 
 from __future__ import annotations
 
+import ast
 import pathlib
+import re
 import sys
 
 import anyio
@@ -123,6 +125,43 @@ FORBIDDEN_METHODS = (
 )
 
 
+def _live_strings(source: str) -> list[str]:
+    """Every string literal in the module EXCEPT docstrings.
+
+    The forbidden methods are always reached by NAME -- `call("keywords_id_put")`
+    -- so the string literals are precisely what has to be searched, and a scan
+    that strips them finds nothing however carefully it is written. Docstrings
+    are the one class of string to exclude: several of them name these methods
+    on purpose, to record why each is absent.
+
+    ast rather than tokenize: comments never reach the tree at all, a docstring
+    is identifiable by position rather than by guesswork, and the quoting used
+    (single, double, f-string prefix, concatenation) stops mattering.
+    """
+    tree = ast.parse(source)
+    docstrings = set()
+    for node in ast.walk(tree):
+        if not isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            continue
+        body = getattr(node, "body", None) or []
+        first = body[0] if body else None
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            docstrings.add(id(first.value))
+    return [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in docstrings
+    ]
+
+
 def _tools() -> dict:
     return {tool.name: tool for tool in anyio.run(mcp.list_tools)}
 
@@ -222,16 +261,35 @@ def test_every_apply_tool_requires_a_preview_token() -> None:
 
 
 def test_out_of_scope_api_methods_are_unreachable() -> None:
-    source = (REPO_ROOT / "apple_ads_mcp" / "tools_write.py").read_text()
-    # Strip the module docstring: it NAMES the forbidden methods on purpose, to
-    # say why each one is absent.
-    body = source.split('"""', 2)[-1]
-    for method in FORBIDDEN_METHODS:
-        assert f'"{method}"' not in body, (
-            f"{method} is called from tools_write.py but is out of scope. If that "
-            f"is intentional, it needs a preview/apply pair, a ledger entry and a "
-            f"line in this list."
-        )
+    """No forbidden SDK method is named anywhere in the package, in any quoting.
+
+    Scans the WHOLE package, not just tools_write.py: `call()` lives in
+    client.py and takes a method NAME, so a forbidden operation reached from
+    tools_read.py or from a helper would be just as live, and a scan that looked
+    only at tools_write.py would not see it.
+
+    The earlier version matched the literal `"method"` in the raw source, which
+    single quotes would slip past. This looks at every non-docstring string in
+    the module instead, so the quoting cannot matter.
+
+    The match is on the WHOLE string, not a substring. `call()` takes the method
+    name as a complete string, while a tool's `note` field legitimately mentions
+    `shared_budgets_id_put` in a sentence explaining why it is absent -- and a
+    substring match would fail on that prose forever. A name assembled at
+    runtime would slip past this; the registered-tool frozenset above is the
+    boundary that does not depend on how a string was spelled.
+    """
+    forbidden = frozenset(FORBIDDEN_METHODS)
+    offenders = []
+    for path in sorted((REPO_ROOT / "apple_ads_mcp").glob("*.py")):
+        for text in _live_strings(path.read_text()):
+            if text.strip() in forbidden:
+                offenders.append(f"{path.name}: {text.strip()}")
+    assert not offenders, (
+        f"out-of-scope API methods are named in live code: {offenders}. If that is "
+        f"intentional, each needs a preview/apply pair, a ledger entry and a line "
+        f"removed from FORBIDDEN_METHODS."
+    )
 
 
 def test_there_is_no_generic_passthrough() -> None:
