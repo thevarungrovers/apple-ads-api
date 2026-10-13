@@ -1,4 +1,4 @@
-"""Read-only tools. Every one of them carries `read_only_hint=True`.
+"""Read-only tools. Every one of them declares all four tool hints.
 
 A read-only server is independently useful -- it is the whole "ask the agent what
 the account is doing" half of the job -- and it is the natural stopping point if
@@ -46,8 +46,28 @@ from apple_ads_mcp.client import (
     unwrap,
 )
 
-READ_ONLY = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=True)
-LOCAL_ONLY = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False)
+# ALL FOUR HINTS, ALWAYS, ON EVERY TOOL. A hint left unset is published as
+# absent, and a client that cannot see one falls back on the spec's default --
+# which for `destructiveHint` is TRUE. So an omitted hint does not mean "unknown",
+# it means "assume the worst", and a plain `list_campaigns` ends up rendered with
+# the same warning as a budget change. Some tool directories reject the tool
+# outright. Spell every one of them out, even where the value looks obvious.
+#
+# READ_ONLY   reads Apple's API: no mutation, same answer twice, external service.
+# LOCAL_ONLY  answers from this process and the local ledger; touches no network,
+#             which is the only difference -- hence open_world_hint=False.
+READ_ONLY = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
+)
+LOCAL_ONLY = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
+)
 
 MAX_REPORT_DAYS = 90  # Apple's DAILY granularity window
 

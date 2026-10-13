@@ -112,16 +112,40 @@ from apple_ads_mcp.previews import (
 )
 from apple_ads_mcp.tools_read import entity_metrics_7d
 
-# A preview is read-only and open to the world; it is safe to allowlist.
-PREVIEW = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=True)
+# All four hints on every one of these too -- see the note in tools_read.py for
+# why an omitted hint is worse than a wrong one.
+#
+# A preview reads Apple, mints a token in memory and writes nothing to the
+# account, so it is safe to allowlist: read_only_hint=True. The token it mints is
+# single-use, but calling a preview twice just produces a second token and
+# changes nothing anybody can observe at Apple's end, so idempotent_hint stays
+# True.
+PREVIEW = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
+)
 
 # An apply mutates. idempotent_hint=False because a token is single-use: calling
 # the same apply twice is not a no-op, it is an error the second time.
+# destructive_hint=False on this one: pausing and un-pausing are one call each,
+# and adding a negative keyword only ever adds. Marking a reversible action
+# destructive trains you to click through the loud prompts.
 APPLY = ToolAnnotations(
-    read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=True,
 )
+# destructive_hint=True only where the action moves money at campaign scale:
+# pausing a whole campaign stops every ad group under it, and a daily budget is
+# the ceiling on the day's spend.
 APPLY_DESTRUCTIVE = ToolAnnotations(
-    read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=True
+    read_only_hint=False,
+    destructive_hint=True,
+    idempotent_hint=False,
+    open_world_hint=True,
 )
 
 
