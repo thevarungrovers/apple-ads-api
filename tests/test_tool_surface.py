@@ -379,6 +379,28 @@ def test_read_only_mode_publishes_no_write_tool() -> None:
     )
 
 
+def test_readme_quotes_the_guardrail_text_verbatim() -> None:
+    """The README prints a real `bid_is_settable` failure. Keep it real.
+
+    Quoting a check's exact output is the clearest way to show what the server
+    does -- and the one documentation line that a reword of guardrails.py turns
+    into a lie with nothing to notice. This renders the check and compares.
+    """
+    from apple_ads_mcp.guardrails import check_bid_settable
+
+    rendered = " ".join(
+        check_bid_settable("MAX_CONVERSIONS", "ad group default bid").render().split()
+    )
+    readme = (REPO_ROOT / "README.md").read_text()
+    block = re.search(r"```\n(\s*FAIL bid_is_settable.*?)\n\s*```", readme, re.S)
+    assert block, "README no longer quotes a FAIL bid_is_settable block"
+    quoted = " ".join(block.group(1).split())
+    assert quoted == rendered, (
+        "README.md quotes a bid_is_settable failure that guardrails.py no longer "
+        f"produces.\n  README: {quoted}\n  actual: {rendered}"
+    )
+
+
 def test_there_is_no_generic_passthrough() -> None:
     names = frozenset(_tools())
     for suspicious in ("request", "raw_request", "call_api", "http", "execute"):
