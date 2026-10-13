@@ -97,6 +97,7 @@ from apple_ads_mcp.guardrails import (
     check_known_status,
     check_pct_increase,
     check_projected_delta,
+    read_only_mode,
     writes_disabled,
 )
 from apple_ads_mcp.previews import (
@@ -185,6 +186,24 @@ class BulkApplyResult(BaseModel):
 
 
 def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitions
+    # Read-only mode: the `preview_*` tools still register, because a preview
+    # writes nothing and is the whole point of being able to say "here is what I
+    # would change". Every `apply_*` and `revert_change` is simply never handed
+    # to the registrar, so they are absent from tools/list and unreachable over
+    # MCP -- not refused at call time, ABSENT. See guardrails.read_only_mode().
+    read_only = read_only_mode()
+
+    def apply_tool(**kwargs):
+        """`mcp.tool(...)` for a write tool, or a no-op when read-only.
+
+        Returning the bare function leaves it defined and callable in-process --
+        which the tests rely on -- while registering nothing, so nothing crosses
+        the MCP boundary.
+        """
+        if read_only:
+            return lambda fn: fn
+        return mcp.tool(**kwargs)
+
     # --- shared machinery ----------------------------------------------------
 
     def guard_writes() -> None:
@@ -473,7 +492,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             },
         )
 
-    @mcp.tool(
+    @apply_tool(
         title="Apply a keyword bid change (CHANGES WHAT THIS KEYWORD COSTS)",
         annotations=APPLY,
     )
@@ -645,7 +664,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             note="One out-of-bounds item blocks the whole batch.",
         )
 
-    @mcp.tool(
+    @apply_tool(
         title="Apply several keyword bid changes (CHANGES WHAT THESE KEYWORDS COST)",
         annotations=APPLY,
     )
@@ -845,7 +864,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             },
         )
 
-    @mcp.tool(title="Apply a keyword pause or enable (CHANGES LIVE DELIVERY)", annotations=APPLY)
+    @apply_tool(title="Apply a keyword pause or enable (CHANGES LIVE DELIVERY)", annotations=APPLY)
     def apply_keyword_status(
         preview_token: Annotated[
             str, Field(description="The token returned by preview_keyword_status")
@@ -961,7 +980,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             },
         )
 
-    @mcp.tool(
+    @apply_tool(
         title="Apply an ad group pause or enable (AFFECTS EVERY KEYWORD IN IT)",
         annotations=APPLY,
     )
@@ -1114,7 +1133,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             },
         )
 
-    @mcp.tool(
+    @apply_tool(
         title="Apply an ad group default bid change (CHANGES WHAT THIS AD GROUP COSTS)",
         annotations=APPLY,
     )
@@ -1246,7 +1265,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             },
         )
 
-    @mcp.tool(
+    @apply_tool(
         title="Apply a campaign pause or enable (STOPS OR STARTS A WHOLE CAMPAIGN)",
         annotations=APPLY_DESTRUCTIVE,
     )
@@ -1381,7 +1400,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             },
         )
 
-    @mcp.tool(
+    @apply_tool(
         title="Apply a campaign daily budget change (SPENDS MONEY)",
         annotations=APPLY_DESTRUCTIVE,
     )
@@ -1563,7 +1582,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             ),
         )
 
-    @mcp.tool(
+    @apply_tool(
         title="Apply negative keywords (EXCLUDES TRAFFIC; not idempotent)",
         annotations=APPLY,
     )
@@ -1733,7 +1752,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             },
         )
 
-    @mcp.tool(
+    @apply_tool(
         title="Apply a negative keyword pause or enable (CHANGES WHAT TRAFFIC IS EXCLUDED)",
         annotations=APPLY,
     )
@@ -1794,7 +1813,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
 
     # --- revert --------------------------------------------------------------
 
-    @mcp.tool(
+    @apply_tool(
         title="Undo one change from the ledger (writes the old value back)",
         annotations=APPLY,
     )

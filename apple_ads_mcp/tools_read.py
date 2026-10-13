@@ -32,7 +32,7 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from apple_ads_mcp import client, ledger
-from apple_ads_mcp.guardrails import writes_disabled
+from apple_ads_mcp.guardrails import read_only_mode, writes_disabled
 from apple_ads_mcp.client import (
     REPORT_TIMEOUT,
     call,
@@ -252,6 +252,10 @@ class AuditList(BaseModel):
 
 
 class GuardrailReport(BaseModel):
+    read_only_server: bool = Field(
+        default=False,
+        description="True when this server published no apply_* tools at all",
+    )
     source: str
     kill_switch_active: bool
     kill_switch_reason: str | None
@@ -1133,7 +1137,9 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         """
         limits = state.limits
         reason = writes_disabled()
+        read_only = read_only_mode()
         return GuardrailReport(
+            read_only_server=read_only,
             source=limits.source,
             kill_switch_active=reason is not None,
             kill_switch_reason=reason,
@@ -1152,6 +1158,15 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             note=(
                 "An empty allowed_campaign_ids means every campaign is in scope. "
                 "Session counters reset only when the server restarts."
+                + (
+                    " THIS SERVER IS READ-ONLY: it published no apply_* tools and no "
+                    "revert_change, so nothing here can change the account. Previews "
+                    "still work -- use them to show a human exactly what you would "
+                    "change, and let them make it from a writable client or the Apple "
+                    "Ads UI."
+                    if read_only
+                    else ""
+                )
             ),
         )
 

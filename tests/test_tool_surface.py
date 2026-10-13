@@ -21,8 +21,11 @@ Run it without touching Apple:
 from __future__ import annotations
 
 import ast
+import json
+import os
 import pathlib
 import re
+import subprocess
 import sys
 
 import anyio
@@ -289,6 +292,40 @@ def test_out_of_scope_api_methods_are_unreachable() -> None:
         f"out-of-scope API methods are named in live code: {offenders}. If that is "
         f"intentional, each needs a preview/apply pair, a ledger entry and a line "
         f"removed from FORBIDDEN_METHODS."
+    )
+
+
+def test_read_only_mode_publishes_no_write_tool() -> None:
+    """APPLE_ADS_READ_ONLY must remove every apply, and keep every preview.
+
+    Claude Code can allowlist tools by name, so there a read-only install is
+    something the CLIENT can express. Claude Desktop, Cursor and Codex have no
+    per-tool allowlist at all, so for them this is the only honest way to offer
+    one -- which makes it worth a test rather than a comment.
+
+    Run in a SUBPROCESS, not by setting os.environ here: this module already
+    imported the server, registration happens at import, and re-importing would
+    not re-register. A real child process is also what every client does.
+    """
+    env = {**os.environ, "APPLE_ADS_READ_ONLY": "1"}
+    script = (
+        "import sys, anyio, json;"
+        f"sys.path.insert(0, {str(REPO_ROOT)!r});"
+        "from apple_ads_mcp.server import mcp;"
+        "print(json.dumps(sorted(t.name for t in anyio.run(mcp.list_tools))))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", script], env=env, capture_output=True, text=True, check=True
+    )
+    names = frozenset(json.loads(out.stdout))
+
+    assert not (names & APPLY_TOOLS), (
+        f"read-only mode still publishes write tools: {sorted(names & APPLY_TOOLS)}. "
+        f"A client with no per-tool allowlist would be able to call them."
+    )
+    assert names == READ_TOOLS | PREVIEW_TOOLS, (
+        f"read-only mode should publish exactly the reads and previews; got "
+        f"{sorted(names ^ (READ_TOOLS | PREVIEW_TOOLS))} different"
     )
 
 

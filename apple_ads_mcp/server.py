@@ -81,6 +81,12 @@ doing so.
 Before proposing anything, get_guardrails tells you the bounds and how much of
 this session's change budget is left. list_my_changes shows what you have
 already done; revert_change undoes one by its entry_id.
+
+READ-ONLY INSTALLS. If get_guardrails reports read_only_server: true, this
+process was started with APPLE_ADS_READ_ONLY set and published no apply_* tool
+and no revert_change at all -- they are absent from the tool list, not refused
+at call time. The preview_* tools still work, so the useful thing to do is show
+the human exactly what you would change and let them make it elsewhere.
 """
 
 
