@@ -170,6 +170,11 @@ WRITE_TOOLS = (
 
 READ_ONLY_ENV = "APPLE_ADS_READ_ONLY"
 
+#: The naming identity (apple_ads_mcp/naming.py). Read from .env ONLY -- never
+#: from a client's env block, so this installer never writes them into an MCP
+#: config. The installer only says where they go.
+NAMING_KEYS = ("APPLE_ADS_OWNER_INITIALS", "APPLE_ADS_AGENT_NAME")
+
 AGENTS = {
     "1": "claude-code",
     "2": "claude-desktop",
@@ -623,6 +628,13 @@ def next_steps(agent: str, read_only: bool) -> list[str]:
             f"To make this one writable later, remove the {READ_ONLY_ENV} entry from "
             f"its env block and restart the client."
         )
+    steps.append("")
+    steps.append("Optional -- name what the agent creates. In this checkout's .env, set")
+    steps.append(f"  {NAMING_KEYS[0]}=   2-4 uppercase initials, e.g. AB")
+    steps.append(f"  {NAMING_KEYS[1]}=       a lowercase slug, e.g. max")
+    steps.append("and every campaign, ad group, ad and creative the agent creates is named")
+    steps.append("AB-max-<name>. Leave them empty for plain names. They are read from .env")
+    steps.append("only (never from the client's env block), so one checkout is one identity.")
     if SKILL_FILE.exists():
         steps.append("")
         steps.append("The agent will drive this far better with the skill next to it:")

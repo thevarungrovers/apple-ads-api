@@ -412,6 +412,27 @@ def test_installer_tool_list_matches_the_server() -> None:
     )
 
 
+def test_the_installer_never_puts_the_naming_identity_in_a_client_config() -> None:
+    """The identity is read from .env only; a client env block must not carry it."""
+    import install
+
+    for read_only in (True, False):
+        block = install.server_block(read_only)
+        assert not set(block.get("env", {})) & set(install.NAMING_KEYS), block
+        assert not any(key in install.codex_block(read_only) for key in install.NAMING_KEYS)
+    steps = "\n".join(install.next_steps("claude-code", False))
+    assert all(key in steps for key in install.NAMING_KEYS), steps
+
+
+def test_env_example_carries_empty_naming_keys() -> None:
+    """Key names with EMPTY values only: the real identity lives in .env."""
+    import install
+
+    lines = (REPO_ROOT / ".env.example").read_text().splitlines()
+    for key in install.NAMING_KEYS:
+        assert f"{key}=" in lines, f".env.example has no empty {key}="
+
+
 def test_installer_never_allowlists_a_write_tool() -> None:
     """The generated Claude Code rules, checked as strings.
 
