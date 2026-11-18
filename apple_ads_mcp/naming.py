@@ -12,8 +12,8 @@ break-glass CLI creates) starts with who made it:
 THE IDENTITY COMES FROM THIS REPO'S `.env`, AND NOTHING ELSE. Two keys,
 `APPLE_ADS_OWNER_INITIALS` and `APPLE_ADS_AGENT_NAME`, read with the same
 `dotenv_values` loader `generate_client_secret.load_config` uses (and from a
-`config.env` beside it, if one exists; `.env` wins). Neither is in REQUIRED_KEYS:
-an empty or missing value is simply skipped. The process environment is
+`config.env` beside it, if one exists; a non-empty `.env` value wins).
+Neither is in REQUIRED_KEYS: an empty or missing value is simply skipped. The process environment is
 IGNORED -- no tool argument and no env block can change or skip the prefix --
 and a value there that disagrees with `.env` is reported at startup so the
 mismatch is visible. One identity per checkout: a second agent needs its own
@@ -189,13 +189,21 @@ class Identity:
 
 
 def read_env_files(files: list[Path] | None = None) -> dict[str, Any]:
-    """The identity keys from each env file that exists, later files winning."""
+    """The identity keys from each env file that exists, later files winning.
+
+    Only a NON-EMPTY value wins: `APPLE_ADS_AGENT_NAME=` in `.env` leaves a
+    value from `config.env` in place rather than erasing it.
+    """
     merged: dict[str, Any] = {"_sources": []}
     for path in ENV_FILES if files is None else files:
         if not path.exists():
             continue
         values = dotenv_values(path)
-        found = {k: (values.get(k) or "") for k in (OWNER_KEY, AGENT_KEY) if k in values}
+        found = {
+            k: str(values.get(k)).strip()
+            for k in (OWNER_KEY, AGENT_KEY)
+            if str(values.get(k) or "").strip()
+        }
         if found:
             merged["_sources"].append((path.name, found))
         merged.update(found)

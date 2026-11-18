@@ -196,15 +196,21 @@ def test_the_cli_identity() -> None:
     _refused(lambda: stamp(BOTH.cli(), "AB-max-launch", entity_type="campaign"), "AB-max-")
 
 
-def test_identity_comes_from_env_files_and_dotenv_wins() -> None:
+def test_identity_comes_from_env_files_and_a_nonempty_dotenv_value_wins() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = pathlib.Path(tmp)
         config_env, dotenv = root / "config.env", root / ".env"
         config_env.write_text("APPLE_ADS_OWNER_INITIALS=CD\nAPPLE_ADS_AGENT_NAME=bot\n")
         dotenv.write_text("APPLE_ADS_OWNER_INITIALS=AB\nAPPLE_ADS_AGENT_NAME=\n")
         identity = Identity.load([config_env, dotenv])
-        assert (identity.owner, identity.agent) == ("AB", ""), identity
+        # .env wins where it has a value; an EMPTY .env value does not erase
+        # config.env's.
+        assert (identity.owner, identity.agent) == ("AB", "bot"), identity
         assert identity.source == "config.env + .env"
+        dotenv.write_text("APPLE_ADS_OWNER_INITIALS=\nAPPLE_ADS_AGENT_NAME=\n")
+        identity = Identity.load([config_env, dotenv])
+        assert (identity.owner, identity.agent) == ("CD", "bot"), identity
+        assert identity.source == "config.env", identity.source
         assert Identity.load([root / "missing.env"]) == Identity()
 
 
