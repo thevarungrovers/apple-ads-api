@@ -166,7 +166,8 @@ class Engine:
         carries -- not on what the kind reports in ``created_names``. With a
         prefix configured the name must be this identity's (naming.Identity.
         owns); with none, it must not read as anyone's prefix. Either way it
-        must fit the length cap and carry no invisible character.
+        must fit the length cap, carry no invisible character, and have only
+        ASCII where a prefix sits (naming.lookalike_in_prefix).
         """
         from apple_ads_mcp import naming
 
@@ -218,6 +219,13 @@ class Engine:
                     "name_prefix", False,
                     f"the {entity_type.replace('_', ' ')} name sent carries U+{ord(bad):04X}, "
                     f"a control or invisible character",
+                ))
+            look = naming.lookalike_in_prefix(name)
+            if look is not None:
+                checks.append(Check(
+                    "name_prefix", False,
+                    f"the {entity_type.replace('_', ' ')} name sent carries U+{ord(look):04X} "
+                    f"where a prefix sits, so it can look like another identity's",
                 ))
         return checks
 

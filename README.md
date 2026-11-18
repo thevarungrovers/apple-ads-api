@@ -283,8 +283,15 @@ Either can be left empty -- that part is simply skipped, never an error:
   checkout's initials-only prefix would turn into another agent's -- **even
   when no identity is configured**: taken as given, it would impersonate them.
 - **Invisible characters are refused**: control characters (tab, newline,
-  NUL), zero-width and bidi marks, the byte-order mark, and line or paragraph
-  separators.
+  NUL), zero-width and bidi marks, the byte-order mark, line or paragraph
+  separators, and the blank Hangul fillers and combining grapheme joiner.
+- **Look-alikes are refused where a prefix sits.** The first two
+  dash-terminated words of the final name, and the dashes after them, must be
+  ASCII: a Cyrillic `С` or a Unicode hyphen (`CD‐bot‐x`) would look like
+  another identity's prefix while the checks read a plain name. Accents, other
+  scripts and dashes stay allowed in the base after a full prefix
+  (`AB-max-café — été`) and in a name with no dash-terminated non-ASCII word
+  at its start (`Paris café`, `Paris-café`).
 - **The preview shows the exact name** that will be sent (`entity_name`, `path`
   and a `naming` block with the requested name, the final one, the prefix and
   the length), and warns when it differs from what was asked.

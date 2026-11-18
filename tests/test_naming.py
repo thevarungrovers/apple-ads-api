@@ -106,6 +106,53 @@ def test_invisible_and_format_characters_are_refused() -> None:
     assert stamp(BOTH, "printemps \u00e9t\u00e9 \u2014 promo", entity_type="ad").final.endswith("promo")
 
 
+CYRILLIC_A, CYRILLIC_O, CYRILLIC_C = "\u0430", "\u043e", "\u0421"
+DASHES = ("\u2010", "\u2011", "\u2013", "\u2014", "\ufe63", "\uff0d", "\u2212")
+FILLERS = ("\u115f", "\u1160", "\u3164", "\uffa0", "\u034f")
+
+
+def test_look_alike_characters_where_a_prefix_sits_are_refused() -> None:
+    """A Cyrillic letter or a Unicode dash makes a name LOOK like another
+    identity's while the ASCII prefix checks see a plain base."""
+    cases = [(NEITHER, f"{CYRILLIC_C}D-bot-x"), (NEITHER, f"CD-b{CYRILLIC_O}t-x")]
+    cases += [(NEITHER, f"CD{d}bot{d}x") for d in DASHES]
+    cases += [(NEITHER, f"CD-bot{d}x") for d in DASHES]
+    cases += [(NEITHER, f"CD{d}bot-x") for d in DASHES]
+    # Under initials only, the base's first word sits where an agent name would.
+    cases += [(OWNER_ONLY, f"m{CYRILLIC_A}x-launch"), (OWNER_ONLY, f"AB-m{CYRILLIC_A}x-x"),
+              (OWNER_ONLY, "bot\u2010launch")]
+    # Under an agent name only, where the initials would sit.
+    cases += [(AGENT_ONLY, f"{CYRILLIC_C}D-launch"), (AGENT_ONLY, "CD\u2013launch")]
+    for identity, name in cases:
+        _refused(lambda identity=identity, name=name: stamp(
+            identity, name, entity_type="campaign"), "look")
+    # A look-alike name is never ours either.
+    assert not OWNER_ONLY.owns(f"AB-b{CYRILLIC_O}t-x")
+    assert not OWNER_ONLY.owns("AB-bot\u2010x") and not OWNER_ONLY.owns("AB\u2010bot-x")
+    _refused(lambda: rename(OWNER_ONLY, f"AB-b{CYRILLIC_O}t-x", "y", entity_type="campaign",
+                            ledger_owned=False), "not this agent's")
+
+
+def test_non_ascii_stays_allowed_in_the_base() -> None:
+    assert stamp(BOTH, "caf\u00e9-cr\u00e8me \u2014 \u00e9t\u00e9", entity_type="ad").final == \
+        "AB-max-caf\u00e9-cr\u00e8me \u2014 \u00e9t\u00e9"
+    # After a full prefix, the base may say anything (but cannot impersonate).
+    assert stamp(BOTH, f"{CYRILLIC_C}D-b{CYRILLIC_O}t\u2010x", entity_type="ad").final.startswith("AB-max-")
+    assert stamp(OWNER_ONLY, "Paris caf\u00e9", entity_type="ad").final == "AB-Paris caf\u00e9"
+    assert stamp(NEITHER, "Paris caf\u00e9", entity_type="ad").final == "Paris caf\u00e9"
+    assert stamp(NEITHER, "Paris-caf\u00e9", entity_type="ad").final == "Paris-caf\u00e9"
+    assert OWNER_ONLY.owns("AB-Paris caf\u00e9")
+
+
+def test_invisible_fillers_are_refused_anywhere() -> None:
+    for char in FILLERS:
+        for identity, _ in COMBOS.values():
+            for name in (f"spring{char}promo", f"{char}spring", f"spring promo{char}"):
+                _refused(lambda identity=identity, name=name: stamp(
+                    identity, name, entity_type="campaign"), "invisible")
+        assert stamp(BOTH, "caf\u00e9", entity_type="ad").final == "AB-max-caf\u00e9"
+
+
 def test_the_length_cap_counts_the_prefix_and_never_truncates() -> None:
     limit = naming.NAME_LIMITS["campaign"]
     assert limit == 200

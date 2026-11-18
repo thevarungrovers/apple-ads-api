@@ -607,6 +607,9 @@ def test_the_backstop_checks_the_name_actually_sent_not_the_one_reported() -> No
     # No identity: a name that claims someone else's is still refused.
     forged = preview("forged", [("campaign", "plain")], "CD-bot-plain", Identity())
     assert forged.blocked and failed(forged, "name_prefix"), forged.guardrail_checks
+    # ... or that only LOOKS like someone else's, through a Unicode hyphen.
+    looks = preview("looks", [("campaign", "plain")], "CD\u2010bot\u2010plain", Identity())
+    assert looks.blocked and failed(looks, "name_prefix"), looks.guardrail_checks
     # Over the length cap, prefix included.
     long = preview("long", [("campaign", "AB-max-x")], "AB-max-" + "x" * 194)
     assert long.blocked and failed(long, "name_length"), long.guardrail_checks

@@ -81,9 +81,58 @@ ENV_FILES: list[Path] = [REPO_ROOT / "config.env", REPO_ROOT / ".env"]
 _INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 
+#: Blank fillers that render as nothing but are letters or marks, so the
+#: categories above miss them: the Hangul fillers and the combining grapheme
+#: joiner. Refused anywhere in a name.
+INVISIBLE_FILLERS = frozenset("\u115f\u1160\u3164\uffa0\u034f")
+
+#: Characters that read as `-` but are not it: every dash punctuation (Pd)
+#: besides the hyphen-minus, plus the minus signs and the hyphen bullet.
+_DASH_LOOKALIKES = frozenset("\u2212\u2043\u02d7\u2796")
+
+
 def invisible_character(text: str) -> str | None:
-    """The first control, format or separator character in ``text``, if any."""
-    return next((c for c in text if unicodedata.category(c) in _INVISIBLE_CATEGORIES), None)
+    """The first control, format, separator or filler character in ``text``, if any."""
+    return next(
+        (
+            c
+            for c in text
+            if unicodedata.category(c) in _INVISIBLE_CATEGORIES or c in INVISIBLE_FILLERS
+        ),
+        None,
+    )
+
+
+def _is_dash(c: str) -> bool:
+    return c == "-" or c in _DASH_LOOKALIKES or unicodedata.category(c) == "Pd"
+
+
+def lookalike_in_prefix(name: str | None) -> str | None:
+    """The first non-ASCII character where a prefix would sit, if any.
+
+    A prefix is two dash-terminated words at the start of a name. Every
+    ownership and impersonation check here is ASCII (FULL_PREFIX, startswith),
+    so `C\u0421-bot-x` with a Cyrillic letter, or `CD\u2010bot\u2010x` with
+    a Unicode hyphen, would pass them while LOOKING like CD-bot's. So the first
+    two words -- each counted only when a dash (or a dash look-alike) follows
+    it -- and the dashes after them must be ASCII. Later text is the base, and
+    may be anything visible.
+    """
+    text = str(name or "")
+    words = 0
+    start = 0
+    for index, c in enumerate(text):
+        if words >= 2:
+            break
+        if _is_dash(c):
+            if c != "-":
+                return c
+            bad = next((x for x in text[start:index] if not x.isascii()), None)
+            if bad is not None:
+                return bad
+            words += 1
+            start = index + 1
+    return None
 
 
 class NameRefused(ValueError):
@@ -167,6 +216,8 @@ class Identity:
         text = str(name or "")
         if not self.prefix or not text.startswith(self.prefix):
             return False
+        if lookalike_in_prefix(text) is not None or invisible_character(text) is not None:
+            return False  # looks like someone else's, or hides something
         parsed = parse(text)
         return parsed is None or (parsed.owner, parsed.agent) == (self.owner, self.agent)
 
@@ -360,7 +411,17 @@ def stamp(identity: Identity, requested: str | None, *, entity_type: str) -> Sta
         raise NameRefused(
             f"INVALID_REQUEST: the name contains a control character or other invisible "
             f"character (U+{ord(bad):04X} {unicodedata.name(bad, 'unnamed')}); tabs, newlines, NUL, "
-            f"zero-width and bidi marks and line separators are refused. Remove it."
+            f"zero-width and bidi marks, line separators and blank fillers are refused. "
+            f"Remove it."
+        )
+    look = lookalike_in_prefix(final)
+    if look is not None:
+        raise NameRefused(
+            f"INVALID_REQUEST: {final!r} has U+{ord(look):04X} "
+            f"{unicodedata.name(look, 'unnamed')} in its first two dash-separated words, "
+            f"where a prefix sits. A non-ASCII letter or a Unicode dash there can make a "
+            f"name look like another identity's (CD-bot-) while reading as a plain base. "
+            f"Use ASCII letters and '-' there, or move the word later in the name."
         )
     claimed = parse(final)
     if claimed is not None and (claimed.owner, claimed.agent) != (identity.owner, identity.agent):
