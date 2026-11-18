@@ -48,7 +48,16 @@ from apple_ads_mcp.client import (
     query,
     unwrap,
 )
-from apple_ads_mcp.tools_read import READ_ONLY
+from apple_ads_mcp import ledger
+from apple_ads_mcp.tools_read import (
+    READ_ONLY,
+    AgentNameFilter,
+    MineFilter,
+    OriginFilter,
+    OwnerFilter,
+    attributed,
+    name_filter,
+)
 
 #: Roles that can change campaigns, as far as a role NAME says. Apple's role
 #: names are prose ("API Account Read Only"), so this is a deliberately narrow
@@ -225,9 +234,15 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         campaign_id: Annotated[int | None, Field(description="Limit to one campaign")] = None,
         limit: Limit = 200,
         offset: Offset = 0,
+        origin: OriginFilter = "any",
+        agent_name: AgentNameFilter = None,
+        owner: OwnerFilter = None,
+        mine: MineFilter = False,
     ) -> Rows:
         """Ads with their status, serving (display) status, creative and the
-        system status reasons that explain why one is not serving."""
+        system status reasons that explain why one is not serving, and who their
+        name says made them. Name filters apply to the page read."""
+        keep = name_filter(state, origin, agent_name, owner, mine)
         filters = []
         if ad_group_id:
             filters.append(eq_filter("adGroupId", ad_group_id))
@@ -237,7 +252,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             "ads_query_post", x_ap_context=context_header(),
             query_request=query(page_size=limit, offset=offset, filters=filters or None),
         )
-        return _paged(response, "ads", offset, limit)
+        return _named(_paged(response, "ads", offset, limit), "ad", keep)
 
     @mcp.tool(title="Get one ad by id", annotations=READ_ONLY)
     def get_ad(ad_id: Annotated[int, Field(description="Apple ad id")]) -> dict[str, Any]:
@@ -245,14 +260,31 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         return dump(unwrap(client.call("ads_id_get", id=str(ad_id), x_ap_context=context_header()), "ad"))
 
     @mcp.tool(title="List creatives (custom product page creatives)", annotations=READ_ONLY)
-    def list_creatives(limit: Limit = 200, offset: Offset = 0) -> Rows:
+    def list_creatives(
+        limit: Limit = 200,
+        offset: Offset = 0,
+        origin: OriginFilter = "any",
+        agent_name: AgentNameFilter = None,
+        owner: OwnerFilter = None,
+        mine: MineFilter = False,
+    ) -> Rows:
         """Creatives in this account, with their type, product page and system
-        status. A creative cannot serve until an ad attaches it to an ad group."""
+        status, and who their name says made them. A creative cannot serve until
+        an ad attaches it to an ad group. Name filters apply to the page read."""
+        keep = name_filter(state, origin, agent_name, owner, mine)
         response = client.call(
             "creatives_query_post", x_ap_context=context_header(),
             query_request=query(page_size=limit, offset=offset),
         )
-        return _paged(response, "creatives", offset, limit)
+        return _named(_paged(response, "creatives", offset, limit), "creative", keep)
+
+    def _named(page: Rows, entity_type: str, keep) -> Rows:
+        """Filter a page by name, and add origin / owner / agent / base / ledger_created."""
+        created = ledger.created_ids(entity_type)
+        rows = [r for r in page.rows if keep is None or keep(r.get("name"))]
+        page.rows = [attributed(r, r.get("name"), state, created) for r in rows]
+        page.returned = len(page.rows)
+        return page
 
     @mcp.tool(title="Why Apple rejected an app's creatives", annotations=READ_ONLY)
     def creative_rejection_reasons(

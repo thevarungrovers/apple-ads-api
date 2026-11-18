@@ -34,7 +34,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from apple_ads_mcp import client, ledger
+from apple_ads_mcp import client, ledger, naming
 from apple_ads_mcp.guardrails import DailyUsage, read_only_mode, writes_disabled
 from apple_ads_mcp.client import (
     REPORT_TIMEOUT,
@@ -93,6 +93,11 @@ class WhoAmI(BaseModel):
     org_id_from_me: str | None
     user_id: str | None
     accounts: list[AdAccountInfo]
+    identity: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Who this checkout names its creations after, from .env: "
+        "owner_initials, agent_name, the prefix they make, and any problem",
+    )
     note: str
 
 
@@ -107,6 +112,17 @@ class CampaignRow(BaseModel):
     )
     countries_or_regions: list[str] | None = None
     deleted: bool | None = None
+    origin: str | None = Field(
+        default=None,
+        description="agent | cli | manual, read from the NAME's prefix -- a convention, "
+        "not proof; ledger_created is the proof",
+    )
+    owner: str | None = None
+    agent: str | None = None
+    base: str | None = Field(default=None, description="The name without its prefix")
+    ledger_created: bool | None = Field(
+        default=None, description="True when this checkout's ledger shows it created this"
+    )
 
 
 class CampaignList(BaseModel):
@@ -130,6 +146,17 @@ class AdGroupRow(BaseModel):
     )
     automated_keywords_opt_in: bool | None = None
     deleted: bool | None = None
+    origin: str | None = Field(
+        default=None,
+        description="agent | cli | manual, read from the NAME's prefix -- a convention, "
+        "not proof; ledger_created is the proof",
+    )
+    owner: str | None = None
+    agent: str | None = None
+    base: str | None = Field(default=None, description="The name without its prefix")
+    ledger_created: bool | None = Field(
+        default=None, description="True when this checkout's ledger shows it created this"
+    )
 
 
 class CampaignDetail(CampaignRow):
@@ -327,6 +354,11 @@ class GuardrailReport(BaseModel):
         "process on this machine; resets at local midnight",
     )
     pending_previews: int
+    identity: dict[str, Any] = Field(
+        default_factory=dict,
+        description="The naming identity from .env: which parts are set, the prefix "
+        "every creation gets, and any malformed value (named by its .env key)",
+    )
     note: str
 
 
@@ -380,6 +412,12 @@ class ReconcileReport(BaseModel):
         default_factory=list,
         description="entry_ids from unknown_outcome whose entity DOES appear in "
         "Apple's audit trail in this window -- most likely landed",
+    )
+    naming: dict[str, Any] | None = Field(
+        default=None,
+        description="Only when a naming prefix is configured: prefix_lost (created "
+        "here, live name no longer carries the prefix), prefix_without_ledger (carries "
+        "our prefix, no creation in this ledger), and other prefixes counted",
     )
     note: str
 
@@ -946,6 +984,105 @@ MinImpressions = Annotated[
 # --- registration -------------------------------------------------------------
 
 
+# --- naming filters (apple_ads_mcp/naming.py) -------------------------------------
+
+OriginFilter = Annotated[
+    str,
+    Field(description="any | agent | cli | manual -- read from each name's prefix"),
+]
+AgentNameFilter = Annotated[
+    str | None, Field(description="Only names carrying this agent part, e.g. max")
+]
+OwnerFilter = Annotated[
+    str | None, Field(description="Only names carrying these owner initials, e.g. AB")
+]
+MineFilter = Annotated[
+    bool, Field(description="Only names carrying THIS checkout's prefix")
+]
+
+
+def state_identity(state) -> naming.Identity:
+    identity = getattr(state, "identity", None)
+    return identity if identity is not None else naming.Identity()
+
+
+def name_filter(state, origin, agent_name, owner, mine):
+    """naming.name_filter for a list tool, with its refusal as a ToolError."""
+    try:
+        return naming.name_filter(state_identity(state), origin, agent_name, owner, mine)
+    except naming.NameRefused as exc:
+        raise ToolError(str(exc)) from exc
+
+
+def attributed(row: Any, name: str | None, state, created: set[str]) -> Any:
+    """``row`` (a model or a dict) with origin/owner/agent/base/ledger_created."""
+    fields = naming.attribution(
+        name, state_identity(state), ledger_created=str(_row_id(row)) in created
+    )
+    if isinstance(row, dict):
+        return {**row, **fields}
+    return row.model_copy(update=fields)
+
+
+def _row_id(row: Any) -> Any:
+    return row.get("id") if isinstance(row, dict) else getattr(row, "id", None)
+
+
+#: entity_type -> the account-wide query that lists them, for reconcile's sweep.
+_NAMED_SWEEPS = {
+    "campaign": "campaigns_query_post",
+    "ad_group": "adgroups_query_post",
+    "ad": "ads_query_post",
+    "creative": "creatives_query_post",
+}
+
+
+def naming_reconcile(identity: naming.Identity) -> dict[str, Any] | None:
+    """reconcile_ledger's naming section, or None when no prefix is configured.
+
+    prefix_lost: created here, but the live name no longer carries our prefix
+    (renamed in the UI; a rename through low_risk_change restores it).
+    prefix_without_ledger: the live name carries our prefix and this ledger
+    has no creation of it (another checkout, a copied name, or the CLI).
+    Other agents' prefixes are only counted: their ledgers live elsewhere.
+    Information only; nothing is changed.
+    """
+    if not identity.prefix:
+        return None
+    lost, unledgered, others, problems = [], [], {}, []
+    for entity_type, method in _NAMED_SWEEPS.items():
+        created = ledger.created_ids(entity_type)
+        try:
+            rows, truncated = client.query_all(method)
+        except ToolError as exc:
+            problems.append(f"{entity_type}: could not list ({str(exc)[:120]})")
+            continue
+        if truncated:
+            problems.append(f"{entity_type}: more than the sweep cap exist; the lists are partial")
+        for row in rows:
+            if getattr(row, "deleted", False):
+                continue
+            entity_id, name = str(getattr(row, "id", "")), str(getattr(row, "name", "") or "")
+            entry = {"entity_type": entity_type, "entity_id": entity_id, "name": name}
+            ours = identity.owns(name)
+            if entity_id in created and not ours:
+                lost.append(entry)
+            elif ours and entity_id not in created:
+                unledgered.append(entry)
+            elif not ours:
+                parsed = naming.parse(name)
+                if parsed is not None:
+                    key = f"{parsed.owner}-{parsed.agent}"
+                    others[key] = others.get(key, 0) + 1
+    return {
+        "prefix": identity.prefix,
+        "prefix_lost": lost[:50],
+        "prefix_without_ledger": unledgered[:50],
+        "other_prefixes": others,
+        "problems": problems,
+    }
+
+
 def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitions
     @mcp.tool(
         title="Who am I, and which Apple Ads account is this server writing to?",
@@ -977,9 +1114,11 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             org_id_from_me=str(me.org_id) if me and me.org_id else None,
             user_id=str(me.user_id) if me and me.user_id else None,
             accounts=accounts,
+            identity=state_identity(state).describe(),
             note=(
                 "adAccountId is NOT the org id -- one org can own several ad "
-                "accounts. Every other tool addresses ad_account_id_in_use."
+                "accounts. Every other tool addresses ad_account_id_in_use. "
+                "identity is what this checkout's creations are named after."
             ),
         )
 
@@ -990,17 +1129,28 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         ] = False,
         limit: Annotated[int, Field(description="Max campaigns to return", ge=1, le=1000)] = 100,
         offset: Annotated[int, Field(description="Rows to skip; pass next_offset to page", ge=0)] = 0,
+        origin: OriginFilter = "any",
+        agent_name: AgentNameFilter = None,
+        owner: OwnerFilter = None,
+        mine: MineFilter = False,
     ) -> CampaignList:
-        """Every campaign, with status, serving status and daily budget.
+        """Every campaign, with status, serving status and daily budget, and
+        who its name says made it (origin / owner / agent / base).
 
-        Deleted campaigns are dropped AFTER the page is read, so `returned` can
-        be under `limit` while next_offset still says more exist.
+        Deleted campaigns, and rows the name filters exclude, are dropped AFTER
+        the page is read, so `returned` can be under `limit` while next_offset
+        still says more exist.
         """
+        keep = name_filter(state, origin, agent_name, owner, mine)
         rows, total, next_offset = client.query_page("campaigns_query_post", limit=limit, offset=offset)
         if not include_deleted:
             rows = [c for c in rows if not c.deleted]
+        if keep is not None:
+            rows = [c for c in rows if keep(c.name)]
+        created = ledger.created_ids("campaign")
         return CampaignList(
-            total=total, returned=len(rows), campaigns=[_campaign_row(c) for c in rows],
+            total=total, returned=len(rows),
+            campaigns=[attributed(_campaign_row(c), c.name, state, created) for c in rows],
             next_offset=next_offset, truncated=next_offset is not None,
         )
 
@@ -1058,16 +1208,26 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         include_deleted: Annotated[bool, Field(description="Include deleted ad groups")] = False,
         limit: Annotated[int, Field(description="Max ad groups to return", ge=1, le=1000)] = 200,
         offset: Annotated[int, Field(description="Rows to skip; pass next_offset to page", ge=0)] = 0,
+        origin: OriginFilter = "any",
+        agent_name: AgentNameFilter = None,
+        owner: OwnerFilter = None,
+        mine: MineFilter = False,
     ) -> AdGroupList:
-        """Ad groups, with status, serving status and default bid."""
+        """Ad groups, with status, serving status and default bid, and who
+        their name says made them. Name filters apply to the page read."""
+        keep = name_filter(state, origin, agent_name, owner, mine)
         filters = [eq_filter("campaignId", campaign_id)] if campaign_id else None
         rows, total, next_offset = client.query_page(
             "adgroups_query_post", filters, limit=limit, offset=offset
         )
         if not include_deleted:
             rows = [g for g in rows if not g.deleted]
+        if keep is not None:
+            rows = [g for g in rows if keep(g.name)]
+        created = ledger.created_ids("ad_group")
         return AdGroupList(
-            total=total, returned=len(rows), ad_groups=[_ad_group_row(g) for g in rows],
+            total=total, returned=len(rows),
+            ad_groups=[attributed(_ad_group_row(g), g.name, state, created) for g in rows],
             next_offset=next_offset, truncated=next_offset is not None,
         )
 
@@ -1579,6 +1739,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             session={k: str(v) for k, v in state.counters.snapshot().items()},
             daily=DailyUsage(limits).snapshot(),
             pending_previews=state.previews.pending_count(),
+            identity=state_identity(state).describe(),
             note=(
                 "An empty allowed_campaign_ids means every campaign is in scope. "
                 "Session counters reset only when the server restarts; the daily "
@@ -1692,6 +1853,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             unknown_seen_by_apple=[
                 str(e.get("entry_id")) for e in unknown if ids_of(e) & apple_ids
             ],
+            naming=naming_reconcile(state_identity(state)),
             note=(
                 (
                     f"unknown_outcome has {len(unknown)} write(s) whose request timed "

@@ -607,6 +607,16 @@ def created_by_us(entity_type: str, entity_id: Any) -> bool:
     return row is not None
 
 
+def created_ids(entity_type: str) -> set[str]:
+    """Ids of every entity of that type this checkout's ledger shows it created."""
+    rows = connect().execute(
+        "SELECT DISTINCT entity_id FROM changes WHERE entity_type=? AND field='created' "
+        "AND outcome IN (?, ?) AND entity_id IS NOT NULL",
+        (entity_type, APPLIED, PARTIAL),
+    )
+    return {str(row[0]) for row in rows}
+
+
 def set_projected_delta(entry_id: str, projected_daily_spend_delta: str) -> None:
     """Re-attribute one finished row's projected spend, leaving its outcome alone.
 

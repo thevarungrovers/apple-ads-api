@@ -291,5 +291,101 @@ def test_ad_report_narrows_to_one_ad() -> None:
     assert [r.id for r in report.rows] == ["5556"], report.rows
 
 
+def _named_account(apple) -> None:
+    """Four campaigns: ours, a human's through the CLI, a hand-made one, another agent's."""
+    base = apple.campaigns[CAMPAIGN]
+    for offset, name in enumerate(("AB-max-Ours", "AB-cli-Script", "Hand made", "CD-bot-Theirs")):
+        apple.campaigns[CAMPAIGN + offset] = base.model_copy(update={"id": CAMPAIGN + offset, "name": name})
+
+
+def test_list_filters_by_origin_agent_owner_and_mine() -> None:
+    _tools, apple, state = rig()
+    _named_account(apple)
+    tools = read_tools(state)
+
+    def names(**filters):
+        return [c.name for c in tools["list_campaigns"](**filters).campaigns]
+
+    assert len(names()) == 4
+    assert names(origin="agent") == ["AB-max-Ours", "CD-bot-Theirs"]
+    assert names(origin="cli") == ["AB-cli-Script"]
+    assert names(origin="manual") == ["Hand made"]
+    assert names(agent_name="bot") == ["CD-bot-Theirs"]
+    assert names(owner="AB") == ["AB-max-Ours", "AB-cli-Script"]
+    assert names(mine=True) == ["AB-max-Ours"]
+    ours = tools["list_campaigns"](mine=True).campaigns[0]
+    assert (ours.origin, ours.owner, ours.agent, ours.base) == ("agent", "AB", "max", "Ours")
+    manual = tools["list_campaigns"](origin="manual").campaigns[0]
+    assert (manual.origin, manual.owner, manual.base) == ("manual", None, None)
+    for bad in (dict(origin="robots"), dict(agent_name="Max-1"), dict(owner="ab'; --")):
+        try:
+            tools["list_campaigns"](**bad)
+        except Exception as exc:
+            assert "INVALID_REQUEST" in str(exc), exc
+        else:
+            raise AssertionError(f"{bad} should be refused")
+
+
+def test_list_filters_for_each_identity_and_ledger_created() -> None:
+    from apple_ads_mcp import tools_lookup
+    from apple_ads_mcp.naming import Identity
+    from kindkit import APP, Registrar as Reg
+
+    for owner, agent, prefix in (("AB", "max", "AB-max-"), ("AB", "", "AB-"), ("", "max", "max-")):
+        tools, apple, state = rig(identity=Identity.from_values(owner, agent))
+        created = tools["preview_create_creative"](name="Spring", adam_id=APP)
+        result = tools["apply_create_creative"](preview_token=created.preview_token)
+        registrar = Reg()
+        tools_lookup.register(registrar, state)
+        mine = registrar.tools["list_creatives"](mine=True)
+        assert [r["name"] for r in mine.rows] == [prefix + "Spring"], mine.rows
+        row = mine.rows[0]
+        assert row["ledger_created"] is True and row["origin"] == "agent" and row["base"] == "Spring"
+        assert str(row["id"]) == result.entity_id
+    tools, apple, state = rig(identity=Identity())
+    try:
+        read_tools(state)["list_campaigns"](mine=True)
+    except Exception as exc:
+        assert "APPLE_ADS_OWNER_INITIALS" in str(exc), exc
+    else:
+        raise AssertionError("mine=True with no identity should be refused")
+
+
+def test_reconcile_reports_lost_and_unledgered_prefixes_only_when_configured() -> None:
+    from apple_ads_mcp.naming import Identity
+    from kindkit import APP
+
+    tools, apple, state = rig()
+    apple.extra["query_audit_summary"] = lambda **_: SimpleNamespace(result=[], error=None)
+    created = tools["preview_create_campaign"](
+        name="Launch", adam_id=APP, countries=["US"], daily_budget="40.00", regulation_responses=[])
+    new_id = int(tools["apply_create_campaign"](preview_token=created.preview_token).entity_id)
+    apple.campaigns[new_id] = apple.campaigns[new_id].model_copy(update={"name": "Renamed in the UI"})
+    _named_account(apple)
+    report = read_tools(state)["reconcile_ledger"](days=1).naming
+    assert [e["entity_id"] for e in report["prefix_lost"]] == [str(new_id)], report
+    assert [e["name"] for e in report["prefix_without_ledger"]] == ["AB-max-Ours"], report
+    assert report["other_prefixes"] == {"AB-cli": 1, "CD-bot": 1}, report
+    _tools, apple, state = rig(identity=Identity())
+    apple.extra["query_audit_summary"] = lambda **_: SimpleNamespace(result=[], error=None)
+    assert read_tools(state)["reconcile_ledger"](days=1).naming is None
+
+
+def test_whoami_and_get_guardrails_show_the_identity() -> None:
+    from apple_ads_mcp.naming import Identity
+
+    _tools, apple, state = rig()
+    apple.extra["get_me"] = SimpleNamespace(result=SimpleNamespace(org_id=1, user_id=2), error=None)
+    apple.extra["get_user_acls"] = lambda **_: _acls(["API Campaign Manager"])
+    tools = read_tools(state)
+    for identity in (tools["whoami"]().identity, tools["get_guardrails"]().identity):
+        assert identity["owner_initials"] == "AB" and identity["agent_name"] == "max", identity
+        assert identity["prefix"] == "AB-max-" and identity["problems"] == []
+    _tools, _apple, state = rig(identity=Identity.from_values("AB", "has-dash"))
+    shown = read_tools(state)["get_guardrails"]().identity
+    assert shown["agent_name"] is None and shown["prefix"] == "AB-"
+    assert "APPLE_ADS_AGENT_NAME" in shown["problems"][0]
+
+
 if __name__ == "__main__":
     raise SystemExit(run(dict(globals())))

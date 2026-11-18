@@ -369,3 +369,61 @@ def rename(
     if identity.prefix:
         stamped.rule = "kept_prefix" if identity.owns(current) else "restored_prefix"
     return stamped
+
+
+# --- filtering the list tools -----------------------------------------------------
+
+ORIGINS = ("any", "agent", "cli", "manual")
+
+
+def attribution(name: str | None, identity: Identity, *, ledger_created: bool | None = None) -> dict[str, Any]:
+    """The fields every listed row with a name carries."""
+    parsed = classify(name, identity)
+    record = {"origin": parsed.origin, "owner": parsed.owner, "agent": parsed.agent,
+              "base": parsed.base if parsed.origin != "manual" else None}
+    if ledger_created is not None:
+        record["ledger_created"] = ledger_created
+    return record
+
+
+def name_filter(
+    identity: Identity, origin: str = "any", agent_name: str | None = None,
+    owner: str | None = None, mine: bool = False,
+):
+    """A predicate over names for the list tools, or None when nothing filters.
+
+    Each value is validated with the same rules as the identity (so nothing
+    unchecked reaches a comparison), and raises NameRefused when it is not.
+    A one-part prefix (`AB-...`, `max-...`) is recognised only as this
+    checkout's own; owner/agent filters match full two-part names and ours.
+    """
+    origin = (origin or "any").strip().lower()
+    if origin not in ORIGINS:
+        raise NameRefused(f"INVALID_REQUEST: origin must be one of {', '.join(ORIGINS)}")
+    agent_name = (agent_name or "").strip() or None
+    owner = (owner or "").strip() or None
+    if agent_name is not None and not AGENT_RE.fullmatch(agent_name):
+        raise NameRefused(f"INVALID_REQUEST: agent_name {agent_name!r} is not a lowercase slug like max")
+    if owner is not None and not OWNER_RE.fullmatch(owner):
+        raise NameRefused(f"INVALID_REQUEST: owner {owner!r} is not 2-4 uppercase letters like AB")
+    if mine and not identity.configured:
+        raise NameRefused(
+            f"INVALID_REQUEST: mine=True needs an identity, and none is configured: set "
+            f"{OWNER_KEY} and/or {AGENT_KEY} in .env."
+        )
+    if origin == "any" and agent_name is None and owner is None and not mine:
+        return None
+
+    def keep(name: str | None) -> bool:
+        parsed = classify(name, identity)
+        if origin != "any" and parsed.origin != origin:
+            return False
+        if agent_name is not None and parsed.agent != agent_name:
+            return False
+        if owner is not None and parsed.owner != owner:
+            return False
+        if mine and not identity.owns(name):
+            return False
+        return True
+
+    return keep
