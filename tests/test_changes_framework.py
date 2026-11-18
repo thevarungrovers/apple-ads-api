@@ -281,5 +281,75 @@ def test_a_partial_bulk_records_only_what_landed() -> None:
     assert outcomes == ["applied", "failed"], outcomes
 
 
+
+def _up_and_down(apple) -> None:
+    """KEYWORD+1 alongside KEYWORD, both 35 taps/7d at 1.00."""
+    apple.keywords[KEYWORD + 1] = apple.keywords[KEYWORD].model_copy(update={"id": KEYWORD + 1})
+    apple.reports["apps_keyword_reports"].append(apple.report_row(KEYWORD + 1, spend="35.00", taps=35))
+
+
+def test_a_bulk_bid_item_over_the_per_change_limit_blocks_even_when_the_net_is_zero() -> None:
+    tools, apple, _ = rig(max_projected_delta_per_day=Decimal("2.00"))
+    _up_and_down(apple)
+    # +0.50 on 5 taps/day is +2.50; -0.50 is -2.50. Net 0, but one item is over 2.00.
+    preview = tools["preview_keyword_bids_bulk"](
+        keyword_ids=[KEYWORD, KEYWORD + 1], new_bids=["1.50", "0.50"]
+    )
+    assert preview.blocked, preview.guardrail_checks
+    assert failed(preview, "projected_daily_delta"), preview.guardrail_checks
+
+
+def test_a_bulk_bid_decrease_does_not_offset_an_increase_in_the_caps() -> None:
+    from apple_ads_mcp.guardrails import DailyUsage
+
+    tools, apple, state = rig()
+    _up_and_down(apple)
+    preview = tools["preview_keyword_bids_bulk"](
+        keyword_ids=[KEYWORD, KEYWORD + 1], new_bids=["1.50", "0.50"]
+    )
+    assert preview.total_projected_daily_spend_delta == "2.50", preview.total_projected_daily_spend_delta
+    result = tools["apply_keyword_bids_bulk"](preview_token=preview.preview_token)
+    assert result.succeeded == 2, result
+    assert result.projected_daily_spend_delta == "2.50", result.projected_daily_spend_delta
+    assert state.counters.snapshot()["projected_session_delta"] == "2.50"
+    assert DailyUsage(state.limits).usage()[1] == Decimal("2.50")
+
+
+def test_a_bulk_bid_netting_to_zero_is_still_refused_by_the_session_cap() -> None:
+    tools, apple, _ = rig(max_projected_session_delta=Decimal("2.00"))
+    _up_and_down(apple)
+    preview = tools["preview_keyword_bids_bulk"](
+        keyword_ids=[KEYWORD, KEYWORD + 1], new_bids=["1.50", "0.50"]
+    )
+    _raises(
+        lambda: tools["apply_keyword_bids_bulk"](preview_token=preview.preview_token),
+        "session spend limit",
+    )
+    assert apple.writes() == []
+
+
+def test_a_partial_bulk_where_only_the_decrease_landed_records_nothing() -> None:
+    from apple_ads_mcp.guardrails import DailyUsage
+
+    tools, apple, state = rig()
+    _up_and_down(apple)
+    preview = tools["preview_keyword_bids_bulk"](
+        keyword_ids=[KEYWORD, KEYWORD + 1], new_bids=["1.50", "0.50"]
+    )
+    real = apple._keywords_bulk_update_post
+
+    def first_fails(keyword_update_bulk_request, **kw):
+        response = real(keyword_update_bulk_request=keyword_update_bulk_request, **kw)
+        response.result[0].success, response.result[0].error = False, "INVALID bid"
+        return response
+
+    apple._keywords_bulk_update_post = first_fails
+    result = tools["apply_keyword_bids_bulk"](preview_token=preview.preview_token)
+    assert (result.succeeded, result.failed) == (1, 1), result
+    assert result.projected_daily_spend_delta == "0", result.projected_daily_spend_delta
+    assert state.counters.snapshot()["projected_session_delta"] == "0"
+    assert DailyUsage(state.limits).usage()[1] == Decimal("0")
+
+
 if __name__ == "__main__":
     raise SystemExit(run(dict(globals())))

@@ -380,7 +380,10 @@ class Engine:
         landed_total = Decimal("0")
         for item, entry_id, outcome in zip(items, entry_ids, outcomes):
             if outcome.landed:
-                landed_total += Decimal(str(item.get("projected") or "0"))
+                # Positive deltas only, exactly as DailyUsage sums the rows and
+                # SessionCounters clamps: a landed cut refunds nothing, so the
+                # session and the day always agree on what a batch used.
+                landed_total += max(Decimal(str(item.get("projected") or "0")), Decimal("0"))
             ledger.write_outcome(
                 entry_id,
                 outcome=ledger.APPLIED if outcome.landed else ledger.FAILED,

@@ -71,6 +71,7 @@ from apple_ads_mcp.guardrails import (
     check_currency,
     check_known_status,
     check_pct_increase,
+    check_projected_delta,
 )
 from apple_ads_mcp.previews import any_failed, pct_change, project_bid_change, project_pause, render_checks
 
@@ -273,9 +274,10 @@ class KeywordBidsBulk(ChangeKind):
     ) -> Proposal:
         """Show what a batch of bid changes would do. Writes nothing.
 
-        Every item is previewed individually and the projected deltas are summed,
-        so one out-of-bounds bid blocks the whole batch rather than slipping
-        through inside a total that looks reasonable.
+        Every item is previewed individually -- each against the per-change
+        limit -- and only the increases are summed (a cut never offsets a
+        raise), so one out-of-bounds bid blocks the whole batch rather than
+        slipping through inside a total that looks reasonable.
         """
         if len(keyword_ids) != len(new_bids):
             raise ToolError(
@@ -289,7 +291,14 @@ class KeywordBidsBulk(ChangeKind):
         total = Decimal("0")
         for keyword_id, raw_bid in zip(keyword_ids, new_bids):
             built = keyword_bid_item(ctx, keyword_id, raw_bid, f"new_bids[{keyword_id}]")
-            total += built["projected"]
+            # Each item answers to the per-change limit on its own, and only
+            # INCREASES count towards the total: a cut on one keyword does not
+            # pay for a raise on another, any more than it does in the session
+            # and daily caps (which sum each row's positive delta).
+            per_item = check_projected_delta(ctx.limits, built["projected"])
+            per_item.detail = f"keyword {keyword_id}: {per_item.detail}"
+            built["checks"].append(per_item)
+            total += max(built["projected"], Decimal("0"))
             all_checks.extend(built["checks"])
             items.append(built["item"])
             keyword = built["keyword"]
