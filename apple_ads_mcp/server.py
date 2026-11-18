@@ -36,7 +36,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from mcp.server.mcpserver import MCPServer  # noqa: E402
 
-from apple_ads_mcp import __version__, logdb, tools_read, tools_write  # noqa: E402
+from apple_ads_mcp import __version__, logdb, tools_lookup, tools_read, tools_write  # noqa: E402
 from apple_ads_mcp.guardrails import (  # noqa: E402
     Limits,
     SessionCounters,
@@ -145,6 +145,7 @@ mcp = MCPServer(
 # the decorator, so the server object the SDK sees is unchanged.
 _registrar = logdb.InstrumentedServer(mcp)
 tools_read.register(_registrar, STATE)
+tools_lookup.register(_registrar, STATE)
 tools_write.register(_registrar, STATE)
 
 

@@ -160,5 +160,79 @@ def test_an_account_in_another_currency_blocks_every_preview() -> None:
     assert any(c.startswith("FAIL account_currency") for c in preview.guardrail_checks), preview.guardrail_checks
 
 
+def _acls(roles):
+    account = SimpleNamespace(id="1234567890", name="Example Account", org_id=1)
+    return SimpleNamespace(result=[SimpleNamespace(ad_account=account, roles=roles)], error=None)
+
+
+def test_get_account_reports_timezone_currency_and_role() -> None:
+    from apple_ads_mcp import tools_lookup
+
+    _tools, apple, state = rig()
+    apple.extra["get_user_acls"] = lambda **_: _acls(["API Account Read Only"])
+    registrar = Registrar()
+    tools_lookup.register(registrar, state)
+    account = registrar.tools["get_account"]()
+    assert account.timezone == "America/New_York" and account.currency == "USD"
+    assert account.roles == ["API Account Read Only"] and account.role_can_write is False
+
+
+def test_role_names_decide_whether_a_role_can_write() -> None:
+    from apple_ads_mcp.tools_lookup import role_can_write
+
+    assert role_can_write([]) is None
+    assert role_can_write(["API Account Read Only"]) is False
+    assert role_can_write(["API Account Read Write"]) is True
+    assert role_can_write(["API Account Read Only", "API Campaign Manager"]) is True
+
+
+def test_suggestions_are_filtered_by_app_campaign_and_country() -> None:
+    from apple_ads_mcp import tools_lookup
+
+    _tools, apple, state = rig()
+    seen = {}
+
+    def suggest(recommendation_query_request, **_):
+        seen["filters"] = {f.var_field: f.value for f in recommendation_query_request.filters}
+        return SimpleNamespace(result=[{"text": "example term"}], error=None, pagination=None)
+
+    apple.extra["query_keyword_suggestions"] = suggest
+    registrar = Registrar()
+    tools_lookup.register(registrar, state)
+    rows = registrar.tools["keyword_suggestions"](adam_id="1234567890", country="us")
+    assert seen["filters"] == {"adamId": ["1234567890"], "countryOrRegion": ["us"]}, seen
+    assert rows.rows == [{"text": "example term"}]
+
+
+def test_shared_budgets_list_the_campaigns_they_feed() -> None:
+    import apple_ads_platform as sdk
+    from apple_ads_mcp import tools_lookup
+
+    _tools, apple, state = rig()
+    apple.campaigns[CAMPAIGN] = apple.campaigns[CAMPAIGN].model_copy(
+        update={"shared_budgets": [sdk.SharedBudgetAssignment(budget_id=77)]}
+    )
+    apple.extra["shared_budgets_query_post"] = lambda **_: SimpleNamespace(
+        result=[sdk.SharedBudget.model_validate({"id": 77, "name": "Example Budget",
+                                                  "value": {"amount": "50", "currency": "USD"}})],
+        error=None, pagination=SimpleNamespace(total_count=1))
+    registrar = Registrar()
+    tools_lookup.register(registrar, state)
+    listed = registrar.tools["list_shared_budgets"]()
+    assert listed.rows[0]["campaign_ids"] == [str(CAMPAIGN)], listed.rows
+    assert listed.rows[0]["value_text"] == "50 USD"
+
+
+def test_list_ads_pages() -> None:
+    from apple_ads_mcp import tools_lookup
+
+    _tools, apple, state = rig()
+    registrar = Registrar()
+    tools_lookup.register(registrar, state)
+    listed = registrar.tools["list_ads"](ad_group_id=AD_GROUP)
+    assert listed.returned == 1 and listed.total == 1 and listed.next_offset is None
+    assert listed.rows[0]["name"] == "Example Ad"
+
+
 if __name__ == "__main__":
     raise SystemExit(run(dict(globals())))

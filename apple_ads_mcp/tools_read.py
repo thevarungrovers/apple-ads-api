@@ -184,19 +184,6 @@ class NegativeKeywordList(BaseModel):
     truncated: bool = Field(default=False, description="True when more rows exist")
 
 
-class SharedBudgetRow(BaseModel):
-    id: str
-    name: str | None
-    amount: str | None
-    status: str | None
-
-
-class SharedBudgetList(BaseModel):
-    returned: int
-    shared_budgets: list[SharedBudgetRow]
-    note: str
-
-
 class ReportRow(BaseModel):
     id: str | None
     name: str | None
@@ -235,18 +222,6 @@ class Report(BaseModel):
         "when the account could not be read and the machine's date was used",
     )
     note: str
-
-
-class SuggestionRow(BaseModel):
-    text: str | None
-    match_type: str | None
-    bid: str | None
-    extra: dict[str, str] = Field(default_factory=dict)
-
-
-class SuggestionList(BaseModel):
-    returned: int
-    suggestions: list[SuggestionRow]
 
 
 class BudgetRecommendationRow(BaseModel):
@@ -1083,42 +1058,6 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             truncated=next_offset is not None or not swept_all,
         )
 
-    @mcp.tool(title="List shared budgets", annotations=READ_ONLY)
-    def list_shared_budgets(
-        limit: Annotated[int, Field(description="Max to return", ge=1, le=1000)] = 100,
-    ) -> SharedBudgetList:
-        """Shared budgets in this account. Read only -- there is no write tool.
-
-        `shared_budgets_id_put` in the SDK accepts no `x_ap_context` argument at
-        all, so there is no way to say which account an update applies to. Until
-        that is resolved, editing a shared budget is a job for the Apple Ads UI.
-        """
-        response = client.call(
-            "shared_budgets_query_post",
-            x_ap_context=context_header(),
-            query_request=query(page_size=limit),
-        )
-        rows = unwrap(response, "shared budgets") or []
-        out = []
-        for budget in rows:
-            amount = getattr(budget, "amount", None) or getattr(budget, "budget", None)
-            out.append(
-                SharedBudgetRow(
-                    id=str(getattr(budget, "id", "")),
-                    name=getattr(budget, "name", None),
-                    amount=format_money(amount) if amount else None,
-                    status=enum_value(getattr(budget, "status", None)),
-                )
-            )
-        return SharedBudgetList(
-            returned=len(out),
-            shared_budgets=out,
-            note=(
-                "Read only. shared_budgets_id_put takes no account context in this "
-                "SDK version, so no write tool is exposed for it."
-            ),
-        )
-
     # --- reports --------------------------------------------------------------
     #
     # Every report takes the same paging and ordering arguments and says how
@@ -1304,34 +1243,6 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         )
 
     # --- recommendations ------------------------------------------------------
-
-    @mcp.tool(title="Apple's keyword suggestions", annotations=READ_ONLY)
-    def keyword_suggestions(
-        limit: Annotated[int, Field(description="Max suggestions", ge=1, le=200)] = 50,
-    ) -> SuggestionList:
-        """Keywords Apple suggests for this account. Suggestions only -- nothing is added."""
-        response = client.call(
-            "query_keyword_suggestions",
-            x_ap_context=context_header(),
-            recommendation_query_request=RecommendationQueryRequest(),
-        )
-        rows = (unwrap(response, "keyword suggestions") or [])[:limit]
-        return SuggestionList(
-            returned=len(rows),
-            suggestions=[
-                SuggestionRow(
-                    text=getattr(row, "text", None) or getattr(row, "keyword", None),
-                    match_type=enum_value(getattr(row, "match_type", None)),
-                    bid=format_money(getattr(row, "bid", None)),
-                    extra={
-                        k: str(v)
-                        for k, v in (row.model_dump(exclude_none=True) or {}).items()
-                        if k not in {"text", "keyword", "matchType", "bid", "additional_properties"}
-                    },
-                )
-                for row in rows
-            ],
-        )
 
     @mcp.tool(title="Apple's daily budget recommendations", annotations=READ_ONLY)
     def budget_recommendations(
