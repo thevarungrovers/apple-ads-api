@@ -56,6 +56,7 @@ import functools
 import inspect
 import json
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -736,6 +737,12 @@ def later_changes(entry_id: str) -> list[dict[str, Any]]:
 
     Any outcome counts: a later write, even one recorded failed, means the
     value Apple shows now may not be the one this entry left behind.
+
+    A break-glass CLI row (tool "cli") names no field the MCP rows use -- its
+    field is the HTTP method and path -- so it counts as touching this entity
+    whenever the entity's id is any segment of its path or a number in its
+    body. Over-matching only keeps a row 'unknown'; missing one would let a
+    human's write pass for "it never landed".
     """
     row = connect().execute(
         "SELECT rowid, entity_type, entity_id, field FROM changes WHERE entry_id=?", (entry_id,)
@@ -743,11 +750,28 @@ def later_changes(entry_id: str) -> list[dict[str, Any]]:
     if row is None:
         return []
     rows = connect().execute(
-        "SELECT * FROM changes WHERE rowid > ? AND entity_type=? AND entity_id=? AND field=? "
-        "ORDER BY rowid",
+        "SELECT * FROM changes WHERE rowid > ? AND ("
+        "(entity_type=? AND entity_id=? AND field=?) OR tool='cli') ORDER BY rowid",
         (row["rowid"], row["entity_type"], row["entity_id"], row["field"]),
     )
-    return [_row_to_entry(r) for r in rows]
+    entity_id = str(row["entity_id"] or "")
+    return [
+        _row_to_entry(r)
+        for r in rows
+        if r["tool"] != "cli" or _cli_row_touches(r, entity_id)
+    ]
+
+
+def _cli_row_touches(row: sqlite3.Row, entity_id: str) -> bool:
+    """True when a CLI ledger row may have written the entity ``entity_id``."""
+    if not entity_id.isdigit():
+        return False
+    if str(row["entity_id"] or "") == entity_id:
+        return True
+    segments = str(row["path"] or "").split("/")
+    if entity_id in segments:
+        return True
+    return re.search(rf"(?<![0-9]){entity_id}(?![0-9])", str(row["after"] or "")) is not None
 
 
 def reverted_entry_ids() -> set[str]:

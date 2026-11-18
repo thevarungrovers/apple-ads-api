@@ -39,9 +39,10 @@ def _args(**over) -> argparse.Namespace:
     return argparse.Namespace(**base)
 
 
-def _wire(sent: list, *, tty: bool, typed: str, status: int = 200) -> None:
+def _wire(sent: list, *, tty: bool, typed: str, status: int = 200, fresh_db: bool = True) -> None:
     no_live_client()
-    temp_db()
+    if fresh_db:
+        temp_db()
     cli.writes_disabled = lambda: None
     cli.resolve_ad_account_id = lambda: "1234567890"
     cli.get_api = lambda: type("A", (), {"api_client": type("C", (), {
@@ -126,6 +127,40 @@ def test_a_cli_write_that_times_out_is_ledgered_as_unknown_and_counts_today() ->
         raise AssertionError("expected the timeout to propagate")
     assert ledger.entries()[0]["outcome"] == "unknown"
     assert DailyUsage(limits()).usage()[0] == 1
+
+
+def test_a_later_cli_write_to_the_same_campaign_blocks_a_failed_verdict() -> None:
+    """An MCP budget change timed out; then a human PUT the same campaign through
+    the CLI. Apple showing the old budget may be the CLI's doing, so the unknown
+    row must not be settled FAILED (which would free cap)."""
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    from kindkit import CAMPAIGN, age_entry, rig
+
+    tools, apple, _ = rig()
+    preview = tools["preview_campaign_daily_budget"](campaign_id=CAMPAIGN, new_daily_budget="110.00")
+    apple.fail["campaigns_id_put"] = ToolError("TRANSIENT: campaigns_id_put: read timed out")
+    try:
+        tools["apply_campaign_daily_budget"](preview_token=preview.preview_token)
+    except ToolError:
+        pass
+    del apple.fail["campaigns_id_put"]
+    [row] = ledger.entries()
+    assert row["outcome"] == ledger.UNKNOWN, row
+
+    sent: list = []
+    path = f"campaigns/{CAMPAIGN}"
+    _wire(sent, tty=True, typed=path, fresh_db=False)
+    assert cli._run(_args(path=path, data='{"dailyBudgetAmount": {"amount": "100"}}')) == 0
+    assert sent, "the CLI write must have been sent"
+    age_entry(row["entry_id"])
+    try:
+        result = tools["resolve_unknown_change"](entry_id=row["entry_id"])
+    except ToolError as exc:
+        assert "later" in str(exc), exc
+    else:
+        raise AssertionError(f"settled despite a later CLI write: {result}")
+    assert ledger.find_entry(row["entry_id"])["outcome"] == ledger.UNKNOWN
 
 
 def test_a_read_needs_no_confirmation_and_writes_no_ledger_row() -> None:

@@ -219,7 +219,7 @@ every unknown item -- rather than calling `revert_change` to find out.
 `applied` is recorded at once. `failed` needs the entry to be 5 minutes old
 (Apple's read can lag; earlier you get "too early to tell; try again after
 <time>" -- wait and call it again), and is never given when a later ledger row
-touched the same field (it stays `unknown`; tell the human to check the Apple
+touched the same field, or a CLI row named the same id (it stays `unknown`; tell the human to check the Apple
 Ads UI). Reverting a batch id skips an `unknown` item Apple still shows at its
 old value (listed in `skipped`, left `unknown`) and undoes the items that
 landed; revert the skipped one later by its own entry id. A `partial` targeting entry is live; `revert_change` restores only the
