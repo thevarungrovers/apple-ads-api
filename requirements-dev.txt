@@ -1,0 +1,13 @@
+# Test-only dependencies, on top of requirements.txt:
+#
+#   ./venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+#   ./venv/bin/pytest
+#
+# The test files also still run as plain scripts (./venv/bin/python
+# tests/test_tool_surface.py), so pytest is a convenience, not a requirement.
+-r requirements.txt
+iniconfig==2.3.1
+packaging==26.3
+pluggy==1.7.0
+Pygments==2.21.0
+pytest==9.2.0
