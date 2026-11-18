@@ -340,6 +340,9 @@ class StatusKind(ChangeKind):
 
     entity_type = ""
     label = ""
+    #: Re-enabling is bounded by the CAMPAIGN (enable_bound), so a batch revert
+    #: of several in one campaign counts that bound once.
+    revert_bound_per_campaign = True
     get_method = ""
     put_method = ""
     update_arg = ""

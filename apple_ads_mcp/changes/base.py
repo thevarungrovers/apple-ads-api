@@ -190,6 +190,10 @@ class ChangeKind:
     ledger_keys: tuple[tuple[str, str], ...] = ()
     #: Why an entry of this kind cannot be undone, or None if it can.
     not_revertible: str | None = None
+    #: True when this kind's revert_projection is a CAMPAIGN's bound (its unused
+    #: budget), not the item's own: a batch revert then counts it once per
+    #: campaign, on the first item of that campaign that lands.
+    revert_bound_per_campaign: bool = False
     #: True when a PARTIAL row of this kind can be reverted: its inverse puts
     #: back only what the change asked for and leaves whatever drifted alone.
     revert_partial: bool = False
@@ -275,6 +279,32 @@ class ChangeKind:
             original = Decimal("0")
         restored = max(-original, Decimal("0"))
         return restored, restored > 0
+
+
+def bound_once_per_campaign(
+    items: list[dict[str, Any]], outcomes: list[Outcome]
+) -> list[Decimal]:
+    """Projected spend per item when a bound belongs to a CAMPAIGN, not an item.
+
+    An item carrying ``campaign_bound`` records that bound once per campaign,
+    on the first of the campaign's items that landed (or may have); the rest
+    of that campaign's items record 0. An item without one records its own
+    positive ``projected`` if it counts. Nothing that did not land counts.
+    """
+    seen: set[Any] = set()
+    recorded = []
+    for entry, outcome in zip(items, outcomes):
+        value = Decimal("0")
+        if outcome.counted:
+            if "campaign_bound" in entry:
+                campaign = entry.get("campaign_id")
+                if campaign not in seen:
+                    seen.add(campaign)
+                    value = max(Decimal(str(entry.get("campaign_bound") or "0")), Decimal("0"))
+            else:
+                value = max(Decimal(str(entry.get("projected") or "0")), Decimal("0"))
+        recorded.append(value)
+    return recorded
 
 
 def item(

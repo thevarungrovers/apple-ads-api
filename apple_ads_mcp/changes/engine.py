@@ -41,6 +41,7 @@ from apple_ads_mcp.changes.base import (
     NothingToUndo,
     Outcome,
     Proposal,
+    bound_once_per_campaign,
 )
 from apple_ads_mcp.client import normalized_value
 from apple_ads_mcp.guardrails import (
@@ -880,13 +881,30 @@ class Engine:
         live = kept
         # Each row records its OWN restored spend, so the daily cap -- which sums
         # rows -- sees the batch's total, and a partial revert only what landed.
+        # A campaign-scale bound (re-pausing negatives, re-enabling keywords in
+        # one campaign) is that campaign's unused budget: counted ONCE however
+        # many of its items the batch reverts.
         projected = Decimal("0")
+        bounded: set[Any] = set()
         for entry, (kind, item) in zip(live, plans):
             restored = self.revert_projection(ctx, entry, item, kind)
+            if restored > 0 and kind.revert_bound_per_campaign:
+                item["campaign_bound"] = str(restored)
+                campaign = item.get("campaign_id")
+                restored = Decimal("0") if campaign in bounded else restored
+                bounded.add(campaign)
             item["projected"] = str(restored)
             projected += restored
         self.refuse_if_over_caps(ctx, projected, 1)
         return self.send_revert(ctx, live, plans, projected)
+
+    @staticmethod
+    def revert_recorded(items, outcomes):
+        """A batch revert's per-row projections once outcomes are known: a
+        campaign's bound moves to the first of its items that landed."""
+        if not any("campaign_bound" in item for item in items):
+            return None
+        return bound_once_per_campaign(items, outcomes)
 
     def send_revert(self, ctx, entries, plans, projected: Decimal) -> ApplyResult:
         if len(plans) == 1:
@@ -904,7 +922,10 @@ class Engine:
                 # counted) rather than being left as open intents; send() has
                 # recorded the one that failed.
                 done = len(outcomes)
-                landed = self.record_outcomes(items[:done], entry_ids[:done], outcomes)
+                landed = self.record_outcomes(
+                    items[:done], entry_ids[:done], outcomes,
+                    self.revert_recorded(items[:done], outcomes),
+                )
                 # The rest never left the process: say so, rather than leave
                 # their intents without an outcome forever.
                 for later in entry_ids[done + 1:]:
@@ -920,7 +941,9 @@ class Engine:
                     charged = failing.get("outcome") == ledger.UNKNOWN
                     ctx.counters.record(landed, 0 if charged else 1)
                 raise
-        landed_total = self.record_outcomes(items, entry_ids, outcomes)
+        landed_total = self.record_outcomes(
+            items, entry_ids, outcomes, self.revert_recorded(items, outcomes)
+        )
         all_landed = all(o.landed for o in outcomes)
         if any(o.landed for o in outcomes):
             ctx.counters.record(projected if all_landed else landed_total, 1)

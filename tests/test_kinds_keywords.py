@@ -188,6 +188,30 @@ def test_resolving_an_unknown_bulk_negative_pause_keeps_the_campaign_bound() -> 
     assert DailyUsage(state.limits).usage()[1] == Decimal("90.00")
 
 
+def test_a_batch_revert_counts_each_campaigns_bound_once() -> None:
+    from apple_ads_mcp.guardrails import DailyUsage
+
+    tools, apple, state = rig(max_projected_delta_per_day_total=Decimal("500"),
+                              max_projected_session_delta=Decimal("500"))
+    for negative_id in (NEGATIVE, NEGATIVE + 1):
+        source = apple.negatives[NEGATIVE]
+        apple.negatives[negative_id] = source.model_copy(
+            update={"id": negative_id, "text": f"term {negative_id}",
+                    "status": sdk.NegativeKeywordStatus("PAUSED")})
+    preview = tools["preview_negative_keyword_status"](
+        negative_keyword_ids=[NEGATIVE, NEGATIVE + 1], status="ENABLED"
+    )
+    result = tools["apply_negative_keyword_status"](preview_token=preview.preview_token)
+    assert result.succeeded == 2
+    # Reverting re-pauses both negatives in ONE campaign: its traffic comes back
+    # once, so its bound is counted once, not once per negative.
+    undo = tools["revert_change"](entry_id=result.entry_id)
+    assert undo.applied, undo.failures
+    assert undo.projected_daily_spend_delta == "90.00", undo.projected_daily_spend_delta
+    assert DailyUsage(state.limits).usage()[1] == Decimal("90.00")
+    assert state.counters.snapshot()["projected_session_delta"] == "90.00"
+
+
 def test_a_partial_negative_pause_still_counts_its_campaign_bound() -> None:
     from apple_ads_mcp import ledger
     from apple_ads_mcp.guardrails import DailyUsage

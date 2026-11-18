@@ -35,6 +35,7 @@ from apple_ads_mcp.changes.base import (
     ChangeKind,
     Outcome,
     Proposal,
+    bound_once_per_campaign,
     item as make_item,
 )
 from apple_ads_mcp.changes.common import (
@@ -1066,16 +1067,7 @@ class NegativeKeywordStatusBulk(ChangeKind):
         """
         if not any("campaign_bound" in item for item in items):
             return super().landed_projections(items, outcomes)
-        counted: set[Any] = set()
-        recorded = []
-        for item, outcome in zip(items, outcomes):
-            value = Decimal("0")
-            campaign = item.get("campaign_id")
-            if outcome.counted and campaign not in counted:
-                counted.add(campaign)
-                value = max(Decimal(str(item.get("campaign_bound") or "0")), Decimal("0"))
-            recorded.append(value)
-        return recorded
+        return bound_once_per_campaign(items, outcomes)
 
     def request(self, ctx, items):
         return "negative_keywords_bulk_update_post", {
