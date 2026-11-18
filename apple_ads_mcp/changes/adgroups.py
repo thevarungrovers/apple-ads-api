@@ -24,6 +24,7 @@ from apple_ads_mcp.changes.common import (
     metrics_block,
     metrics_warning,
     parse_choice,
+    refuse_if_moved,
     serving_warning,
 )
 from apple_ads_mcp.client import (
@@ -236,7 +237,15 @@ class AdGroupDefaultBid(ChangeKind):
         )
 
     def current(self, ctx, item):
-        current = money_amount(ad_group_bid(client.get_ad_group(int(item["entity_id"]))))
+        ad_group = client.get_ad_group(int(item["entity_id"]))
+        # The write echoes the PREVIEW-time strategy back alongside the bid, so a
+        # strategy moved since then (in the UI, say) would be silently undone.
+        refuse_if_moved(
+            f"{bid_strategy_type(ad_group) or 'unknown'}/{bid_strategy_goal(ad_group) or '-'}",
+            f"{item.get('bid_strategy_type') or 'unknown'}/{item.get('bid_strategy_goal') or '-'}",
+            f"ad group {item['entity_id']} bid strategy",
+        )
+        current = money_amount(ad_group_bid(ad_group))
         return str(current) if current is not None else "none"
 
     def request(self, ctx, items):

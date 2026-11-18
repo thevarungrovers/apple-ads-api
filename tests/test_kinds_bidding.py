@@ -55,6 +55,45 @@ def test_a_stale_strategy_is_refused() -> None:
             "Something changed it in between")
 
 
+def _set_strategy(apple, **update) -> None:
+    group = apple.ad_groups[AD_GROUP]
+    apple.ad_groups[AD_GROUP] = group.model_copy(update={
+        "bid_strategy": group.bid_strategy.model_copy(update=update)})
+
+
+def test_a_default_bid_apply_refuses_a_strategy_changed_since_the_preview() -> None:
+    tools, apple, _ = rig(**ROOMY)
+    preview = tools["preview_ad_group_default_bid"](ad_group_id=AD_GROUP, new_bid="1.10")
+    # Someone moves the ad group onto Apple's bidding in the UI; the bid is untouched.
+    _set_strategy(apple, bid_strategy_type=sdk.BidStrategyType("MAX_CONVERSIONS"),
+                  bid_strategy_goal=sdk.BidStrategyGoal("INSTALL"))
+    _raises(lambda: tools["apply_ad_group_default_bid"](preview_token=preview.preview_token),
+            "Something changed it in between")
+    assert apple.writes() == []
+    assert apple.ad_groups[AD_GROUP].bid_strategy.bid_strategy_type.value == "MAX_CONVERSIONS"
+
+
+def test_a_default_bid_apply_refuses_a_goal_changed_since_the_preview() -> None:
+    tools, apple, _ = rig(**ROOMY)
+    preview = tools["preview_ad_group_default_bid"](ad_group_id=AD_GROUP, new_bid="1.10")
+    _set_strategy(apple, bid_strategy_goal=sdk.BidStrategyGoal("INSTALL"))
+    _raises(lambda: tools["apply_ad_group_default_bid"](preview_token=preview.preview_token),
+            "Something changed it in between")
+    assert apple.writes() == []
+
+
+def test_a_strategy_apply_refuses_a_default_bid_changed_since_the_preview() -> None:
+    tools, apple, _ = rig(**ROOMY)
+    preview = tools["preview_ad_group_bid_strategy"](
+        ad_group_id=AD_GROUP, bid_strategy_type="MAX_CONVERSIONS", bid_strategy_goal="INSTALL")
+    group = apple.ad_groups[AD_GROUP]
+    _set_strategy(apple, bid=group.bid_strategy.bid.model_copy(update={"amount": "2.00"}))
+    _raises(lambda: tools["apply_ad_group_bid_strategy"](preview_token=preview.preview_token),
+            "Something changed it in between")
+    assert apple.writes() == []
+    assert apple.ad_groups[AD_GROUP].bid_strategy.bid.amount == "2.00"
+
+
 def test_cpa_goal_bounds() -> None:
     tools, apple, _ = rig()
     over = tools["preview_ad_group_cpa_goal"](ad_group_id=AD_GROUP, cpa_goal="25.00")

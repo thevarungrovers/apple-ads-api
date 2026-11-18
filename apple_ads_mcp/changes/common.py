@@ -158,6 +158,20 @@ def ad_group_bid(ad_group: Any) -> Any:
     return getattr(strategy, "bid", None)
 
 
+def refuse_if_moved(current: str, recorded: str, what: str) -> None:
+    """Staleness for a value a write ECHOES BACK rather than changes.
+
+    A kind's ``current`` returns the one value its ``before`` describes, and
+    the engine refuses when that moved. But a write that sends other fields
+    back unchanged (the bid strategy alongside a default bid, the default bid
+    alongside a strategy) would silently revert a change made to THOSE since
+    the preview. Call this from ``current`` for each such field.
+    """
+    from apple_ads_mcp.changes.engine import Engine
+
+    Engine.confirm_unchanged(current, recorded, what)
+
+
 def bid_strategy_update(
     amount: str | None,
     currency: str | None,

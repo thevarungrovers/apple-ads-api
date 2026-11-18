@@ -44,6 +44,7 @@ from apple_ads_mcp.changes.common import (
     metrics_block,
     metrics_warning,
     parse_choice,
+    refuse_if_moved,
     serving_warning,
 )
 from apple_ads_mcp.client import (
@@ -94,6 +95,15 @@ class _StrategyKind(ChangeKind):
 
     def current(self, ctx, item):
         entity = self.fetch(item["entity_id"])
+        if "bid" in item:
+            # The write sends the PREVIEW-time default bid back with the new
+            # strategy, so a bid changed since then would be silently undone.
+            bid = money_amount(ad_group_bid(entity))
+            refuse_if_moved(
+                str(bid) if bid is not None else "none",
+                str(item["bid"]) if item["bid"] is not None else "none",
+                f"{self.entity_type.replace('_', ' ')} {item['entity_id']} default bid",
+            )
         return strategy_text(strategy_type_of(entity), strategy_goal_of(entity))
 
     def request(self, ctx, items):
