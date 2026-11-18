@@ -2,7 +2,11 @@
 
 `preview_low_risk_change(entity_type, entity_id, field, value)` covers edits that
 cannot move money or change who sees an ad: renaming a campaign, ad group, ad or
-creative, and dismissing one of Apple's recommendations. Everything else --
+creative, and dismissing one of Apple's recommendations. A rename reaches only
+the agent's OWN entities -- its name carries this checkout's prefix, or the
+ledger shows this server created it -- and keeps the prefix (apple_ads_mcp/
+naming.py); a hand-made or another agent's entity is refused. A revert puts the
+old name back verbatim and never re-stamps. Everything else --
 money, bids, budgets, status, bid strategy, CPA goals, targeting, Search Match,
 schedule, shared budgets, billing, regulation -- has a typed pair with its own
 bounds and is refused here.
@@ -89,7 +93,11 @@ class LowRiskChange(ChangeKind):
         ],
         entity_id: Annotated[str, Field(description="The entity's or recommendation's id")],
         field: Annotated[str, Field(description='"name" for a rename, "dismiss" for a recommendation')],
-        value: Annotated[str, Field(description="The new name; ignored for dismiss")] = "",
+        value: Annotated[
+            str,
+            Field(description="The new name -- the base only: the agent's prefix is kept. "
+                  "Ignored for dismiss"),
+        ] = "",
     ) -> Proposal:
         """Show what a low-risk edit would do. Writes nothing.
 
@@ -97,6 +105,10 @@ class LowRiskChange(ChangeKind):
         dismiss a daily budget or target CPA recommendation. Anything touching
         money, bids, budgets, status or targeting is refused -- use its typed
         preview_* tool. Dismissing has no inverse, and the preview says so.
+
+        A rename reaches only the agent's OWN entities (its prefix, or the ledger
+        shows this server created it); a hand-made or another agent's entity is
+        refused. The prefix is kept, so pass the new base name.
         """
         entity_type = str(entity_type).strip().lower()
         field = str(field).strip().lower()
@@ -119,21 +131,28 @@ class LowRiskChange(ChangeKind):
         return entity
 
     def _rename(self, ctx, entity_type: str, entity_id: str, value: str) -> Proposal:
-        new_name = (value or "").strip()
-        if not new_name:
+        if not (value or "").strip():
             raise ToolError("INVALID_REQUEST: the new name is empty")
         entity = self._fetch(entity_type, entity_id)
+        # Only the agent's OWN entities (its prefix, or the ledger shows this
+        # server created it), and the prefix is kept: see naming.rename. The
+        # "unchanged" check below compares the FINAL name.
+        stamped = ctx.name_for_rename(entity_type, entity_id, entity.name, value)
+        new_name = stamped.final
         if entity.name == new_name:
             raise ToolError(f"{entity_type} {entity_id} is already called {new_name!r}.")
         campaign_id = entity.id if entity_type == "campaign" else getattr(entity, "campaign_id", None)
         checks = [] if entity_type == "creative" else [check_campaign_in_scope(ctx.limits, campaign_id)]
+        checks += stamped.checks()
         path = f"{entity_type.replace('_', ' ').title().replace(' ', '')} {entity.name!r}"
         return Proposal(
             items=[make_item(
                 entity_type=entity_type, entity_id=entity_id, entity_name=entity.name, path=path,
                 field="name", before=entity.name, after=new_name, campaign_id=campaign_id,
+                **stamped.item_fields(ctx.identity),
             )],
-            checks=checks, projected=Decimal("0"),
+            checks=checks, projected=Decimal("0"), naming=stamped.block(),
+            warnings=[w for w in (stamped.warning(),) if w],
             note="A rename moves no money and changes no delivery. revert_change puts the old name back.",
             entity_type=entity_type, entity_id=str(entity_id), entity_name=entity.name, path=path,
             field_name="name", before=entity.name, after=new_name,

@@ -77,21 +77,110 @@ def test_anything_off_the_allowlist_is_refused() -> None:
             entity_type=entity_type, entity_id="1", field=field, value="x"), "not a low-risk edit")
 
 
+def _stores(apple):
+    return {"campaign": (apple.campaigns, CAMPAIGN), "ad_group": (apple.ad_groups, AD_GROUP),
+            "ad": (apple.ads, AD), "creative": (apple.creatives, CREATIVE)}
+
+
+def _name(store, entity_id, name) -> None:
+    store[entity_id] = store[entity_id].model_copy(update={"name": name})
+
+
 def test_renames_round_trip() -> None:
+    """Our own entity (it carries our prefix): only the base changes, the prefix
+    is kept, and a revert restores the exact old name without re-stamping."""
     tools, apple, _ = rig()
-    stores = {"campaign": (apple.campaigns, CAMPAIGN), "ad_group": (apple.ad_groups, AD_GROUP),
-              "ad": (apple.ads, AD), "creative": (apple.creatives, CREATIVE)}
+    stores = _stores(apple)
     assert set(stores) == set(RENAMEABLE)
     for entity_type, (store, entity_id) in stores.items():
+        _name(store, entity_id, "AB-max-Example")
         old = store[entity_id].name
         preview = tools["preview_low_risk_change"](
             entity_type=entity_type, entity_id=str(entity_id), field="name", value="Renamed Example")
-        assert (preview.before, preview.after) == (old, "Renamed Example")
+        assert (preview.before, preview.after) == (old, "AB-max-Renamed Example")
+        assert preview.naming["rule"].startswith("rename of our own entity"), preview.naming
         assert preview.projected_daily_spend_delta == "0"
         result = tools["apply_low_risk_change"](preview_token=preview.preview_token)
-        assert result.applied and store[entity_id].name == "Renamed Example", entity_type
+        assert result.applied and store[entity_id].name == "AB-max-Renamed Example", entity_type
         undo = tools["revert_change"](entry_id=result.entry_id)
         assert undo.applied and store[entity_id].name == old, entity_type
+
+
+def _refused(fn, needle: str) -> None:
+    try:
+        fn()
+    except Exception as exc:
+        assert needle in str(exc), f"expected {needle!r} in {exc!r}"
+        return
+    raise AssertionError(f"expected a refusal mentioning {needle!r}")
+
+
+def test_a_manual_or_foreign_entity_cannot_be_renamed() -> None:
+    tools, apple, _ = rig()
+    for entity_type, (store, entity_id) in _stores(apple).items():
+        # A hand-made entity (no prefix, no ledger row): refused, no override.
+        _refused(lambda: tools["preview_low_risk_change"](
+            entity_type=entity_type, entity_id=str(entity_id), field="name", value="X"),
+            "not this agent's")
+        _name(store, entity_id, "CD-bot-Example")
+        _refused(lambda: tools["preview_low_risk_change"](
+            entity_type=entity_type, entity_id=str(entity_id), field="name", value="X"),
+            "CD-bot-")
+        # Our own, but asking to swap in another prefix: refused too.
+        _name(store, entity_id, "AB-max-Example")
+        _refused(lambda: tools["preview_low_risk_change"](
+            entity_type=entity_type, entity_id=str(entity_id), field="name", value="CD-bot-X"),
+            "another agent's prefix")
+    assert apple.writes() == []
+
+
+def test_a_ledger_created_entity_that_lost_its_prefix_gets_it_back() -> None:
+    from decimal import Decimal
+
+    from apple_ads_mcp import ledger
+    from kindkit import APP
+
+    tools, apple, _ = rig(max_projected_session_delta=Decimal("500"),
+                          max_projected_delta_per_day_total=Decimal("500"))
+    created = tools["preview_create_campaign"](
+        name="Launch", adam_id=APP, countries=["US"], daily_budget="40.00", regulation_responses=[])
+    result = tools["apply_create_campaign"](preview_token=created.preview_token)
+    new_id = int(result.entity_id)
+    _name(apple.campaigns, new_id, "Launch renamed in the UI")
+    preview = tools["preview_low_risk_change"](
+        entity_type="campaign", entity_id=str(new_id), field="name", value="Launch 2")
+    assert preview.after == "AB-max-Launch 2" and "restoring" in preview.naming["rule"]
+    applied = tools["apply_low_risk_change"](preview_token=preview.preview_token)
+    assert applied.applied and apple.campaigns[new_id].name == "AB-max-Launch 2"
+    row = ledger.find_entry(applied.entry_id)
+    assert row["detail"]["requested_name"] == "Launch 2" and row["detail"]["identity"]["agent"] == "max"
+
+
+def test_renames_for_each_identity() -> None:
+    from apple_ads_mcp import ledger
+    from apple_ads_mcp.naming import Identity
+
+    combos = {("AB", "max"): "AB-max-", ("AB", ""): "AB-", ("", "max"): "max-", ("", ""): ""}
+    for (owner, agent), prefix in combos.items():
+        tools, apple, _ = rig(identity=Identity.from_values(owner, agent))
+        if prefix:
+            _name(apple.ad_groups, AD_GROUP, prefix + "Old")
+        else:
+            # No prefix to recognise it by: only the ledger can say it is ours.
+            ledger.write_intent("seed", tool="apply_create_ad_group", entity_type="ad_group",
+                                entity_id=AD_GROUP, entity_name="Old", path="-", field="created",
+                                before="(none)", after="PAUSED", campaign_id=CAMPAIGN,
+                                projected_daily_spend_delta="0")
+            ledger.write_outcome("seed", outcome=ledger.APPLIED)
+        preview = tools["preview_low_risk_change"](
+            entity_type="ad_group", entity_id=str(AD_GROUP), field="name", value="New")
+        assert preview.after == prefix + "New", ((owner, agent), preview.after)
+        result = tools["apply_low_risk_change"](preview_token=preview.preview_token)
+        assert result.applied and apple.ad_groups[AD_GROUP].name == prefix + "New"
+        # The same name again is "unchanged", judged on the final name.
+        _refused(lambda: tools["preview_low_risk_change"](
+            entity_type="ad_group", entity_id=str(AD_GROUP), field="name", value=prefix + "New"),
+            "already called")
 
 
 def test_a_dismissal_has_no_inverse() -> None:
