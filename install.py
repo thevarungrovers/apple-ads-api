@@ -49,7 +49,7 @@ VENV_PYTHON = REPO_ROOT / "venv" / "bin" / "python"
 WINDOWS_VENV_PYTHON = REPO_ROOT / "venv" / "Scripts" / "python.exe"
 SKILL_FILE = REPO_ROOT / ".claude" / "skills" / SERVER_NAME / "SKILL.md"
 
-#: The tools that cannot change anything: 19 reads and 9 previews. A preview
+#: The tools that cannot change anything: every read and every preview. A preview
 #: calls Apple and mints a token in memory; it writes nothing to the account.
 #: Hardcoded because this script must not import the server (that would need the
 #: dependencies, which is exactly what it may be running before). Kept honest by
@@ -384,11 +384,11 @@ def install_claude_code_cli_deny(dry_run: bool) -> list[str]:
 
 
 def install_claude_code_permissions(dry_run: bool) -> list[str]:
-    """Pre-approve the 28 tools that cannot change anything.
+    """Pre-approve every tool that cannot change anything (SAFE_TOOLS).
 
     Claude Code is the ONLY one of the four with a per-tool allowlist, so it is
     the only one where "approve the safe tools, keep asking about the rest" is
-    something the client can be told. The ten write tools are never added here,
+    something the client can be told. The write tools are never added here,
     under any answer: not being on this list is what makes them stop and ask.
 
     A blanket `mcp__apple-ads` entry would approve the server including its

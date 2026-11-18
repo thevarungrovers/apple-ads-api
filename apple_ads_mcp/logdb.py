@@ -391,7 +391,7 @@ def _finish_api_call(
 class InstrumentedServer:
     """An `MCPServer` whose `@tool()` decorator also logs the call.
 
-    Wrapping the registrar rather than the 38 tool bodies: one place to change,
+    Wrapping the registrar rather than every tool body: one place to change,
     nothing for a new tool to forget, and no decorator to leave off by accident.
     Every other attribute passes straight through to the real server.
 
