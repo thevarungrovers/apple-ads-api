@@ -8,8 +8,10 @@ is the canonical JSON of exactly those dimensions.
 
 THE WRITE CARRIES THE WHOLE TARGETING OBJECT. `targeting` is nested and Apple's
 PUT merges at the top level only, so every other dimension is read at preview
-time and echoed back unchanged; staleness covers the whole object, and the
-read-back fails the write if any other dimension moved.
+time and echoed back unchanged; staleness covers the whole object. When the
+requested dimension landed but the read-back shows another one moved (Apple
+normalised or dropped it), the row is recorded PARTIAL -- live, counted against
+the caps, and revertible for the requested dimension only -- never FAILED.
 
 THE PROJECTION is the honest one for targeting: WIDENING (a dimension
 unrestricted, an include list grown, an exclude list shrunk, an age bound
@@ -118,6 +120,25 @@ def _same_dimension(a: dict[str, Any] | None, b: dict[str, Any] | None) -> bool:
     return norm(a) == norm(b)
 
 
+def drifted(expected: dict[str, Any], echoed: dict[str, Any], own: tuple[str, ...]) -> list[str]:
+    """The dimensions OTHER than ``own`` whose read-back differs from what was sent.
+
+    Modelled dimensions are compared as targeting (`_same_dimension`): the SDK
+    types include/exclude as plain lists of strings, so order, null and [] are
+    provably not differences. Unmodelled keys (EXTRA) have no model to say
+    which shapes are equivalent, so each is compared exactly and named on its
+    own (`_unmodelled.<key>`); any difference there is reported as drift.
+    """
+    moved = [
+        attr
+        for attr in (set(expected) | set(echoed)) - set(own) - {EXTRA}
+        if not _same_dimension(expected.get(attr), echoed.get(attr))
+    ]
+    sent, back = expected.get(EXTRA) or {}, echoed.get(EXTRA) or {}
+    moved += [f"{EXTRA}.{key}" for key in set(sent) | set(back) if sent.get(key) != back.get(key)]
+    return sorted(moved)
+
+
 def encode(state: dict[str, Any]) -> str:
     return json.dumps(state, sort_keys=True, separators=(",", ":"))
 
@@ -183,6 +204,9 @@ class _TargetingKind(ChangeKind):
     field_name = ""
     attrs: tuple[str, ...] = ()
     apply_annotations = APPLY
+    #: A PARTIAL row (another dimension drifted) reverts only ``attrs``: the
+    #: inverse echoes every other dimension as Apple holds it NOW.
+    revert_partial = True
 
     @property
     def ledger_keys(self):  # type: ignore[override]
@@ -305,27 +329,20 @@ class _TargetingKind(ChangeKind):
         observed = encode(read_state(updated, self.attrs)) if updated else None
         if observed != item["after"]:
             return [Outcome(False, observed)]
-        # Read-back of EVERY other dimension: one that moved means the write did
-        # more than the preview said, and is not reported as landed.
+        # Read-back of EVERY other dimension. One that moved means the write did
+        # more than the preview said -- but the requested dimension DID land,
+        # so the change is live and spending: PARTIAL, never failed.
         if item.get("targeting"):
-            expected = decode(item["targeting"])
-            echoed = full_state(updated, self.dimensions)
-            moved = sorted(
-                attr
-                for attr in (set(expected) | set(echoed)) - set(self.attrs)
-                if (
-                    expected.get(attr) != echoed.get(attr)
-                    if attr == EXTRA
-                    else not _same_dimension(expected.get(attr), echoed.get(attr))
-                )
-            )
+            moved = drifted(decode(item["targeting"]), full_state(updated, self.dimensions), self.attrs)
             if moved:
-                return [Outcome(False, observed, error=(
-                    f"the {self.field_name} change was applied, but Apple's read-back "
-                    f"also shows {', '.join(moved)} changed from before -- the write "
-                    f"touched targeting it was not meant to. Check the "
-                    f"{self.entity_type.replace('_', ' ')} in the Apple Ads UI and "
-                    f"put {', '.join(moved)} back by hand."
+                what = self.entity_type.replace("_", " ")
+                return [Outcome(True, observed, partial=True, error=(
+                    f"PARTIAL: the {self.field_name} change landed, but Apple's read-back "
+                    f"also shows {', '.join(moved)} differing from before -- Apple "
+                    f"normalised or dropped it, or the write touched targeting it was "
+                    f"not meant to. Check {', '.join(moved)} on the {what} in the Apple "
+                    f"Ads UI. Recorded as partial: it counts against the caps, and "
+                    f"revert_change puts back only {self.field_name}."
                 ))]
         return [Outcome(True, observed)]
 

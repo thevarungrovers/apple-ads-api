@@ -461,10 +461,14 @@ class Engine:
                     if projected is not None and outcome.landed and projected != max(original, Decimal("0"))
                     else None
                 ),
-                outcome=ledger.APPLIED if outcome.landed else ledger.FAILED,
+                outcome=(
+                    (ledger.PARTIAL if outcome.partial else ledger.APPLIED)
+                    if outcome.landed
+                    else ledger.FAILED
+                ),
                 observed_after=outcome.observed,
                 entity_id=outcome.created_id,
-                detail=""
+                detail=(outcome.error or "")
                 if outcome.landed
                 else (
                     outcome.error
@@ -483,6 +487,8 @@ class Engine:
                 if outcome.landed:
                     suffix = f" (created as {outcome.created_id})" if outcome.created_id else ""
                     lines.append(f"{label}: {item.get('before')} -> {outcome.observed}{suffix}")
+                    if outcome.partial and outcome.error:
+                        failures.append(f"{label}: {outcome.error}")
                 elif outcome.error:
                     failures.append(f"{label}: {outcome.error}")
                     lines.append(f"{label}: FAILED -- {outcome.error}")
@@ -543,7 +549,7 @@ class Engine:
             projected_daily_spend_delta=str(item.get("projected") or "0"),
             session=session,
             daily=daily,
-            failures=[]
+            failures=([outcome.error] if outcome.partial and outcome.error else [])
             if landed
             else [
                 outcome.error
@@ -551,7 +557,14 @@ class Engine:
                 f"{outcome.observed!r}, not {item['after']!r}. Nothing changed."
             ],
             note=(
-                (kind.success_note or f"Undo with revert_change(entry_id='{entry_id}').")
+                (
+                    f"PARTIAL: the change landed, but something else moved too -- read "
+                    f"failures. Undo the requested part with "
+                    f"revert_change(entry_id='{entry_id}')."
+                    if outcome.partial
+                    else kind.success_note
+                    or f"Undo with revert_change(entry_id='{entry_id}')."
+                )
                 if landed
                 else kind.failure_note
             ),
@@ -592,6 +605,8 @@ class Engine:
         entry_id = entry.get("entry_id")
         if entry.get("outcome") == ledger.UNKNOWN:
             self.resolve_unknown(ctx, entry)
+            entry = {**entry, "outcome": ledger.APPLIED}
+        if entry.get("outcome") == ledger.PARTIAL and self.kind_for_entry(entry).revert_partial:
             entry = {**entry, "outcome": ledger.APPLIED}
         if entry.get("outcome") != ledger.APPLIED:
             raise ToolError(
@@ -736,7 +751,10 @@ class Engine:
         live = [
             e
             for e in batch
-            if e.get("outcome") in (ledger.APPLIED, ledger.UNKNOWN)
+            if (
+                e.get("outcome") in (ledger.APPLIED, ledger.UNKNOWN)
+                or (e.get("outcome") == ledger.PARTIAL and self.kind_for_entry(e).revert_partial)
+            )
             and e["entry_id"] not in reverted
         ]
         if not live:

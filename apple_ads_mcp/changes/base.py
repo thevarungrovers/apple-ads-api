@@ -104,6 +104,11 @@ class Outcome:
     #: entity_id so revert and reconcile can find the thing that was made.
     created_id: str | None = None
     error: str | None = None
+    #: The requested change LANDED, but the read-back shows something else
+    #: moved too (``error`` names it). Recorded PARTIAL, never FAILED: the
+    #: change is live and spending, so it counts against the caps and stays
+    #: revertible. ``landed`` is True whenever this is.
+    partial: bool = False
 
 
 @dataclass
@@ -165,6 +170,9 @@ class ChangeKind:
     ledger_keys: tuple[tuple[str, str], ...] = ()
     #: Why an entry of this kind cannot be undone, or None if it can.
     not_revertible: str | None = None
+    #: True when a PARTIAL row of this kind can be reverted: its inverse puts
+    #: back only what the change asked for and leaves whatever drifted alone.
+    revert_partial: bool = False
     #: What the apply says when Apple answered 200 and changed nothing.
     failure_note: str = (
         "NOT APPLIED. Apple returned success and left the value alone. For a "

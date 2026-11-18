@@ -146,14 +146,62 @@ def test_a_targeting_write_echoes_every_other_dimension() -> None:
     assert targeting.app_downloader.exclude == [APP]
 
 
-def test_a_targeting_write_that_drops_another_dimension_is_not_landed() -> None:
+def test_a_targeting_write_that_drops_another_dimension_is_partial_and_revertible() -> None:
+    """The requested dimension landed and another did not survive: the change
+    is LIVE, so it is recorded PARTIAL (counted by the caps, revertible), never
+    FAILED -- and the drifted dimension is named."""
+    from apple_ads_mcp import ledger
+
     tools, apple, _ = rig(**ROOMY)
     _rich_targeting(apple)
     preview = tools["preview_ad_group_demographics"](ad_group_id=AD_GROUP, min_age=30)
     _wholesale(apple, drop="daypart")
     result = tools["apply_ad_group_demographics"](preview_token=preview.preview_token)
-    assert not result.applied
+    assert result.applied, "the requested dimension landed"
     assert any("daypart" in f for f in result.failures), result.failures
+    assert "PARTIAL" in result.note, result.note
+    row = ledger.find_entry(result.entry_id)
+    assert row["outcome"] == ledger.PARTIAL, row
+    assert "daypart" in (row.get("outcome_detail") or ""), row
+    assert result.session["applies_this_session"] == "1", result.session
+    assert result.daily["applies_today"] == "1", result.daily
+    undo = tools["revert_change"](entry_id=result.entry_id)
+    assert undo.applied, undo.failures
+    targeting = apple.ad_groups[AD_GROUP].targeting
+    assert targeting.min_age is None or not targeting.min_age.include, targeting
+    # Only the requested dimension is restored; the rest stays as Apple has it.
+    assert sorted(targeting.device_class.include) == ["IPAD", "IPHONE"]
+    assert targeting.daypart is None, "the revert must not touch the drifted dimension"
+
+
+def test_a_targeting_write_whose_unmodelled_keys_change_shape_is_partial() -> None:
+    from apple_ads_mcp import ledger
+
+    tools, apple, _ = rig(**ROOMY)
+    group = apple.ad_groups[AD_GROUP]
+    # from_dict, as the SDK deserialises a response: an unmodelled key lands in
+    # additional_properties (model_validate would drop it).
+    apple.ad_groups[AD_GROUP] = group.model_copy(update={"targeting": sdk.AdGroupTargeting.from_dict({
+        "deviceClass": {"include": ["IPHONE", "IPAD"]},
+        "futureDimension": {"include": ["a"]},
+    })})
+    preview = tools["preview_ad_group_devices"](ad_group_id=AD_GROUP, devices=["IPHONE"])
+
+    def put(id, ad_group_update, **_):
+        current = apple.ad_groups[int(id)]
+        targeting = current.targeting.to_dict()
+        targeting["deviceClass"] = ad_group_update.targeting.device_class.to_dict()
+        targeting["futureDimension"] = {"include": ["a"], "exclude": []}  # same meaning, new shape
+        apple.ad_groups[int(id)] = current.model_copy(
+            update={"targeting": sdk.AdGroupTargeting.from_dict(targeting)})
+        return type("R", (), {"result": apple.ad_groups[int(id)].model_copy(deep=True), "error": None})()
+
+    apple._adgroups_id_put = put
+    result = tools["apply_ad_group_devices"](preview_token=preview.preview_token)
+    assert result.applied, result.failures
+    row = ledger.find_entry(result.entry_id)
+    assert row["outcome"] == ledger.PARTIAL, row
+    assert "futureDimension" in (row.get("outcome_detail") or ""), row
 
 
 def test_a_targeting_apply_refuses_when_another_dimension_moved() -> None:
