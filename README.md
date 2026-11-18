@@ -171,7 +171,7 @@ decision a person makes in the Apple Ads website; this server will not do it.
 
 ## What the agent can do
 
-**103 tools: 40 that read, 31 preview/apply pairs, and undo.** Almost anything
+**104 tools: 40 that read, 31 preview/apply pairs, undo, and settling a timed-out change.** Almost anything
 you would do by hand in the Apple Ads website -- except delete things.
 
 ### Can read (safe)
@@ -206,6 +206,7 @@ Every change is a `preview_<name>` / `apply_<name>` pair.
 | Act on Apple's budget or CPA recommendation (normal limits apply) | `budget_recommendation`, `target_cpa_recommendation` |
 | Rename something, or dismiss a recommendation | `low_risk_change` |
 | Undo one change, or a whole batch | `revert_change` |
+| Settle a timed-out change: did it land? (reads Apple, writes only the ledger, undoes nothing) | `resolve_unknown_change` |
 
 **Created things start paused.** A new campaign, ad group, keyword or ad spends
 nothing until a separate, previewed enable -- and that enable is counted against
@@ -405,6 +406,17 @@ Undoing something that was **created** pauses it -- nothing is ever deleted. A
 batch (bulk bids, added keywords) can be undone item by item, or all at once by
 the batch id the apply returned. Undoing a pause or a budget cut puts spend back,
 so it counts against the limits like any enable.
+
+A change whose request timed out is recorded as `unknown`: it may have landed,
+so it counts against the limits as if it had. `resolve_unknown_change(entry_id=
+"...")` reads the thing back and records it as applied or failed, without
+changing anything at Apple. Use it to find out; use `revert_change` only when
+you want the change undone.
+
+A targeting change whose own dimension landed while Apple's read-back shows
+another dimension different (normalised or dropped) is recorded as `partial`:
+it is live, it counts against the limits, and `revert_change` puts back only
+the dimension that was asked for.
 
 ### Finding out what else changed
 

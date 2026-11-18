@@ -93,7 +93,9 @@ WHAT YOU CAN CHANGE (preview_<name> / apply_<name>):
                      advice, through the normal budget / CPA bounds)
   low risk           low_risk_change: renames, and dismissing a recommendation
 revert_change undoes one entry (or a batch, by its id); list_my_changes shows
-what you have done.
+what you have done. An entry recorded 'unknown' (the request timed out) may
+have landed: settle it with resolve_unknown_change, which reads Apple and writes
+only the ledger -- do not call revert_change just to find out.
 
 NOTHING IS EVER DELETED. Created things start PAUSED, and pausing is the undo:
 reverting a creation pauses it.

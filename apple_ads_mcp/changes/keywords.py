@@ -974,8 +974,8 @@ class KeywordMatchTypeKind(ChangeKind):
                 # UNKNOWN, as the engine records a whole request that does this.
                 paused = Outcome(False, None, unknown=True, error=(
                     f"OUTCOME UNKNOWN: the new keyword was created, but the pause of "
-                    f"the old one got no answer ({exc}), so it may have landed. Check "
-                    f"the old keyword with get_keyword before retrying."
+                    f"the old one got no answer ({exc}), so it may have landed. Settle "
+                    f"it with resolve_unknown_change before retrying."
                 ))
             else:
                 paused = Outcome(False, None, error=f"the new keyword was created but the old was not paused: {exc}")

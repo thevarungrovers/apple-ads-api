@@ -465,6 +465,48 @@ def test_reverting_an_unknown_write_that_never_landed_says_so() -> None:
 
 
 
+def test_resolving_an_unknown_write_that_landed_records_it_without_reverting() -> None:
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    tools, apple, _ = rig()
+    preview = tools["preview_keyword_bid"](keyword_id=KEYWORD, new_bid="1.20")
+    _timeout_after_landing(apple, "keywords_id_put")
+    message = _raises(lambda: tools["apply_keyword_bid"](preview_token=preview.preview_token), "TRANSIENT")
+    # The agent is pointed at the settling tool, not at revert_change "to check".
+    assert "resolve_unknown_change" in message, message
+    assert "revert_change on that entry" not in message, message
+    [row] = ledger.entries()
+    result = tools["resolve_unknown_change"](entry_id=row["entry_id"])
+    assert result.settled == {row["entry_id"]: ledger.APPLIED}, result
+    assert ledger.find_entry(row["entry_id"])["outcome"] == ledger.APPLIED
+    assert apple.keywords[KEYWORD].bid.amount == "1.20", "settling must not revert"
+    assert apple.writes() == ["keywords_id_put"]  # only the original attempt
+    # Settled rows are not unknown any more; a second call refuses.
+    _raises(lambda: tools["resolve_unknown_change"](entry_id=row["entry_id"]), "not 'unknown'")
+    del apple._keywords_id_put
+    with_error = None
+    try:
+        tools["revert_change"](entry_id=row["entry_id"])
+    except ToolError as exc:  # pragma: no cover - the revert should succeed
+        with_error = exc
+    assert with_error is None and apple.keywords[KEYWORD].bid.amount == "1.00"
+
+
+def test_resolving_an_unknown_write_that_never_landed_records_it_failed() -> None:
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    tools, apple, _ = rig()
+    preview = tools["preview_keyword_bid"](keyword_id=KEYWORD, new_bid="1.20")
+    apple.fail["keywords_id_put"] = ToolError(TIMEOUT)
+    _raises(lambda: tools["apply_keyword_bid"](preview_token=preview.preview_token), "TRANSIENT")
+    [row] = ledger.entries()
+    del apple.fail["keywords_id_put"]
+    result = tools["resolve_unknown_change"](entry_id=row["entry_id"])
+    assert result.settled == {row["entry_id"]: ledger.FAILED}, result
+    assert ledger.find_entry(row["entry_id"])["outcome"] == ledger.FAILED
+    assert apple.writes() == ["keywords_id_put"]
+
+
 def _three_bid_batch(tools, apple):
     for n in (1, 2):
         apple.keywords[KEYWORD + n] = apple.keywords[KEYWORD].model_copy(

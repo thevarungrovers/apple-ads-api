@@ -63,7 +63,8 @@ what it does.
 
 ## The tools
 
-40 read, 31 `preview_*`/`apply_*` pairs, plus `revert_change`. 103 in total.
+40 read, 31 `preview_*`/`apply_*` pairs, plus `revert_change` and
+`resolve_unknown_change`. 104 in total.
 
 ### Read — safe, call freely
 
@@ -104,6 +105,7 @@ Each is `preview_<name>` / `apply_<name>`.
 | `budget_recommendation`, `target_cpa_recommendation` | Apple's advice, through the normal budget / CPA bounds |
 | `low_risk_change` | Rename a campaign, ad group, ad or creative; dismiss a recommendation |
 | `revert_change` | Undo an entry, or a whole batch by its id |
+| `resolve_unknown_change` | Settle an `unknown` (timed-out) entry by read-back: records applied or failed, writes only the ledger, undoes nothing |
 
 ### Not here, on purpose
 
@@ -180,6 +182,12 @@ is no longer what the entry left, somebody else moved it. A creation is undone b
 **pausing** it; one already paused has nothing to undo. A batch id undoes every
 item of the batch that landed. Undoing a pause or a cut restores spend and counts
 against the caps.
+
+An `unknown` entry (the request timed out) may have landed and counts as if it
+had. Settle it with `resolve_unknown_change(entry_id=...)` -- a batch id settles
+every unknown item -- rather than calling `revert_change` to find out. A
+`partial` targeting entry is live; `revert_change` restores only the dimension
+it asked for.
 
 ## When something goes wrong
 

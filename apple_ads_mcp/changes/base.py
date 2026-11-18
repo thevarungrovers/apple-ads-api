@@ -79,6 +79,16 @@ APPLY_DESTRUCTIVE = ToolAnnotations(
     open_world_hint=True,
 )
 
+# A tool that reads Apple and writes ONLY the local ledger (resolve_unknown_change).
+# Not read-only -- the ledger it writes decides what the caps count -- but never
+# destructive, and idempotent: a second call finds nothing left to settle.
+LEDGER_ONLY = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
+)
+
 #: What "before" reads as for something that does not exist yet. Never a value a
 #: real entity could hold.
 NOTHING = "(none)"

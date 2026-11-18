@@ -154,7 +154,12 @@ APPLY_TOOLS = frozenset(
     }
 )
 
-EXPECTED_TOOLS = READ_TOOLS | PREVIEW_TOOLS | APPLY_TOOLS
+# Reads Apple and writes ONLY the local ledger. Not read-only (the ledger
+# decides what the caps count), never destructive, idempotent; published with
+# the writes, so absent in read-only mode and never allowlisted.
+LEDGER_TOOLS = frozenset({"resolve_unknown_change"})
+
+EXPECTED_TOOLS = READ_TOOLS | PREVIEW_TOOLS | APPLY_TOOLS | LEDGER_TOOLS
 
 # Destructive only where the action moves money in a way that is not a one-call
 # undo. Pausing a keyword is reversible; marking it destructive would train you
@@ -293,6 +298,11 @@ def test_hints_match_what_the_handler_actually_does() -> None:
             f"{name} consumes a single-use preview_token, so a second identical "
             f"call is an error rather than a no-op"
         )
+    for name in LEDGER_TOOLS:
+        a = tools[name].annotations
+        assert a.read_only_hint is False, f"{name} writes the ledger, so it is not read-only"
+        assert a.destructive_hint is False, f"{name} writes nothing to Apple"
+        assert a.idempotent_hint is True, f"{name} settles a row once; a repeat changes nothing"
     # Only the two local tools answer without touching Apple.
     for name, tool in sorted(tools.items()):
         expected_open_world = name not in LOCAL_ONLY_TOOLS
@@ -387,11 +397,11 @@ def test_installer_tool_list_matches_the_server() -> None:
         "install.py's SAFE_TOOLS no longer matches the read and preview tools: "
         f"{sorted(frozenset(install.SAFE_TOOLS) ^ (READ_TOOLS | PREVIEW_TOOLS))}"
     )
-    assert frozenset(install.WRITE_TOOLS) == APPLY_TOOLS, (
-        "install.py's WRITE_TOOLS no longer matches the apply tools: "
-        f"{sorted(frozenset(install.WRITE_TOOLS) ^ APPLY_TOOLS)}"
+    assert frozenset(install.WRITE_TOOLS) == APPLY_TOOLS | LEDGER_TOOLS, (
+        "install.py's WRITE_TOOLS no longer matches the apply and ledger tools: "
+        f"{sorted(frozenset(install.WRITE_TOOLS) ^ (APPLY_TOOLS | LEDGER_TOOLS))}"
     )
-    assert not (frozenset(install.SAFE_TOOLS) & APPLY_TOOLS), (
+    assert not (frozenset(install.SAFE_TOOLS) & (APPLY_TOOLS | LEDGER_TOOLS)), (
         "install.py would allowlist a tool that changes the account"
     )
     # And both halves still describe the server that actually registers.
@@ -416,7 +426,7 @@ def test_installer_never_allowlists_a_write_tool() -> None:
     for rule in rules:
         assert "*" not in rule, f"{rule} is a wildcard; support for those varies by version"
         tool = rule.rsplit("__", 1)[-1]
-        assert tool not in APPLY_TOOLS, f"{rule} would pre-approve a write"
+        assert tool not in APPLY_TOOLS | LEDGER_TOOLS, f"{rule} would pre-approve a write"
     assert f"mcp__{install.SERVER_NAME}" not in rules, (
         "a bare server rule would approve every tool including the writes"
     )
@@ -446,8 +456,8 @@ def test_read_only_mode_publishes_no_write_tool() -> None:
     )
     names = frozenset(json.loads(out.stdout))
 
-    assert not (names & APPLY_TOOLS), (
-        f"read-only mode still publishes write tools: {sorted(names & APPLY_TOOLS)}. "
+    assert not (names & (APPLY_TOOLS | LEDGER_TOOLS)), (
+        f"read-only mode still publishes write tools: {sorted(names & (APPLY_TOOLS | LEDGER_TOOLS))}. "
         f"A client with no per-tool allowlist would be able to call them."
     )
     assert names == READ_TOOLS | PREVIEW_TOOLS, (
@@ -500,7 +510,7 @@ def main() -> int:
     tools = _tools()
     print(
         f"\n{len(tools)} tools registered: {len(READ_TOOLS)} read, "
-        f"{len(PREVIEW_TOOLS)} preview, {len(APPLY_TOOLS)} apply."
+        f"{len(PREVIEW_TOOLS)} preview, {len(APPLY_TOOLS)} apply, {len(LEDGER_TOOLS)} ledger."
     )
     print("All checks passed." if not failures else f"{failures} failure(s).")
     return 1 if failures else 0

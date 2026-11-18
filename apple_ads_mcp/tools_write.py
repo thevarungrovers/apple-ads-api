@@ -56,12 +56,12 @@ from typing import Annotated
 from pydantic import Field
 
 from apple_ads_mcp.changes import all_kinds
-from apple_ads_mcp.changes.base import APPLY, APPLY_DESTRUCTIVE, PREVIEW
+from apple_ads_mcp.changes.base import APPLY, APPLY_DESTRUCTIVE, LEDGER_ONLY, PREVIEW
 from apple_ads_mcp.changes.context import ChangeContext
 from apple_ads_mcp.changes.engine import Engine, register_pair
 from apple_ads_mcp.client import call
 from apple_ads_mcp.guardrails import read_only_mode, writes_disabled
-from apple_ads_mcp.previews import ApplyResult, BulkApplyResult
+from apple_ads_mcp.previews import ApplyResult, BulkApplyResult, SettleResult
 
 __all__ = [
     "APPLY",
@@ -136,6 +136,35 @@ def register(mcp, state) -> Engine:
         undone by PAUSING what was created. Nothing is ever deleted.
         """
         return engine.revert(entry_id)
+
+    # Published with the writes, so ABSENT in read-only mode. It writes nothing
+    # to Apple, but it does write the ledger, and settling a row as failed
+    # releases what it held of the daily cap: bookkeeping that belongs to the
+    # install that can write. A read-only process creates no unknown rows of its
+    # own, and reconcile_ledger still lists any it can see.
+    @apply_tool(
+        title="Settle a change whose outcome is unknown, by read-back (writes only the local ledger)",
+        annotations=LEDGER_ONLY,
+    )
+    def resolve_unknown_change(
+        entry_id: Annotated[
+            str,
+            Field(
+                description="entry_id of a change recorded as 'unknown' (a timed-out "
+                "write), or a batch id to settle every unknown item in it"
+            ),
+        ],
+    ) -> SettleResult:
+        """Find out whether a timed-out write landed, and record it. Reverts nothing.
+
+        Reads the entity back from Apple and records the entry as 'applied' (Apple
+        shows the value it asked for) or 'failed' (Apple still shows the old one).
+        Writes NOTHING to Apple -- only the local ledger. Refuses a creation
+        (Apple's id never came back) and a value that is neither before nor
+        after. Use this to settle an unknown row; use revert_change only when
+        you actually want the change undone.
+        """
+        return engine.settle(entry_id)
 
     ENGINE = engine
     return engine

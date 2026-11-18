@@ -54,6 +54,7 @@ from apple_ads_mcp.previews import (
     BulkApplyResult,
     BulkChangePreview,
     ChangePreview,
+    SettleResult,
     any_failed,
     pct_change,
     render_checks,
@@ -418,8 +419,9 @@ class Engine:
                 "matching preview/apply pair -- revert_change cannot find it, "
                 "because Apple's id never came back."
                 if creation
-                else "revert_change on that entry reads the entity back first: it "
-                "reverts the change if it landed, and records it as failed if not."
+                else "resolve_unknown_change on that entry reads the entity back and "
+                "records whether it landed -- it writes nothing to Apple. Once it is "
+                "settled as applied, revert_change can undo it if you want it undone."
             )
         )
 
@@ -527,8 +529,8 @@ class Engine:
                     + ", one ledger entry each. "
                     + (
                         "An unknown item may have landed and is counted against the caps "
-                        "as if it had: re-read it (get_*) or run reconcile_ledger "
-                        "before retrying. "
+                        "as if it had: settle it with resolve_unknown_change (it reads "
+                        "Apple and writes only the ledger) before retrying. "
                         if unknown
                         else ""
                     )
@@ -686,6 +688,22 @@ class Engine:
         FAILED (and raises NothingToUndo) when it still shows the old one, and
         refuses when it shows neither or cannot be read back.
         """
+        outcome, current = self.settle_unknown(ctx, entry, "at revert")
+        if outcome == ledger.FAILED:
+            raise NothingToUndo(
+                f"entry {entry.get('entry_id')} never landed: its outcome was unknown, "
+                f"and Apple still shows {current!r}, the value from before it. Recorded "
+                f"as failed; there is nothing to revert."
+            )
+
+    def settle_unknown(self, ctx, entry: dict[str, Any], when: str) -> tuple[str, str]:
+        """Read an UNKNOWN row's entity back and record APPLIED or FAILED.
+
+        Returns (outcome, what Apple shows). Writes the local ledger only --
+        never Apple. Raises ToolError when the read-back cannot decide: a
+        creation (Apple's id never came back), a change with no value to read,
+        or a value that is neither the row's before nor its after.
+        """
         entry_id = entry.get("entry_id")
         entity_id = str(entry.get("entity_id") or "")
         if entry.get("field") == CREATED or entity_id in ("", "None", "(new)"):
@@ -714,29 +732,62 @@ class Engine:
             )
         now = normalized_value(current)
         if now == normalized_value(str(entry.get("after"))):
-            ledger.write_outcome(
-                entry_id,
-                outcome=ledger.APPLIED,
-                observed_after=current,
-                detail="outcome was unknown; read back at revert: it landed",
+            outcome, verdict = ledger.APPLIED, "it landed"
+        elif now == normalized_value(str(entry.get("before"))):
+            outcome, verdict = ledger.FAILED, "it never landed"
+        else:
+            raise ToolError(
+                f"entry {entry_id}'s outcome is unknown, and Apple now shows {current!r} "
+                f"-- neither {entry.get('before')!r} (before) nor {entry.get('after')!r} "
+                f"(what it asked for). Something else changed it; check the Apple Ads UI."
             )
-            return
-        if now == normalized_value(str(entry.get("before"))):
-            ledger.write_outcome(
-                entry_id,
-                outcome=ledger.FAILED,
-                observed_after=current,
-                detail="outcome was unknown; read back at revert: it never landed",
-            )
-            raise NothingToUndo(
-                f"entry {entry_id} never landed: its outcome was unknown, and Apple "
-                f"still shows {current!r}, the value from before it. Recorded as "
-                f"failed; there is nothing to revert."
-            )
-        raise ToolError(
-            f"entry {entry_id}'s outcome is unknown, and Apple now shows {current!r} "
-            f"-- neither {entry.get('before')!r} (before) nor {entry.get('after')!r} "
-            f"(what it asked for). Something else changed it; check the Apple Ads UI."
+        ledger.write_outcome(
+            entry_id,
+            outcome=outcome,
+            observed_after=current,
+            detail=f"outcome was unknown; read back {when}: {verdict}",
+        )
+        return outcome, current
+
+    def settle(self, entry_id: str) -> SettleResult:
+        """resolve_unknown_change: settle UNKNOWN rows by read-back, revert nothing.
+
+        Takes one entry id, or a batch id (every row of it still unknown).
+        """
+        ctx = self.ctx.fork()
+        entry = ledger.find_entry(entry_id)
+        if entry is not None:
+            if entry.get("outcome") != ledger.UNKNOWN:
+                raise ToolError(
+                    f"entry {entry_id} is recorded as {entry.get('outcome')!r}, not "
+                    f"'unknown'; there is nothing to settle."
+                )
+            outcome, _current = self.settle_unknown(ctx, entry, "by resolve_unknown_change")
+            settled, unresolved = {entry_id: outcome}, []
+        else:
+            batch = ledger.batch_entries(entry_id)
+            if not batch:
+                raise ToolError(f"no ledger entry {entry_id!r}. list_my_changes shows valid ids.")
+            rows = [e for e in batch if e.get("outcome") == ledger.UNKNOWN]
+            if not rows:
+                raise ToolError(f"batch {entry_id} has no entry whose outcome is unknown.")
+            settled, unresolved = {}, []
+            for row in rows:
+                try:
+                    settled[str(row["entry_id"])], _ = self.settle_unknown(
+                        ctx, row, "by resolve_unknown_change"
+                    )
+                except ToolError as exc:
+                    unresolved.append(f"{row['entry_id']}: {exc}")
+        return SettleResult(
+            settled=settled,
+            unresolved=unresolved,
+            note=(
+                "Settled from Apple's read-back; nothing was written to Apple. A row "
+                "settled 'failed' stops counting against the caps; one settled "
+                "'applied' can be undone with revert_change if you want it undone."
+                + (" Unresolved rows need a look in the Apple Ads UI." if unresolved else "")
+            ),
         )
 
     def revert_projection(self, ctx, entry, item, send_kind=None) -> Decimal:

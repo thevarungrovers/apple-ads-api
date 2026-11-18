@@ -129,7 +129,9 @@ SAFE_TOOLS = (
     "preview_low_risk_change",
 )
 
-#: The tools that move real money. Never allowlisted, by any answer to anything.
+#: The tools that move real money -- plus resolve_unknown_change, which writes
+#: only the local ledger but decides what the caps count. Never allowlisted, by
+#: any answer to anything, and none is published in read-only mode.
 WRITE_TOOLS = (
     "apply_keyword_bid",
     "apply_keyword_bids_bulk",
@@ -163,6 +165,7 @@ WRITE_TOOLS = (
     "apply_budget_recommendation",
     "apply_target_cpa_recommendation",
     "apply_low_risk_change",
+    "resolve_unknown_change",
 )
 
 READ_ONLY_ENV = "APPLE_ADS_READ_ONLY"

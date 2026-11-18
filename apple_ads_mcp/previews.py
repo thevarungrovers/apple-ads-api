@@ -293,6 +293,19 @@ class ApplyResult(BaseModel):
     note: str = ""
 
 
+class SettleResult(BaseModel):
+    """What resolve_unknown_change recorded. Nothing is written to Apple."""
+
+    settled: dict[str, str] = Field(
+        description="entry_id -> the outcome now recorded: 'applied' or 'failed'"
+    )
+    unresolved: list[str] = Field(
+        default_factory=list,
+        description="Rows that could not be settled by read-back, with the reason",
+    )
+    note: str = ""
+
+
 class BulkApplyResult(BaseModel):
     applied: bool = Field(description="False when nothing landed; see succeeded/failed")
     entry_id: str = Field(

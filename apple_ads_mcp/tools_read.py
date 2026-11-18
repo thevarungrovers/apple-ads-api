@@ -1696,10 +1696,10 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
                 (
                     f"unknown_outcome has {len(unknown)} write(s) whose request timed "
                     f"out: each MAY have landed and is counted against the caps as if "
-                    f"it had. Re-read each entity before retrying anything; "
-                    f"revert_change on one reads it back and reverts it only if it "
-                    f"landed. A creation in it may already exist -- look before "
-                    f"re-running it. "
+                    f"it had. Settle each with resolve_unknown_change, which reads "
+                    f"the entity back and records applied or failed without writing "
+                    f"to Apple, before retrying anything. A creation in it may "
+                    f"already exist -- look before re-running it. "
                     if unknown
                     else ""
                 )

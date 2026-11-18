@@ -83,7 +83,7 @@ PARTIAL = "partial"
 REFUSED = "refused"
 #: The request left the process and no answer came back (a timeout, a reset, a
 #: 5xx): the write may or may not have landed. Counted against the caps as if it
-#: had, until a read-back (revert_change) settles it.
+#: had, until a read-back (resolve_unknown_change, or revert_change) settles it.
 UNKNOWN = "unknown"
 
 SCHEMA = """
