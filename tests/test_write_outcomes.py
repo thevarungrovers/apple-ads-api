@@ -48,7 +48,7 @@ class _Keyword:
         self.status = status
         self.campaign_id = 999
         self.ad_group_id = 888
-        self.text = "organic kale"
+        self.text = "example term"
 
 
 class _Campaign:
@@ -116,8 +116,8 @@ def build_revert(fake: FakeApple):
         tool="apply_keyword_status",
         entity_type="keyword",
         entity_id=KEYWORD_ID,
-        entity_name="organic kale",
-        path="Campaign 'C' > AdGroup 'A' > Keyword 'organic kale'",
+        entity_name="example term",
+        path="Campaign 'C' > AdGroup 'A' > Keyword 'example term'",
         field="status",
         before="ENABLED",
         after="PAUSED",
