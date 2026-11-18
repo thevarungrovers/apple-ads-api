@@ -148,8 +148,18 @@ class Identity:
         )
 
     def owns(self, name: str | None) -> bool:
-        """True when ``name`` carries this identity's prefix (and one is set)."""
-        return bool(self.prefix) and str(name or "").startswith(self.prefix)
+        """True when ``name`` carries this identity's prefix (and one is set).
+
+        Starting with the prefix is not enough: with only the initials set,
+        `AB-` starts `AB-bot-x` (another agent's) and `AB-cli-x` (a human's
+        CLI creation). A name that parses as a full two-part prefix is ours
+        only when BOTH parts are this identity's.
+        """
+        text = str(name or "")
+        if not self.prefix or not text.startswith(self.prefix):
+            return False
+        parsed = parse(text)
+        return parsed is None or (parsed.owner, parsed.agent) == (self.owner, self.agent)
 
     def describe(self) -> dict[str, Any]:
         """For get_guardrails / whoami: which parts are set, and what they make."""

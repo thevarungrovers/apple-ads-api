@@ -134,6 +134,27 @@ def test_renames_only_the_agents_own_entities() -> None:
     assert restored.rule == "restored_prefix" and restored.final == "AB-max-launch2"
 
 
+def test_ownership_needs_the_whole_prefix_not_just_its_start() -> None:
+    """`AB-` is a prefix of `AB-bot-x` and `AB-cli-x`, but neither is ours: a
+    name that parses as a full two-part prefix is ours only when both parts are."""
+    for name in ("AB-bot-x", "AB-cli-x"):
+        assert not OWNER_ONLY.owns(name), name
+        _refused(lambda name=name: rename(OWNER_ONLY, name, "newname", entity_type="campaign",
+                                          ledger_owned=False), "not this agent's")
+        keep = naming.name_filter(OWNER_ONLY, mine=True)
+        assert not keep(name), name
+    assert OWNER_ONLY.owns("AB-x") and OWNER_ONLY.owns("AB-Spring-sale")
+    assert not OWNER_ONLY.owns("AB-spring-sale"), "reads as agent spring's"
+    # Agent only: `max-` never parses (no initials), so the start is enough.
+    assert AGENT_ONLY.owns("max-x") and not AGENT_ONLY.owns("AB-max-x")
+    # Both set: only our own full prefix.
+    assert BOTH.owns("AB-max-x") and not BOTH.owns("AB-maxi-x") and not BOTH.owns("AB-bot-x")
+    # The CLI identity (AB, cli) owns its own names and nobody else's.
+    assert OWNER_ONLY.cli().owns("AB-cli-x") and BOTH.cli().owns("AB-cli-x")
+    assert not BOTH.cli().owns("AB-max-x") and not OWNER_ONLY.cli().owns("AB-x")
+    assert not NEITHER.owns("AB-x")
+
+
 def test_the_cli_identity() -> None:
     assert BOTH.cli().prefix == "AB-cli-"
     assert OWNER_ONLY.cli().prefix == "AB-cli-"

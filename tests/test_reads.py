@@ -371,6 +371,22 @@ def test_reconcile_reports_lost_and_unledgered_prefixes_only_when_configured() -
     assert read_tools(state)["reconcile_ledger"](days=1).naming is None
 
 
+def test_reconcile_with_only_initials_does_not_claim_other_agents_or_the_cli() -> None:
+    """Prefix `AB-` starts `AB-cli-Script` and `AB-max-Ours`, but neither is ours."""
+    from apple_ads_mcp.naming import Identity
+
+    _tools, apple, state = rig(identity=Identity.from_values("AB", ""))
+    apple.extra["query_audit_summary"] = lambda **_: SimpleNamespace(result=[], error=None)
+    _named_account(apple)
+    base = apple.campaigns[CAMPAIGN]
+    apple.campaigns[CAMPAIGN + 9] = base.model_copy(update={"id": CAMPAIGN + 9, "name": "AB-Mine"})
+    report = read_tools(state)["reconcile_ledger"](days=1).naming
+    assert [e["name"] for e in report["prefix_without_ledger"]] == ["AB-Mine"], report
+    assert report["other_prefixes"] == {"AB-max": 1, "AB-cli": 1, "CD-bot": 1}, report
+    names = [c.name for c in read_tools(state)["list_campaigns"](mine=True).campaigns]
+    assert names == ["AB-Mine"], names
+
+
 def test_whoami_and_get_guardrails_show_the_identity() -> None:
     from apple_ads_mcp.naming import Identity
 
