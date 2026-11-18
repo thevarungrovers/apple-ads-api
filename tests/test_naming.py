@@ -63,9 +63,22 @@ def test_another_agents_prefix_is_refused() -> None:
     _refused(lambda: stamp(BOTH, "CD-bot-launch", entity_type="campaign"), "CD-bot-")
     _refused(lambda: stamp(OWNER_ONLY, "CD-bot-launch", entity_type="campaign"), "CD-bot-")
     # Only the initials are set and the base would read as agent max's.
-    _refused(lambda: stamp(OWNER_ONLY, "AB-max-launch", entity_type="campaign"), "would read as")
-    # With nothing configured, the name is used exactly as given.
-    assert stamp(NEITHER, "CD-bot-launch", entity_type="campaign").final == "CD-bot-launch"
+    _refused(lambda: stamp(OWNER_ONLY, "AB-max-launch", entity_type="campaign"), "impersonat")
+    _refused(lambda: stamp(OWNER_ONLY, "max-launch", entity_type="campaign"), "would read as")
+    # With nothing configured a plain name is used exactly as given...
+    assert stamp(NEITHER, "launch", entity_type="campaign").final == "launch"
+
+
+def test_a_name_attributed_to_someone_else_is_refused_even_with_no_identity() -> None:
+    """Accepting `CD-bot-x` verbatim would forge agent bot's attribution."""
+    for identity in (NEITHER, AGENT_ONLY, NEITHER.cli(), AGENT_ONLY.cli()):
+        message = _refused(lambda identity=identity: stamp(identity, "CD-bot-launch",
+                                                           entity_type="campaign"), "CD-bot-")
+        assert "impersonat" in message, message
+    _refused(lambda: stamp(OWNER_ONLY, "AB-cli-launch", entity_type="campaign"), "impersonat")
+    _refused(lambda: stamp(NEITHER, "AB-max-launch", entity_type="ad"), "impersonat")
+    _refused(lambda: rename(NEITHER, "launch", "CD-bot-x", entity_type="campaign",
+                            ledger_owned=True), "impersonat")
 
 
 def test_empty_and_control_characters_are_refused() -> None:

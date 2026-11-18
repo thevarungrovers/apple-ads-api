@@ -308,27 +308,28 @@ def stamp(identity: Identity, requested: str | None, *, entity_type: str) -> Sta
     text = str(requested or "").strip()
     if not text:
         raise NameRefused("INVALID_REQUEST: the name is empty")
+    other = parse(text)
+    if other is not None and (other.owner, other.agent) != (identity.owner, identity.agent):
+        # Refused whatever is configured -- with no identity at all too: taken
+        # verbatim, the name would claim to be that identity's creation.
+        raise NameRefused(
+            f"INVALID_REQUEST: the name starts with {other.owner}-{other.agent}-, which is "
+            f"another agent's prefix (or reads as one), and this checkout's is "
+            f"{identity.prefix or 'empty'}. Using it would impersonate "
+            f"that identity. Pass the base name only; if the base itself starts like "
+            f"that, reorder it."
+        )
     prefix = identity.prefix
     base, rule = text, "stamped" if prefix else "none"
     if prefix and text.startswith(prefix):
         base, rule = text[len(prefix):].strip(), "already_ours"
         if not base:
             raise NameRefused(f"INVALID_REQUEST: the name is only the prefix {prefix!r}; give a base name")
-    elif identity.configured:
-        other = parse(text)
-        if other is not None:
-            raise NameRefused(
-                f"INVALID_REQUEST: the name starts with {other.owner}-{other.agent}-, which "
-                f"is another agent's prefix (or reads as one). Pass the base name only; "
-                f"if the base itself starts like that, reorder it."
-            )
     if _CONTROL.search(base):
         raise NameRefused("INVALID_REQUEST: the name contains a control character (tab, newline, NUL...)")
     final = prefix + base
     claimed = parse(final)
-    if identity.configured and claimed is not None and (claimed.owner, claimed.agent) != (
-        identity.owner, identity.agent
-    ):
+    if claimed is not None and (claimed.owner, claimed.agent) != (identity.owner, identity.agent):
         # Only the initials are set and the base begins `max-...`: the result
         # would read as agent `max`'s, which this checkout is not.
         raise NameRefused(
