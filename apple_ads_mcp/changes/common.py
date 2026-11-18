@@ -221,23 +221,32 @@ def default_bid_blast_radius(ad_group_id: int) -> list[str]:
 def existing_negatives(
     campaign_id: int | None, ad_group_id: int | None
 ) -> tuple[set[tuple[str, str]], str | None]:
-    """((lowercased text, match type) already present, why it could not be checked)."""
-    filters = []
-    if ad_group_id is not None:
-        filters.append(eq_filter("adGroupId", ad_group_id))
-    elif campaign_id is not None:
-        filters.append(eq_filter("campaignId", campaign_id))
+    """((lowercased text, match type) already present, why it could not be checked).
+
+    Apple REQUIRES an adGroupId condition on a negative keyword query; a
+    campaignId filter alone is rejected with `adGroupId condition is required`.
+    The old version sent exactly that for a campaign-level add, swallowed the
+    rejection and returned an empty set -- so the duplicate warning silently
+    never fired. Now the second element says the check did not happen, and the
+    preview prints it.
+    """
+    if ad_group_id is None:
+        return set(), (
+            "duplicates could not be checked: Apple's negative keyword query "
+            "requires an adGroupId, so campaign-level negatives cannot be listed "
+            "from here. Check the Apple Ads UI before approving."
+        )
     try:
         rows = unwrap(
             client.call(
                 "negative_keywords_query_post",
                 x_ap_context=context_header(),
-                query_request=query(page_size=1000, filters=filters or None),
+                query_request=query(page_size=1000, filters=[eq_filter("adGroupId", ad_group_id)]),
             ),
             "negative keywords",
         ) or []
-    except ToolError:
-        return set(), None
+    except ToolError as exc:
+        return set(), f"duplicates could not be checked: {str(exc)[:160]}"
     return (
         {
             ((row.text or "").lower(), enum_value(row.match_type) or "")

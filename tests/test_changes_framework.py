@@ -230,5 +230,22 @@ def test_a_keyword_without_its_own_bid_is_measured_against_the_default() -> None
     _raises(lambda: tools["revert_change"](entry_id=result.entry_id), "no previous value")
 
 
+def test_a_campaign_level_negative_add_says_duplicates_were_not_checked() -> None:
+    tools, apple, _ = rig()
+    preview = tools["preview_negative_keywords_add"](texts=["free"], campaign_id=CAMPAIGN)
+    assert any("duplicates could not be checked" in w for w in preview.warnings), preview.warnings
+    assert not [m for m, _ in apple.calls if m == "negative_keywords_query_post"], (
+        "a campaignId-only negative query is rejected by Apple; it must not be sent"
+    )
+
+
+def test_an_ad_group_negative_add_flags_an_existing_duplicate() -> None:
+    tools, _apple, _ = rig()
+    preview = tools["preview_negative_keywords_add"](
+        texts=["free", "new"], match_type="BROAD", ad_group_id=AD_GROUP
+    )
+    assert any("1 of these already exist" in w for w in preview.warnings), preview.warnings
+
+
 if __name__ == "__main__":
     raise SystemExit(run(dict(globals())))
