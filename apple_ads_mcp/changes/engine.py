@@ -131,7 +131,31 @@ class Engine:
         currency = self.account_currency_check(ctx)
         if currency is not None:
             checks.append(currency)
+        role = self.role_check()
+        if role is not None:
+            checks.append(role)
         return checks
+
+    @staticmethod
+    def role_check():
+        """Block a preview when this credential's role cannot change campaigns.
+
+        Apple would refuse the write with a 403 anyway; saying so in the
+        preview spares a human approving something that cannot happen. Unknown
+        roles never block.
+        """
+        from apple_ads_mcp.tools_lookup import account_roles, role_can_write
+
+        roles = account_roles(cached=True)
+        can_write = role_can_write(roles or [])
+        if can_write is None:
+            return None
+        return Check(
+            "role_can_write",
+            can_write,
+            f"this credential's role on the ad account: {', '.join(roles or [])}"
+            + ("" if can_write else " -- read-only, so Apple would refuse the write"),
+        )
 
     @staticmethod
     def account_currency_check(ctx):

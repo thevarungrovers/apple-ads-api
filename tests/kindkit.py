@@ -56,6 +56,9 @@ def no_live_client() -> None:
     client._build = refuse
     client._ad_account_id = "1234567890"
     client._account = None
+    from apple_ads_mcp import tools_lookup
+
+    tools_lookup._ROLES = None
 
 
 def temp_db() -> None:

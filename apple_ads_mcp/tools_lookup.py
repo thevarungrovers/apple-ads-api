@@ -64,18 +64,30 @@ def role_can_write(roles: list[str]) -> bool | None:
     return True
 
 
-def account_roles() -> list[str] | None:
-    """This credential's roles on the configured ad account, or None if unknown."""
+_ROLES: list[str] | None = None
+
+
+def account_roles(cached: bool = False) -> list[str] | None:
+    """This credential's roles on the configured ad account, or None if unknown.
+
+    `cached` reuses the first successful answer for the process -- what every
+    preview's role check uses, so it costs one call per server, not per preview.
+    """
+    global _ROLES
+    if cached and _ROLES is not None:
+        return _ROLES
     try:
         acls = unwrap(client.call("get_user_acls"), "ACLs")
-    except ToolError:
+    except Exception:  # noqa: BLE001 - unknown never blocks
         return None
     wanted = client.ad_account()
     for acl in getattr(acls, "acls", None) or acls or []:
         account = getattr(acl, "ad_account", None)
         if str(getattr(account, "id", "")) == str(wanted):
-            return [str(enum_value(r)) for r in (acl.roles or [])]
-    return []
+            _ROLES = [str(enum_value(r)) for r in (acl.roles or [])]
+            return _ROLES
+    _ROLES = []
+    return _ROLES
 
 
 # --- output models ------------------------------------------------------------

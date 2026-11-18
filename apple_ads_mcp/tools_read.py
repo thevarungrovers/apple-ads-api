@@ -132,6 +132,29 @@ class AdGroupRow(BaseModel):
     deleted: bool | None = None
 
 
+class CampaignDetail(CampaignRow):
+    """Everything about one campaign a decision about it needs."""
+
+    billing_event: str | None = None
+    promoted_app_id: str | None = Field(default=None, description="adamId of the app")
+    start_time: str | None = None
+    end_time: str | None = None
+    supply_sources: list[str] | None = None
+    bid_strategy: dict[str, Any] | None = None
+    system_status: str | None = None
+    system_status_reasons: list[str] = Field(default_factory=list)
+    limiting_reasons: list[str] = Field(
+        default_factory=list, description="Why delivery is limited, when Apple says"
+    )
+    shared_budget_ids: list[str] = Field(default_factory=list)
+    app_limited_reasons: Any = Field(
+        default=None, description="Apple's legacy app-limited status detail, when there is any"
+    )
+    last_7d: ReportRow | None = None
+    last_30d: ReportRow | None = None
+    fields: dict[str, Any] = Field(default_factory=dict, description="Apple's whole record")
+
+
 class AdGroupList(BaseModel):
     total: int | None = Field(description="Apple's count, deleted rows included")
     returned: int
@@ -140,6 +163,27 @@ class AdGroupList(BaseModel):
         default=None, description="Pass as offset for the next page; null on the last"
     )
     truncated: bool = Field(default=False, description="True when more rows exist")
+
+
+class AdGroupDetail(AdGroupRow):
+    """Everything about one ad group: bidding, Search Match and full targeting."""
+
+    pricing_model: str | None = None
+    bid_strategy_type: str | None = None
+    bid_strategy_goal: str | None = None
+    cpa_goal: str | None = Field(default=None, description="cpaCap, when set")
+    start_time: str | None = None
+    end_time: str | None = None
+    targeting: dict[str, Any] = Field(
+        default_factory=dict,
+        description="age, gender, device class, daypart, country/admin area/locality/"
+        "postal code/radius, location group, app downloaders, travel intent",
+    )
+    keyword_count: int | None = None
+    ad_count: int | None = None
+    system_status_reasons: list[str] = Field(default_factory=list)
+    last_7d: ReportRow | None = None
+    fields: dict[str, Any] = Field(default_factory=dict, description="Apple's whole record")
 
 
 class KeywordRow(BaseModel):
@@ -933,9 +977,50 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         )
 
     @mcp.tool(title="Get one campaign by id", annotations=READ_ONLY)
-    def get_campaign(campaign_id: Annotated[int, Field(description="Apple campaign id")]) -> CampaignRow:
-        """Full detail for a single campaign."""
-        return _campaign_row(client.get_campaign(campaign_id))
+    def get_campaign(campaign_id: Annotated[int, Field(description="Apple campaign id")]) -> CampaignDetail:
+        """Full detail for a single campaign: bid strategy, billing event, app,
+        schedule, supply sources and placements, countries, system status and
+        limiting reasons, shared budget, and its last 7 and 30 days."""
+        from apple_ads_mcp.tools_lookup import dump
+
+        campaign = client.get_campaign(campaign_id)
+        row = _campaign_row(campaign)
+        targeting = getattr(campaign, "targeting", None)
+        try:
+            limited = dump(unwrap(client.call(
+                "campaigns_id_legacy_app_limited_status_reason_details_get",
+                id=str(campaign_id), x_ap_context=context_header(),
+            ), "app limited status")) or None
+        except ToolError:
+            limited = None
+
+        def window(days: int) -> ReportRow | None:
+            try:
+                page = run_report_all("apps_campaign_reports", "campaign", days)
+            except ToolError:
+                return None
+            for r in page.rows:
+                if str((r.get("metadata") or {}).get("id")) == str(campaign_id):
+                    return _metrics_row(r.get("totalMetrics"), id_=campaign_id, name=campaign.name)
+            return None
+
+        return CampaignDetail(
+            **row.model_dump(),
+            billing_event=enum_value(getattr(campaign, "billing_event", None)),
+            promoted_app_id=getattr(campaign, "promoted_object_id", None),
+            start_time=campaign.start_time.isoformat() if getattr(campaign, "start_time", None) else None,
+            end_time=campaign.end_time.isoformat() if getattr(campaign, "end_time", None) else None,
+            supply_sources=_included(getattr(targeting, "supply_source", None)),
+            bid_strategy=dump(getattr(campaign, "bid_strategy", None)) or None,
+            system_status=enum_value(getattr(campaign, "system_status", None)),
+            system_status_reasons=[str(enum_value(r)) for r in (campaign.system_status_reasons or [])],
+            limiting_reasons=[str(enum_value(r)) for r in (campaign.system_status_limiting_reasons or [])],
+            shared_budget_ids=[str(a.budget_id) for a in (campaign.shared_budgets or [])],
+            app_limited_reasons=limited,
+            last_7d=window(7),
+            last_30d=window(30),
+            fields=dump(campaign),
+        )
 
     @mcp.tool(title="List ad groups", annotations=READ_ONLY)
     def list_ad_groups(
@@ -959,9 +1044,51 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         )
 
     @mcp.tool(title="Get one ad group by id", annotations=READ_ONLY)
-    def get_ad_group(ad_group_id: Annotated[int, Field(description="Apple ad group id")]) -> AdGroupRow:
-        """Full detail for a single ad group."""
-        return _ad_group_row(client.get_ad_group(ad_group_id))
+    def get_ad_group(ad_group_id: Annotated[int, Field(description="Apple ad group id")]) -> AdGroupDetail:
+        """Full detail for a single ad group: pricing model, bid strategy and
+        goal, CPA goal, Search Match, the whole targeting block, how many
+        keywords and ads it has, and its last 7 days."""
+        from apple_ads_mcp.tools_lookup import dump
+
+        ad_group = client.get_ad_group(ad_group_id)
+        row = _ad_group_row(ad_group)
+        strategy = getattr(ad_group, "bid_strategy", None)
+        cpa = getattr(getattr(ad_group, "cpa_cap", None), "value", None)
+
+        def count(method: str) -> int | None:
+            try:
+                rows, _cut = client.query_all(method, [eq_filter("adGroupId", ad_group_id)], cap=5000)
+            except ToolError:
+                return None
+            return sum(1 for r in rows if not getattr(r, "deleted", False))
+
+        last_7d = None
+        try:
+            page = run_report_all(
+                "apps_ad_group_reports", "ad group", 7,
+                [report_filter("campaignId", [ad_group.campaign_id])],
+            )
+            for r in page.rows:
+                if str((r.get("metadata") or {}).get("id")) == str(ad_group_id):
+                    last_7d = _metrics_row(r.get("totalMetrics"), id_=ad_group_id, name=ad_group.name)
+        except ToolError:
+            pass
+
+        return AdGroupDetail(
+            **row.model_dump(),
+            pricing_model=enum_value(getattr(ad_group, "pricing_model", None)),
+            bid_strategy_type=enum_value(getattr(strategy, "bid_strategy_type", None)),
+            bid_strategy_goal=enum_value(getattr(strategy, "bid_strategy_goal", None)),
+            cpa_goal=format_money(cpa) if cpa else None,
+            start_time=ad_group.start_time.isoformat() if getattr(ad_group, "start_time", None) else None,
+            end_time=ad_group.end_time.isoformat() if getattr(ad_group, "end_time", None) else None,
+            targeting=dump(getattr(ad_group, "targeting", None)),
+            keyword_count=count("keywords_query_post"),
+            ad_count=count("ads_query_post"),
+            system_status_reasons=[str(enum_value(r)) for r in (ad_group.system_status_reasons or [])],
+            last_7d=last_7d,
+            fields=dump(ad_group),
+        )
 
     @mcp.tool(title="List targeting keywords", annotations=READ_ONLY)
     def list_keywords(

@@ -234,5 +234,28 @@ def test_list_ads_pages() -> None:
     assert listed.rows[0]["name"] == "Example Ad"
 
 
+def test_get_campaign_and_ad_group_are_expanded() -> None:
+    _tools, apple, state = rig()
+    apple.extra["campaigns_id_legacy_app_limited_status_reason_details_get"] = (
+        lambda **_: SimpleNamespace(result=None, error=None)
+    )
+    tools = read_tools(state)
+    campaign = tools["get_campaign"](campaign_id=CAMPAIGN)
+    assert campaign.billing_event == "TAPS" and campaign.promoted_app_id == "1234567890"
+    assert campaign.last_7d is not None and campaign.last_7d.spend == "70.00 USD"
+    ad_group = tools["get_ad_group"](ad_group_id=AD_GROUP)
+    assert ad_group.bid_strategy_type == "MANUAL_CPT" and ad_group.pricing_model == "CPT"
+    assert ad_group.keyword_count == 1 and ad_group.ad_count == 1
+    assert ad_group.targeting["deviceClass"]["include"] == ["IPHONE", "IPAD"]
+
+
+def test_a_read_only_role_blocks_every_preview() -> None:
+    tools, apple, _ = rig()
+    apple.extra["get_user_acls"] = lambda **_: _acls(["API Account Read Only"])
+    preview = tools["preview_campaign_status"](campaign_id=CAMPAIGN, status="PAUSED")
+    assert preview.blocked
+    assert any(c.startswith("FAIL role_can_write") for c in preview.guardrail_checks)
+
+
 if __name__ == "__main__":
     raise SystemExit(run(dict(globals())))
