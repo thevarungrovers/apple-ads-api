@@ -247,6 +247,11 @@ class AuditRow(BaseModel):
 class AuditList(BaseModel):
     returned: int
     changes: list[AuditRow]
+    truncated: bool = Field(
+        default=False,
+        description="True when at least one entity type filled its page, so older "
+        "changes in the window may be missing",
+    )
     note: str
 
 
@@ -304,6 +309,11 @@ class ReconcileReport(BaseModel):
     since: str
     local_entries: int
     apple_changes: int
+    apple_truncated: list[str] = Field(
+        default_factory=list,
+        description="Entity types whose audit page came back full -- some of "
+        "Apple's changes are missing, so apple_without_local is incomplete",
+    )
     local_without_apple: list[LedgerEntry]
     apple_without_local: list[AuditRow]
     note: str
@@ -623,9 +633,22 @@ def query_audit(
     since: dt.datetime,
     limit: int = 200,
     until: dt.datetime | None = None,
-    entity_types: tuple[str, ...] = AUDIT_ENTITY_TYPES,
+    entity_types: tuple[str, ...] | None = None,
 ) -> list[Any]:
-    """`query_audit_summary` over a time window, across every entity type.
+    """`query_audit_summary` rows over a time window, across every entity type."""
+    return query_audit_page(since, limit, until, entity_types)[0]
+
+
+def query_audit_page(
+    since: dt.datetime,
+    limit: int = 200,
+    until: dt.datetime | None = None,
+    entity_types: tuple[str, ...] | None = None,
+) -> tuple[list[Any], list[str]]:
+    """(rows, entity types whose page came back FULL, so more may exist).
+
+    One page per entity type. A full page used to be silently all there was;
+    now the caller is told which types were cut off.
 
     eventTime takes BETWEEN with a start and an end. GREATER_THAN_OR_EQUAL_TO is
     documented as supported for time fields but answers a bare 400 in practice,
@@ -633,7 +656,9 @@ def query_audit(
     """
     until = until or dt.datetime.now(dt.timezone.utc)
     rows: list[Any] = []
-    for entity_type in entity_types:
+    truncated: list[str] = []
+    page_size = min(max(1, limit), 1000)
+    for entity_type in entity_types or AUDIT_ENTITY_TYPES:
         response = client.call(
             "query_audit_summary",
             x_ap_context=context_header(),
@@ -649,12 +674,15 @@ def query_audit(
                     ),
                     AuditFilter(field="entityType", operator="EQUALS", value=entity_type),
                 ],
-                pagination=Pagination(offset=0, page_size=min(max(1, limit), 1000)),
+                pagination=Pagination(offset=0, page_size=page_size),
             ),
         )
-        rows.extend(unwrap(response, f"{entity_type} audit summary") or [])
+        page = unwrap(response, f"{entity_type} audit summary") or []
+        if len(page) >= page_size:
+            truncated.append(entity_type)
+        rows.extend(page)
     rows.sort(key=lambda r: r.event_time or dt.datetime.min.replace(tzinfo=dt.timezone.utc), reverse=True)
-    return rows
+    return rows, truncated
 
 
 # --- registration -------------------------------------------------------------
@@ -1139,10 +1167,13 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
     ) -> AuditList:
         """Apple's own audit trail -- every change, by anyone, not just this server."""
         since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)
-        rows = query_audit(since, limit)[:limit]
+        rows, truncated = query_audit_page(since, limit)
+        cut = len(rows) > limit
+        rows = rows[:limit]
         return AuditList(
             returned=len(rows),
             changes=[_audit_row(row) for row in rows],
+            truncated=bool(truncated) or cut,
             note=(
                 "This is Apple's record of ALL changes, including ones made in the "
                 "Apple Ads UI by a person. Compare it with list_my_changes using "
@@ -1249,7 +1280,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         """
         since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)
         local = [e for e in ledger.entries(since=since) if e.get("outcome") != ledger.REFUSED]
-        apple = query_audit(since, limit=1000)
+        apple, apple_truncated = query_audit_page(since, limit=1000)
         apple_rows = [_audit_row(row) for row in apple]
 
         # Join on entity id, which Apple exposes in each summary's `metas`. The
@@ -1260,23 +1291,25 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         for row in apple_rows:
             apple_ids.update(row.entity_ids)
 
+        # A creation's row carries the id Apple assigned (filled in from the
+        # response), so it joins like any other. Legacy rows -- a bulk change as
+        # one comma-joined row, a negative add as "(new)" -- are split or
+        # skipped as before.
+        def ids_of(entry: dict[str, Any]) -> set[str]:
+            return {
+                part.strip()
+                for part in str(entry.get("entity_id") or "").split(",")
+                if part.strip() and part.strip() not in ("(new)", "None")
+            }
+
         local_ids: set[str] = set()
         for entry in local:
-            for part in str(entry.get("entity_id", "")).split(","):
-                part = part.strip()
-                if part and part != "(new)":
-                    local_ids.add(part)
+            local_ids |= ids_of(entry)
 
         local_without_apple = [
             entry
             for entry in local
-            if entry.get("outcome") in (ledger.FAILED, None)
-            or not {
-                part.strip()
-                for part in str(entry.get("entity_id", "")).split(",")
-                if part.strip() and part.strip() != "(new)"
-            }
-            & apple_ids
+            if entry.get("outcome") in (ledger.FAILED, None) or not ids_of(entry) & apple_ids
         ]
         apple_without_local = [
             row for row in apple_rows if not (set(row.entity_ids) & local_ids)
@@ -1286,6 +1319,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             since=since.isoformat(timespec="seconds"),
             local_entries=len(local),
             apple_changes=len(apple_rows),
+            apple_truncated=apple_truncated,
             local_without_apple=[_ledger_entry(e) for e in local_without_apple[:50]],
             apple_without_local=apple_without_local[:50],
             note=(
