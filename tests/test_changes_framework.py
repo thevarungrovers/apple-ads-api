@@ -464,5 +464,22 @@ def test_reverting_an_unknown_write_that_never_landed_says_so() -> None:
     assert ledger.find_entry(row["entry_id"])["outcome"] == "failed"
 
 
+
+def test_an_inheriting_keyword_bid_refuses_a_moved_ad_group_default() -> None:
+    tools, apple, _ = rig()
+    apple.keywords[KEYWORD] = apple.keywords[KEYWORD].model_copy(update={"bid": None})
+    preview = tools["preview_keyword_bid"](keyword_id=KEYWORD, new_bid="1.20")
+    assert "ad group default" in preview.before, preview.before
+    # The default the projection and the % check were measured against moves.
+    group = apple.ad_groups[AD_GROUP]
+    apple.ad_groups[AD_GROUP] = group.model_copy(update={"bid_strategy": group.bid_strategy.model_copy(
+        update={"bid": group.bid_strategy.bid.model_copy(update={"amount": "0.50"})})})
+    _raises(
+        lambda: tools["apply_keyword_bid"](preview_token=preview.preview_token),
+        "Something changed it in between",
+    )
+    assert apple.writes() == []
+
+
 if __name__ == "__main__":
     raise SystemExit(run(dict(globals())))

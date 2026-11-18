@@ -49,6 +49,7 @@ from apple_ads_mcp.changes.common import (
     metrics_block,
     metrics_warning,
     parse_choice,
+    refuse_if_moved,
     serving_warning,
 )
 from apple_ads_mcp.client import (
@@ -148,7 +149,18 @@ class KeywordBid(ChangeKind):
         )
 
     def current(self, ctx, item):
-        current = money_amount(client.get_keyword(item["entity_id"]).bid)
+        keyword = client.get_keyword(item["entity_id"])
+        current = money_amount(keyword.bid)
+        if current is None and "inherited_default" in item:
+            # An inheriting keyword's preview measured the change -- projection,
+            # % increase -- against the ad group default, so that is stale too.
+            default = money_amount(ad_group_bid(client.get_ad_group(int(keyword.ad_group_id))))
+            refuse_if_moved(
+                str(default) if default is not None else "none",
+                str(item["inherited_default"]) if item["inherited_default"] is not None else "none",
+                f"ad group {keyword.ad_group_id} default bid (which keyword "
+                f"{item['entity_id']} pays)",
+            )
         return str(current) if current is not None else "none"
 
     def request(self, ctx, items):
@@ -247,6 +259,11 @@ def keyword_bid_item(ctx, keyword_id: int, raw_bid: str, label: str) -> dict[str
             campaign_id=keyword.campaign_id,
             projected=projected,
             currency=currency,
+            **(
+                {"inherited_default": str(before_num) if before_num is not None else None}
+                if inherited
+                else {}
+            ),
         ),
     }
 
