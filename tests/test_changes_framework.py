@@ -351,5 +351,118 @@ def test_a_partial_bulk_where_only_the_decrease_landed_records_nothing() -> None
     assert DailyUsage(state.limits).usage()[1] == Decimal("0")
 
 
+
+TIMEOUT = "TRANSIENT: keywords_id_put failed to reach Apple: TimeoutError: read timed out"
+
+
+def _timeout_after_landing(apple, method: str) -> None:
+    """The write reaches Apple and lands; the answer never comes back."""
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    real = getattr(apple, f"_{method}")
+
+    def lands_then_times_out(**kwargs):
+        real(**kwargs)
+        raise ToolError(TIMEOUT)
+
+    setattr(apple, f"_{method}", lands_then_times_out)
+
+
+def test_a_timed_out_write_is_left_unknown_and_counted_against_the_caps() -> None:
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    from apple_ads_mcp.guardrails import DailyUsage
+
+    tools, apple, state = rig()
+    preview = tools["preview_keyword_bid"](keyword_id=KEYWORD, new_bid="1.20")
+    apple.fail["keywords_id_put"] = ToolError(TIMEOUT)
+    message = _raises(
+        lambda: tools["apply_keyword_bid"](preview_token=preview.preview_token),
+        "reconcile_ledger",
+    )
+    assert "may have landed" in message, message
+    [row] = ledger.entries()
+    assert row["outcome"] == "unknown", row["outcome"]
+    snapshot = state.counters.snapshot()
+    assert snapshot["applies_this_session"] == 1, snapshot
+    assert snapshot["projected_session_delta"] == "1.00", snapshot
+    assert DailyUsage(state.limits).usage() == (1, Decimal("1.00"))
+
+
+def test_a_rejected_write_is_still_failed_and_costs_nothing() -> None:
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    tools, apple, state = rig()
+    preview = tools["preview_keyword_bid"](keyword_id=KEYWORD, new_bid="1.20")
+    apple.fail["keywords_id_put"] = ToolError("INVALID: Apple returned HTTP 400 for keywords_id_put")
+    _raises(lambda: tools["apply_keyword_bid"](preview_token=preview.preview_token), "INVALID")
+    [row] = ledger.entries()
+    assert row["outcome"] == "failed", row["outcome"]
+    assert state.counters.snapshot()["applies_this_session"] == 0
+
+
+def test_a_timed_out_creation_warns_that_a_retry_may_duplicate() -> None:
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    tools, apple, _ = rig()
+    preview = tools["preview_negative_keywords_add"](texts=["one"], ad_group_id=AD_GROUP)
+    apple.fail["negative_keywords_bulk_create_post"] = ToolError(TIMEOUT)
+    message = _raises(
+        lambda: tools["apply_negative_keywords_add"](preview_token=preview.preview_token),
+        "duplicate",
+    )
+    assert "reconcile_ledger" in message, message
+    assert [r["outcome"] for r in ledger.entries()] == ["unknown"]
+
+
+def test_reconcile_lists_writes_whose_outcome_is_unknown() -> None:
+    from types import SimpleNamespace
+
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    from apple_ads_mcp import tools_read
+    from kindkit import Registrar
+
+    tools, apple, state = rig()
+    preview = tools["preview_keyword_bid"](keyword_id=KEYWORD, new_bid="1.20")
+    apple.fail["keywords_id_put"] = ToolError(TIMEOUT)
+    _raises(lambda: tools["apply_keyword_bid"](preview_token=preview.preview_token), "TRANSIENT")
+    apple.extra["query_audit_summary"] = lambda **_: SimpleNamespace(result=[], error=None)
+    registrar = Registrar()
+    tools_read.register(registrar, state)
+    report = registrar.tools["reconcile_ledger"](days=1)
+    assert [e.entity_id for e in report.unknown_outcome] == [str(KEYWORD)], report.unknown_outcome
+    assert "unknown_outcome" in report.note, report.note
+
+
+def test_reverting_an_unknown_write_that_landed_confirms_it_then_reverts() -> None:
+    tools, apple, _ = rig()
+    preview = tools["preview_keyword_bid"](keyword_id=KEYWORD, new_bid="1.20")
+    _timeout_after_landing(apple, "keywords_id_put")
+    _raises(lambda: tools["apply_keyword_bid"](preview_token=preview.preview_token), "TRANSIENT")
+    assert apple.keywords[KEYWORD].bid.amount == "1.20"
+    [row] = ledger.entries()
+    del apple._keywords_id_put  # the timeout was a one-off
+    undo = tools["revert_change"](entry_id=row["entry_id"])
+    assert undo.applied, undo.failures
+    assert apple.keywords[KEYWORD].bid.amount == "1.00"
+    assert ledger.find_entry(row["entry_id"])["outcome"] == "applied"
+    assert row["entry_id"] in ledger.reverted_entry_ids()
+
+
+def test_reverting_an_unknown_write_that_never_landed_says_so() -> None:
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    tools, apple, _ = rig()
+    preview = tools["preview_keyword_bid"](keyword_id=KEYWORD, new_bid="1.20")
+    apple.fail["keywords_id_put"] = ToolError(TIMEOUT)
+    _raises(lambda: tools["apply_keyword_bid"](preview_token=preview.preview_token), "TRANSIENT")
+    [row] = ledger.entries()
+    del apple.fail["keywords_id_put"]
+    _raises(lambda: tools["revert_change"](entry_id=row["entry_id"]), "never landed")
+    assert apple.writes() == ["keywords_id_put"]  # only the original attempt
+    assert ledger.find_entry(row["entry_id"])["outcome"] == "failed"
+
+
 if __name__ == "__main__":
     raise SystemExit(run(dict(globals())))

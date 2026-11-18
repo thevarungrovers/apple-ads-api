@@ -329,7 +329,20 @@ def _run(args: argparse.Namespace) -> int:
         status, payload = request(args.method, args.path, body, token)
     except Exception as exc:
         if entry_id:
-            ledger.write_outcome(entry_id, outcome=ledger.FAILED, detail=str(exc)[:500])
+            # No HTTP status came back, so the request may have reached Apple
+            # and landed: unknown, not failed, so the daily cap keeps counting
+            # it and reconcile_ledger lists it.
+            ledger.write_outcome(
+                entry_id,
+                outcome=ledger.UNKNOWN,
+                detail=f"no response, may have landed: {exc}"[:500],
+            )
+            print(
+                f"error: no response from Apple ({exc}). The write MAY HAVE LANDED; "
+                f"check the account (reconcile_ledger, or the Apple Ads UI) before "
+                f"running it again.",
+                file=sys.stderr,
+            )
         raise
 
     if entry_id:

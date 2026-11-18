@@ -99,6 +99,25 @@ def test_a_rejected_write_is_ledgered_as_failed() -> None:
     assert ledger.entries()[0]["outcome"] == "failed"
 
 
+def test_a_cli_write_that_times_out_is_ledgered_as_unknown_and_counts_today() -> None:
+    sent: list = []
+    _wire(sent, tty=True, typed="campaigns/1234567890")
+
+    def times_out(method, path, body, token):
+        sent.append((method, path, body))
+        raise TimeoutError("read timed out")
+
+    cli.request = times_out
+    try:
+        cli._run(_args())
+    except TimeoutError:
+        pass
+    else:
+        raise AssertionError("expected the timeout to propagate")
+    assert ledger.entries()[0]["outcome"] == "unknown"
+    assert DailyUsage(limits()).usage()[0] == 1
+
+
 def test_a_read_needs_no_confirmation_and_writes_no_ledger_row() -> None:
     sent: list = []
     _wire(sent, tty=False, typed="")

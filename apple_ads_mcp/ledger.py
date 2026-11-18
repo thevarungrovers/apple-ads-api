@@ -59,6 +59,7 @@ APPLIED = logdb.APPLIED
 FAILED = logdb.FAILED
 PARTIAL = logdb.PARTIAL
 REFUSED = logdb.REFUSED
+UNKNOWN = logdb.UNKNOWN
 
 new_entry_id = logdb.new_entry_id
 entries = logdb.entries
@@ -110,7 +111,7 @@ def write_outcome(
     failures: list[dict[str, Any]] | None = None,
     entity_id: Any = None,
 ) -> None:
-    """Record how it went. `outcome` is one of applied/failed/partial/refused.
+    """Record how it went. `outcome` is one of applied/failed/partial/refused/unknown.
 
     `entity_id` fills in the id Apple assigned to something just created.
     """

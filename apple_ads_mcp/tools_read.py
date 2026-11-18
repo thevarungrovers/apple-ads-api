@@ -342,8 +342,9 @@ class LedgerEntry(BaseModel):
     before: str | None
     after: str | None
     outcome: str | None = Field(
-        description="applied | failed | partial | refused, or null when the write "
-        "started and nothing recorded how it ended"
+        description="applied | failed | partial | refused | unknown (the request "
+        "timed out and may have landed), or null when the write started and "
+        "nothing recorded how it ended"
     )
     outcome_detail: str | None = None
     reverts_entry_id: str | None = None
@@ -353,8 +354,8 @@ class LedgerList(BaseModel):
     returned: int
     entries: list[LedgerEntry]
     unfinished: int = Field(
-        description="Entries with an intent and no outcome -- a write that may have "
-        "landed at Apple with nothing local to say so"
+        description="Entries with an intent and no outcome, or an 'unknown' one -- "
+        "a write that may have landed at Apple with nothing local to say so"
     )
     note: str
 
@@ -370,6 +371,16 @@ class ReconcileReport(BaseModel):
     )
     local_without_apple: list[LedgerEntry]
     apple_without_local: list[AuditRow]
+    unknown_outcome: list[LedgerEntry] = Field(
+        default_factory=list,
+        description="Writes whose request timed out (outcome 'unknown'): they may "
+        "have landed. Counted against the caps until settled",
+    )
+    unknown_seen_by_apple: list[str] = Field(
+        default_factory=list,
+        description="entry_ids from unknown_outcome whose entity DOES appear in "
+        "Apple's audit trail in this window -- most likely landed",
+    )
     note: str
 
 
@@ -1598,14 +1609,16 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         """
         since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)
         rows = ledger.entries(since=since)[:limit]
-        unfinished = sum(1 for row in rows if row.get("outcome") is None)
+        unfinished = sum(1 for row in rows if row.get("outcome") in (None, ledger.UNKNOWN))
         return LedgerList(
             returned=len(rows),
             entries=[_ledger_entry(row) for row in rows],
             unfinished=unfinished,
             note=(
                 "entry_id is what revert_change takes. A null outcome means the "
-                "write was started and never recorded as finished."
+                "write was started and never recorded as finished; 'unknown' means "
+                "its request timed out and it may have landed. Run reconcile_ledger "
+                "for either before retrying."
             ),
         )
 
@@ -1657,10 +1670,12 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         for entry in local:
             local_ids |= ids_of(entry)
 
+        unknown = [entry for entry in local if entry.get("outcome") == ledger.UNKNOWN]
         local_without_apple = [
             entry
             for entry in local
-            if entry.get("outcome") in (ledger.FAILED, None) or not ids_of(entry) & apple_ids
+            if entry.get("outcome") != ledger.UNKNOWN
+            and (entry.get("outcome") in (ledger.FAILED, None) or not ids_of(entry) & apple_ids)
         ]
         apple_without_local = [
             row for row in apple_rows if not (set(row.entity_ids) & local_ids)
@@ -1673,8 +1688,22 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             apple_truncated=apple_truncated,
             local_without_apple=[_ledger_entry(e) for e in local_without_apple[:50]],
             apple_without_local=apple_without_local[:50],
+            unknown_outcome=[_ledger_entry(e) for e in unknown[:50]],
+            unknown_seen_by_apple=[
+                str(e.get("entry_id")) for e in unknown if ids_of(e) & apple_ids
+            ],
             note=(
-                "apple_without_local is the line that matters: it means something "
+                (
+                    f"unknown_outcome has {len(unknown)} write(s) whose request timed "
+                    f"out: each MAY have landed and is counted against the caps as if "
+                    f"it had. Re-read each entity before retrying anything; "
+                    f"revert_change on one reads it back and reverts it only if it "
+                    f"landed. A creation in it may already exist -- look before "
+                    f"re-running it. "
+                    if unknown
+                    else ""
+                )
+                + "apple_without_local is the line that matters: it means something "
                 "other than this server changed the account -- most often a person "
                 "in the Apple Ads UI (userType CUSTOMER rather than CUSTOMER_API). "
                 "The join is on entity id, so a change to an entity this server "

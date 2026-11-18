@@ -81,6 +81,10 @@ APPLIED = "applied"
 FAILED = "failed"
 PARTIAL = "partial"
 REFUSED = "refused"
+#: The request left the process and no answer came back (a timeout, a reset, a
+#: 5xx): the write may or may not have landed. Counted against the caps as if it
+#: had, until a read-back (revert_change) settles it.
+UNKNOWN = "unknown"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -649,7 +653,8 @@ def _parse_ts(raw: Any) -> dt.datetime | None:
 
 
 def successful_changes_since(since: dt.datetime) -> list[dict[str, Any]]:
-    """Changes that landed (applied or partial) at or after `since`.
+    """Changes that landed (applied or partial), or may have (unknown), at or
+    after `since`.
 
     The daily cap's whole input. SQL narrows by date prefix -- a string compare
     the ts index serves -- with two days of slack, and the exact boundary is then
@@ -658,8 +663,8 @@ def successful_changes_since(since: dt.datetime) -> list[dict[str, Any]]:
     """
     lower = (since - dt.timedelta(days=2)).strftime("%Y-%m-%d")
     rows = connect().execute(
-        "SELECT * FROM changes WHERE ts >= ? AND outcome IN (?, ?) ORDER BY ts, rowid",
-        (lower, APPLIED, PARTIAL),
+        "SELECT * FROM changes WHERE ts >= ? AND outcome IN (?, ?, ?) ORDER BY ts, rowid",
+        (lower, APPLIED, PARTIAL, UNKNOWN),
     )
     keep = []
     for row in rows:

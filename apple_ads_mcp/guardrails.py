@@ -323,7 +323,8 @@ class DailyUsage:
     No table of its own and no in-memory state: every answer comes from the
     `changes` rows since local midnight, so two server processes -- or one
     restarted ten times today -- see the same numbers. Only rows whose outcome
-    is applied or partial count; a write Apple refused spent nothing.
+    is applied or partial count, and unknown ones (a write that timed out may
+    have landed); a write Apple refused spent nothing.
 
     A batch counts once (its rows share a batch_id) and costs what its kind
     costs (3 for a creation). The projected spend is the sum of each row's own

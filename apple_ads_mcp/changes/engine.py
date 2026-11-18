@@ -34,7 +34,14 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from apple_ads_mcp import ledger
-from apple_ads_mcp.changes.base import PREVIEW, ChangeKind, NothingToUndo, Outcome, Proposal
+from apple_ads_mcp.changes.base import (
+    CREATED,
+    PREVIEW,
+    ChangeKind,
+    NothingToUndo,
+    Outcome,
+    Proposal,
+)
 from apple_ads_mcp.client import normalized_value
 from apple_ads_mcp.guardrails import (
     Check,
@@ -353,14 +360,66 @@ class Engine:
                 ) from exc
         return entry_ids, batch_id
 
-    def send(self, ctx, kind: ChangeKind, items, entry_ids) -> list[Outcome]:
-        """The request. A failure is recorded against every row, then re-raised."""
+    @staticmethod
+    def may_have_landed(exc: BaseException) -> bool:
+        """True when a write's failure says nothing about whether it applied.
+
+        A TRANSIENT error is a timeout, a reset or a 5xx: the request may have
+        reached Apple and been applied before the answer was lost (see
+        client.is_read). Anything else -- INVALID, NOT_FOUND, AUTH, a 429 -- is
+        Apple refusing the request, which therefore did not land.
+        """
+        return str(exc).lstrip().upper().startswith("TRANSIENT")
+
+    def send(self, ctx, kind: ChangeKind, items, entry_ids, cost: int | None = None) -> list[Outcome]:
+        """The request. A refusal is recorded against every row, then re-raised.
+
+        A TRANSIENT failure is NOT a refusal: the rows are recorded as UNKNOWN,
+        counted against the session (and, through the ledger, the daily) caps
+        as if they had landed, and the agent is told to check before retrying.
+        """
         try:
             return kind.execute(ctx, items, ctx.call)
         except ToolError as exc:
+            if not self.may_have_landed(exc):
+                for entry_id in entry_ids:
+                    ledger.write_outcome(entry_id, outcome=ledger.FAILED, detail=str(exc))
+                raise
             for entry_id in entry_ids:
-                ledger.write_outcome(entry_id, outcome=ledger.FAILED, detail=str(exc))
-            raise
+                ledger.write_outcome(
+                    entry_id,
+                    outcome=ledger.UNKNOWN,
+                    detail=f"outcome unknown, may have landed: {exc}",
+                )
+            ctx.counters.record(
+                sum(
+                    (max(Decimal(str(i.get("projected") or "0")), Decimal("0")) for i in items),
+                    Decimal("0"),
+                ),
+                kind.cost if cost is None else cost,
+            )
+            raise ToolError(self.unknown_message(items, entry_ids, exc)) from exc
+
+    @staticmethod
+    def unknown_message(items, entry_ids, exc: BaseException) -> str:
+        ids = ", ".join(entry_ids)
+        creation = any(item.get("field") == CREATED for item in items)
+        return (
+            f"OUTCOME UNKNOWN -- {exc}. The request left this process and no answer "
+            f"came back, so the write may have landed at Apple. The ledger records "
+            f"it as 'unknown' (entry {ids}) and it is counted against the session "
+            f"and daily caps as if it had. Do NOT retry yet: run reconcile_ledger, "
+            f"or re-read the entity (get_* / list_*), to see whether it applied. "
+            + (
+                "This was a CREATION: retrying it may create a duplicate. Look for "
+                "the new entity with list_* first; if it exists, pause it with the "
+                "matching preview/apply pair -- revert_change cannot find it, "
+                "because Apple's id never came back."
+                if creation
+                else "revert_change on that entry reads the entity back first: it "
+                "reverts the change if it landed, and records it as failed if not."
+            )
+        )
 
     @staticmethod
     def record_outcomes(items, entry_ids, outcomes: list[Outcome]) -> Decimal:
@@ -515,6 +574,9 @@ class Engine:
 
     def plan_revert(self, ctx, entry: dict[str, Any]) -> tuple[ChangeKind, dict[str, Any]]:
         entry_id = entry.get("entry_id")
+        if entry.get("outcome") == ledger.UNKNOWN:
+            self.resolve_unknown(ctx, entry)
+            entry = {**entry, "outcome": ledger.APPLIED}
         if entry.get("outcome") != ledger.APPLIED:
             raise ToolError(
                 f"entry {entry_id} is recorded as {entry.get('outcome')!r}, not "
@@ -571,6 +633,66 @@ class Engine:
             )
         return send_kind, item
 
+    def resolve_unknown(self, ctx, entry: dict[str, Any]) -> None:
+        """Settle an UNKNOWN row by read-back before anything is reverted.
+
+        Records it APPLIED when Apple now shows the value the write asked for,
+        FAILED (and raises NothingToUndo) when it still shows the old one, and
+        refuses when it shows neither or cannot be read back.
+        """
+        entry_id = entry.get("entry_id")
+        entity_id = str(entry.get("entity_id") or "")
+        if entry.get("field") == CREATED or entity_id in ("", "None", "(new)"):
+            raise ToolError(
+                f"entry {entry_id} created something and its outcome is unknown (the "
+                f"request timed out), so Apple's id never came back and there is "
+                f"nothing to read back or revert. Look for it with list_* (or "
+                f"reconcile_ledger); if it exists, pause it with the matching "
+                f"preview/apply pair. Do not re-run the creation: it may duplicate."
+            )
+        kind = self.kind_for_entry(entry)
+        try:
+            send_kind, item = kind.inverse(ctx, entry)
+            current = send_kind.current(ctx, item)
+        except NothingToUndo:
+            current = str(entry.get("before"))
+        except ValueError as exc:
+            raise ToolError(
+                f"entry {entry_id}'s outcome is unknown and cannot be checked "
+                f"automatically ({exc}). Check the entity in the Apple Ads UI."
+            ) from exc
+        if current is None:
+            raise ToolError(
+                f"entry {entry_id}'s outcome is unknown and this change has no value "
+                f"to read back. Check the entity in the Apple Ads UI."
+            )
+        now = normalized_value(current)
+        if now == normalized_value(str(entry.get("after"))):
+            ledger.write_outcome(
+                entry_id,
+                outcome=ledger.APPLIED,
+                observed_after=current,
+                detail="outcome was unknown; read back at revert: it landed",
+            )
+            return
+        if now == normalized_value(str(entry.get("before"))):
+            ledger.write_outcome(
+                entry_id,
+                outcome=ledger.FAILED,
+                observed_after=current,
+                detail="outcome was unknown; read back at revert: it never landed",
+            )
+            raise NothingToUndo(
+                f"entry {entry_id} never landed: its outcome was unknown, and Apple "
+                f"still shows {current!r}, the value from before it. Recorded as "
+                f"failed; there is nothing to revert."
+            )
+        raise ToolError(
+            f"entry {entry_id}'s outcome is unknown, and Apple now shows {current!r} "
+            f"-- neither {entry.get('before')!r} (before) nor {entry.get('after')!r} "
+            f"(what it asked for). Something else changed it; check the Apple Ads UI."
+        )
+
     def revert_projection(self, ctx, entry, item, send_kind=None) -> Decimal:
         """What undoing ``entry`` puts back into daily spend. Never assumed 0.
 
@@ -596,7 +718,10 @@ class Engine:
         """
         reverted = ledger.reverted_entry_ids()
         live = [
-            e for e in batch if e.get("outcome") == ledger.APPLIED and e["entry_id"] not in reverted
+            e
+            for e in batch
+            if e.get("outcome") in (ledger.APPLIED, ledger.UNKNOWN)
+            and e["entry_id"] not in reverted
         ]
         if not live:
             raise ToolError(
@@ -632,7 +757,16 @@ class Engine:
         )
         outcomes: list[Outcome] = []
         for (kind, item), entry_id in zip(plans, entry_ids):
-            outcomes.extend(self.send(ctx, kind, [item], [entry_id]))
+            try:
+                outcomes.extend(self.send(ctx, kind, [item], [entry_id], cost=1))
+            except ToolError:
+                # The ones already sent still get their outcome recorded (and
+                # counted) rather than being left as open intents.
+                done = len(outcomes)
+                landed = self.record_outcomes(items[:done], entry_ids[:done], outcomes)
+                if any(o.landed for o in outcomes):
+                    ctx.counters.record(landed, 0)
+                raise
         landed_total = self.record_outcomes(items, entry_ids, outcomes)
         all_landed = all(o.landed for o in outcomes)
         if any(o.landed for o in outcomes):
