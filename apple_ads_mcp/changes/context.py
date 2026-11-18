@@ -112,4 +112,4 @@ class ChangeContext:
         rows, error = self._reports[key]
         if error:
             return Decimal("0"), 0, 0, 0, error
-        return pick_metrics(rows, entity_id)
+        return pick_metrics(rows, entity_id, id_key)

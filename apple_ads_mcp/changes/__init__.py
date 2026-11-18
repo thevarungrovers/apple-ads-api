@@ -8,6 +8,7 @@ from __future__ import annotations
 
 
 def all_kinds() -> list:
+    from apple_ads_mcp.changes.ads import AdStatusKind, CreateAd, CreateCreative
     from apple_ads_mcp.changes.adgroups import AdGroupDefaultBid, AdGroupStatusKind
     from apple_ads_mcp.changes.bidding import (
         AdGroupBidStrategy,
@@ -63,4 +64,8 @@ def all_kinds() -> list:
         AdGroupLocations(),
         AdGroupAppDownloaders(),
         CampaignCountries(),
+        # 3d: ads and custom product pages
+        CreateCreative(),
+        CreateAd(),
+        AdStatusKind(),
     ]

@@ -291,6 +291,24 @@ class FakeApple:
     def _creatives_id_put(self, id, creative_update, **_):
         return self._put(self.creatives, id, creative_update)
 
+    def _creatives_post(self, creative_create, **_):
+        new = sdk.Creative.model_validate({
+            "id": self.new_id(), "name": creative_create.name,
+            "creativeType": creative_create.creative_type.value,
+        })
+        self.creatives[new.id] = new
+        return _Resp(new)
+
+    def _ads_post(self, ad_create, **_):
+        group = self.ad_groups[ad_create.ad_group_id]
+        new = sdk.Ad.model_validate({
+            "id": self.new_id(), "adGroupId": ad_create.ad_group_id, "campaignId": group.campaign_id,
+            "creativeId": ad_create.creative_id, "name": ad_create.name,
+            "status": ad_create.status.value,
+        })
+        self.ads[new.id] = new
+        return _Resp(new)
+
     def _bulk(self, items, apply) -> _Resp:
         results = []
         for item in items:

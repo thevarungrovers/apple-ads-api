@@ -654,7 +654,7 @@ def entity_metrics_7d(
     rows, error = report_rows_7d(method, id_key, campaign_id)
     if error:
         return Decimal("0"), 0, 0, 0, error
-    return pick_metrics(rows, entity_id)
+    return pick_metrics(rows, entity_id, id_key)
 
 
 def report_rows_7d(
@@ -685,15 +685,21 @@ def report_rows_7d(
 
 
 def pick_metrics(
-    rows: list[dict], entity_id: Any
+    rows: list[dict], entity_id: Any, id_key: str | None = None
 ) -> tuple[Decimal, int, int, int, str | None]:
-    """(spend, taps, impressions, installs, None) for one entity's row."""
+    """(spend, taps, impressions, installs, None) for one entity's row.
+
+    Matched on the row's own `id_key` (adId on an ad report) when it carries
+    one, else on `id` -- which is what the campaign, ad group and keyword
+    reports were verified to use.
+    """
+
+    def row_id(row: dict) -> Any:
+        meta = row.get("metadata") or {}
+        return meta[id_key] if id_key and id_key in meta else meta.get("id")
+
     metrics = next(
-        (
-            row.get("totalMetrics")
-            for row in rows
-            if str((row.get("metadata") or {}).get("id")) == str(entity_id)
-        ),
+        (row.get("totalMetrics") for row in rows if str(row_id(row)) == str(entity_id)),
         None,
     )
     if not metrics:
@@ -840,7 +846,7 @@ def _audit_row(summary: Any) -> AuditRow:
 # type per call, so "what changed recently" is four calls, not one. Verified
 # against the live API 2026-10-08: anything else is a bare HTTP 400 with no
 # detail, or `VALIDATION_ERROR: EntityType required`.
-AUDIT_ENTITY_TYPES = ("Campaign", "AdGroup", "Keyword", "NegativeKeyword")
+AUDIT_ENTITY_TYPES = ("Campaign", "AdGroup", "Keyword", "NegativeKeyword", "Ad", "Creative")
 
 
 def query_audit(

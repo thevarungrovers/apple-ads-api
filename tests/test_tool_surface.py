@@ -106,6 +106,9 @@ PREVIEW_TOOLS = frozenset(
         "preview_ad_group_locations",
         "preview_ad_group_app_downloaders",
         "preview_campaign_countries",
+        "preview_create_creative",
+        "preview_create_ad",
+        "preview_ad_status",
     }
 )
 
@@ -135,6 +138,9 @@ APPLY_TOOLS = frozenset(
         "apply_ad_group_daypart",
         "apply_ad_group_locations",
         "apply_ad_group_app_downloaders",
+        "apply_create_creative",
+        "apply_create_ad",
+        "apply_ad_status",
     }
 )
 
@@ -150,6 +156,8 @@ DESTRUCTIVE_TOOLS = frozenset(
         "apply_campaign_bid_strategy",
         "apply_campaign_schedule",
         "apply_campaign_countries",
+        "apply_create_creative",
+        "apply_create_ad",
     }
 )
 
@@ -163,10 +171,7 @@ FORBIDDEN_METHODS = (
     "campaigns_id_delete",
     "adgroups_post",
     "adgroups_id_delete",
-    "ads_post",
-    "ads_id_put",
     "ads_id_delete",
-    "creatives_post",
     "creatives_id_put",
     "creatives_id_delete",
     "keywords_post",
