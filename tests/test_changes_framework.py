@@ -546,8 +546,9 @@ def test_an_applied_verdict_needs_no_wait() -> None:
     assert result.settled == {row["entry_id"]: ledger.APPLIED}, result
 
 
-def _unstamped_kind(name: str, created: list):
-    """A creating kind that forgets to stamp: the engine backstop must catch it."""
+def _unstamped_kind(name: str, created: list, sent: str = "plain"):
+    """A creating kind that forgets to stamp: the engine backstop must catch it.
+    ``created`` is what it REPORTS; ``sent`` is the name its item carries."""
     from decimal import Decimal
 
     from apple_ads_mcp.changes.base import CREATED, NOTHING, ChangeKind, Proposal, item
@@ -557,7 +558,7 @@ def _unstamped_kind(name: str, created: list):
 
         def propose(self, ctx):
             return Proposal(
-                items=[item(entity_type="campaign", entity_id=None, entity_name="plain", path="-",
+                items=[item(entity_type="campaign", entity_id=None, entity_name=sent, path="-",
                             field=CREATED, before=NOTHING, after="PAUSED", campaign_id=None)],
                 checks=[], projected=Decimal("0"), created_names=created,
                 entity_type="campaign", entity_id="(new)", entity_name="plain",
@@ -577,13 +578,40 @@ def test_the_engine_refuses_a_creation_whose_name_was_not_stamped() -> None:
     assert plain.blocked and failed(plain, "name_prefix"), plain.guardrail_checks
     silent = engine.preview(engine.add(_unstamped_kind("silent", [])), {})
     assert silent.blocked and failed(silent, "name_prefix"), silent.guardrail_checks
-    stamped = engine.preview(engine.add(_unstamped_kind("stamped", [("campaign", "AB-max-plain")])), {})
+    stamped = engine.preview(engine.add(
+        _unstamped_kind("stamped", [("campaign", "AB-max-plain")], sent="AB-max-plain")), {})
     assert not failed(stamped, "name_prefix"), stamped.guardrail_checks
     # With no identity in .env a name is used as given: nothing to backstop.
     rig(identity=Identity())
     engine = tools_write.ENGINE
     bare = engine.preview(engine.add(_unstamped_kind("bare", [("campaign", "plain")])), {})
     assert not failed(bare, "name_prefix"), bare.guardrail_checks
+
+
+def test_the_backstop_checks_the_name_actually_sent_not_the_one_reported() -> None:
+    from apple_ads_mcp import tools_write
+    from apple_ads_mcp.naming import Identity
+
+    def preview(kind_name, reported, sent, identity=None):
+        rig() if identity is None else rig(identity=identity)
+        engine = tools_write.ENGINE
+        return engine.preview(engine.add(_unstamped_kind(kind_name, reported, sent=sent)), {})
+
+    # Reports the stamped name, sends the bare one.
+    lying = preview("lying", [("campaign", "AB-max-plain")], "plain")
+    assert lying.blocked and failed(lying, "name_prefix"), lying.guardrail_checks
+    # Another agent's prefix under ours-only initials.
+    foreign = preview("foreign", [("campaign", "AB-plain")], "AB-bot-plain",
+                      Identity.from_values("AB", ""))
+    assert foreign.blocked and failed(foreign, "name_prefix"), foreign.guardrail_checks
+    # No identity: a name that claims someone else's is still refused.
+    forged = preview("forged", [("campaign", "plain")], "CD-bot-plain", Identity())
+    assert forged.blocked and failed(forged, "name_prefix"), forged.guardrail_checks
+    # Over the length cap, prefix included.
+    long = preview("long", [("campaign", "AB-max-x")], "AB-max-" + "x" * 194)
+    assert long.blocked and failed(long, "name_length"), long.guardrail_checks
+    ok = preview("fine", [("campaign", "AB-max-x")], "AB-max-" + "x" * 193)
+    assert not ok.blocked, ok.guardrail_checks
 
 
 def _three_bid_batch(tools, apple):

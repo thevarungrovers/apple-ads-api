@@ -153,30 +153,66 @@ class Engine:
 
     @staticmethod
     def naming_checks(ctx, kind: ChangeKind, proposal: Proposal) -> list[Check]:
-        """The backstop: a creating kind must have stamped every name it sends.
+        """The backstop: every name a creating kind SENDS must be stamped.
 
-        Only when a prefix is configured -- with no identity in .env a name is
-        used exactly as given, so there is nothing to have forgotten.
+        Judged on each CREATED item's ``entity_name`` -- the value the request
+        carries -- not on what the kind reports in ``created_names``. With a
+        prefix configured the name must be this identity's (naming.Identity.
+        owns); with none, it must not read as anyone's prefix. Either way it
+        must fit the length cap and carry no invisible character.
         """
+        from apple_ads_mcp import naming
+
         if not kind.creates_named:
             return []
-        prefix = ctx.identity.prefix
         if not proposal.created_names:
             return [Check(
                 "name_prefix", False,
                 f"{kind.name} creates named entities but reported no name -- a bug in "
                 f"the kind, refused rather than sent unchecked",
             )]
-        if not prefix:
-            return []
-        missing = [name for _type, name in proposal.created_names if not name.startswith(prefix)]
-        if missing:
+        identity = ctx.identity
+        prefix = identity.prefix
+        sent = [
+            (str(item.get("entity_type")), str(item.get("entity_name") or ""))
+            for item in proposal.items
+            if item.get("field") == CREATED and item.get("entity_type") in naming.NAME_LIMITS
+        ]
+        if not sent:
             return [Check(
                 "name_prefix", False,
-                f"{', '.join(repr(n) for n in missing)} does not start with {prefix!r} -- "
-                f"the kind did not stamp it; refused rather than created unprefixed",
+                f"{kind.name} creates named entities but no created item carries a name -- "
+                f"a bug in the kind, refused rather than sent unchecked",
             )]
-        return []
+        checks = []
+        if prefix:
+            unstamped = [name for _type, name in sent if not identity.owns(name)]
+            why = f"is not stamped with this checkout's prefix {prefix!r}"
+        else:
+            unstamped = [name for _type, name in sent if naming.parse(name) is not None]
+            why = "reads as another identity's prefix, and this checkout has none"
+        if unstamped:
+            checks.append(Check(
+                "name_prefix", False,
+                f"{', '.join(repr(n) for n in unstamped)} {why} -- the kind did not "
+                f"stamp what it sends; refused rather than created",
+            ))
+        for entity_type, name in sent:
+            limit = naming.NAME_LIMITS[entity_type]
+            if len(name) > limit:
+                checks.append(Check(
+                    "name_length", False,
+                    f"the {entity_type.replace('_', ' ')} name sent is {len(name)} characters "
+                    f"and the cap is {limit}; refused rather than cut short",
+                ))
+            bad = naming.invisible_character(name)
+            if bad is not None:
+                checks.append(Check(
+                    "name_prefix", False,
+                    f"the {entity_type.replace('_', ' ')} name sent carries U+{ord(bad):04X}, "
+                    f"a control or invisible character",
+                ))
+        return checks
 
     @staticmethod
     def role_check():
