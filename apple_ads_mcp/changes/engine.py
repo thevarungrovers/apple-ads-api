@@ -117,7 +117,11 @@ class Engine:
 
     def preview_checks(self, ctx, kind: ChangeKind, proposal: Proposal) -> list[Check]:
         checks = list(proposal.checks)
-        checks.append(check_projected_delta(ctx.limits, proposal.projected))
+        checks.append(
+            check_projected_delta(
+                ctx.limits, proposal.projected, "enable" if proposal.is_enable else "change"
+            )
+        )
         checks.append(ctx.daily.check(proposal.projected))
         return checks
 
@@ -190,6 +194,11 @@ class Engine:
         could only say "failed a guardrail".
         """
         warnings = []
+        if proposal.is_enable and proposal.projected > 0:
+            line = ctx.daily.check(proposal.projected)
+            warnings.append(
+                f"re-enabling resumes spend up to the daily budget; this {line.detail}"
+            )
         for reason in (
             ctx.counters.would_exceed(proposal.projected, kind.cost),
             ctx.daily.would_exceed(proposal.projected, kind.cost),
@@ -442,7 +451,7 @@ class Engine:
                 return self.revert_batch(ctx, entry_id, batch)
             raise ToolError(f"no ledger entry {entry_id!r}. list_my_changes shows valid ids.")
         kind, item = self.plan_revert(ctx, entry)
-        projected = self.revert_projection(ctx, entry, item)
+        projected = self.revert_projection(ctx, entry, item, kind)
         self.refuse_if_over_caps(ctx, projected, 1)
         return self.send_revert(ctx, [entry], [(kind, item)], projected)
 
@@ -495,8 +504,22 @@ class Engine:
             )
         return send_kind, item
 
-    def revert_projection(self, ctx, entry, item) -> Decimal:
-        return Decimal("0")
+    def revert_projection(self, ctx, entry, item, send_kind=None) -> Decimal:
+        """What undoing ``entry`` puts back into daily spend. Never assumed 0.
+
+        Reverting a pause or a budget cut RESTORES spend, so it is counted
+        against the session and daily totals like an enable (and, like one, is
+        exempt from the per-change limit). The kind that sends the inverse
+        decides the bound: a status kind bounds an enable by the campaign's
+        budget headroom, a budget kind by the cut it undoes.
+        """
+        if send_kind is None:
+            send_kind = self.kind_for_entry(entry)
+        try:
+            projected, _is_enable = send_kind.revert_projection(ctx, entry, item)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        return max(projected, Decimal("0"))
 
     def revert_batch(self, ctx, batch_id: str, batch: list[dict[str, Any]]) -> ApplyResult:
         """Undo every still-applied row of one batch, each with its own request.
@@ -515,7 +538,7 @@ class Engine:
             )
         plans = [self.plan_revert(ctx, entry) for entry in live]
         projected = sum(
-            (self.revert_projection(ctx, e, item) for e, (_k, item) in zip(live, plans)),
+            (self.revert_projection(ctx, e, item, k) for e, (k, item) in zip(live, plans)),
             Decimal("0"),
         )
         self.refuse_if_over_caps(ctx, projected, 1)

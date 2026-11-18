@@ -51,6 +51,18 @@ class _Keyword:
         self.text = "organic kale"
 
 
+class _Campaign:
+    """The keyword's campaign. Reverting a pause projects an ENABLE, which is
+    bounded by the campaign's budget headroom -- and a PAUSED campaign has none,
+    so no report is needed to answer it."""
+
+    def __init__(self) -> None:
+        self.id = 999
+        self.status = "PAUSED"
+        self.name = "C"
+        self.daily_budget = None
+
+
 class _Response:
     def __init__(self, result) -> None:
         self.result = result
@@ -77,6 +89,8 @@ class FakeApple:
             return _Response(_Keyword(self.current))
         if method_name == "keywords_id_put":
             return _Response(_Keyword(self.put_echoes))
+        if method_name == "campaigns_id_get":
+            return _Response(_Campaign())
         raise AssertionError(f"unexpected API call: {method_name}")
 
 

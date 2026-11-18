@@ -18,6 +18,7 @@ from apple_ads_mcp.changes.common import (
     bid_strategy_goal,
     bid_strategy_type,
     bid_strategy_update,
+    bound_check,
     campaign_currency,
     default_bid_blast_radius,
     metrics_block,
@@ -83,7 +84,11 @@ class AdGroupStatusKind(StatusKind):
         spend, taps, impressions, installs, metrics_error = ctx.metrics_7d(
             "apps_ad_group_reports", "adGroupId", ad_group_id, ad_group.campaign_id
         )
-        projected = project_pause(spend) if target == "PAUSED" else Decimal("0")
+        bound_checks = []
+        if target == "PAUSED":
+            projected = project_pause(spend)
+        else:
+            projected, bound_checks = bound_check(*self.enable_bound(ctx, ad_group.campaign_id))
         entity_serving = enum_value(ad_group.display_status)
         warnings = serving_warning(entity_serving, "ad group") + metrics_warning(metrics_error)
         warnings.append("This affects EVERY keyword in the ad group, not one of them.")
@@ -105,8 +110,10 @@ class AdGroupStatusKind(StatusKind):
             checks=[
                 check_campaign_in_scope(ctx.limits, ad_group.campaign_id),
                 check_known_status("ad_group_status_known", before),
+                *bound_checks,
             ],
             projected=projected,
+            is_enable=target == "ENABLED",
             warnings=warnings,
             note="Reversible: apply the opposite status to undo, or use revert_change.",
             entity_type="ad_group",

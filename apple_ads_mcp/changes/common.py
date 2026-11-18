@@ -248,6 +248,71 @@ def existing_negatives(
     )
 
 
+# --- how much an enable can spend ---------------------------------------------------
+
+
+def campaign_headroom(ctx, campaign: Any) -> tuple[Decimal | None, str]:
+    """How much MORE the campaign could spend per day than it does now.
+
+    The honest upper bound for anything that widens delivery INSIDE a campaign
+    -- enabling a keyword, ad group or ad, pausing a negative: none of them can
+    take the campaign past its daily budget, and the last 7 days say how much of
+    that budget it already uses. Zero, with a reason, when the campaign is not
+    enabled: then nothing under it spends until the campaign itself is enabled,
+    and THAT change projects the whole budget.
+
+    None means it cannot be bounded at all (no daily budget of its own), which
+    the caller turns into a FAIL rather than a confident zero.
+    """
+    if campaign is None:
+        return None, "the campaign could not be read, so the added spend cannot be bounded"
+    status = enum_value(getattr(campaign, "status", None))
+    if status != "ENABLED":
+        return Decimal("0"), (
+            f"the campaign is {status}, so this adds no spend until the campaign is enabled"
+        )
+    budget = money_amount(campaign_budget(campaign))
+    if budget is None:
+        return None, (
+            "the campaign has no daily budget of its own (a shared budget?), so the "
+            "added spend cannot be bounded"
+        )
+    spend, _taps, _impressions, _installs, error = ctx.metrics_7d(
+        "apps_campaign_reports", "campaignId", campaign.id
+    )
+    if error:
+        return budget, (
+            f"upper bound: the whole daily budget {budget}, because the last 7 days "
+            f"could not be read ({error[:120]})"
+        )
+    average = (spend / Decimal(7)).quantize(Decimal("0.01"))
+    headroom = max(budget - average, Decimal("0")).quantize(Decimal("0.01"))
+    return headroom, (
+        f"upper bound: the campaign's unused daily budget ({budget} budget - "
+        f"{average}/day average over the last 7 days)"
+    )
+
+
+def campaign_enable_bound(campaign: Any) -> tuple[Decimal | None, str]:
+    """Enabling a whole campaign can spend its whole daily budget, from today."""
+    budget = money_amount(campaign_budget(campaign))
+    if budget is None:
+        return None, (
+            "the campaign has no daily budget of its own (a shared budget?), so the "
+            "spend it resumes cannot be bounded"
+        )
+    return budget, f"upper bound: the campaign's whole daily budget ({budget})"
+
+
+def bound_check(projected: Decimal | None, reason: str) -> tuple[Decimal, list]:
+    """(projection to use, [FAIL check] when it could not be bounded)."""
+    from apple_ads_mcp.guardrails import Check
+
+    if projected is None:
+        return Decimal("0"), [Check("spend_is_bounded", False, reason)]
+    return projected, [Check("spend_is_bounded", True, reason)]
+
+
 # --- a status flip, shared by every entity that has one ---------------------------
 
 
@@ -292,6 +357,18 @@ class StatusKind(ChangeKind):
 
     def ledger_keys_for(self) -> tuple[tuple[str, str], ...]:
         return ((self.entity_type, "status"),)
+
+    def enable_bound(self, ctx, campaign_id: Any) -> tuple[Decimal | None, str]:
+        """What enabling one of these can add per day: the campaign's headroom."""
+        return campaign_headroom(ctx, ctx.campaign(campaign_id))
+
+    def revert_projection(self, ctx, entry, item):
+        if item["after"] != "ENABLED":
+            return Decimal("0"), False
+        bound, reason = self.enable_bound(ctx, item.get("campaign_id"))
+        if bound is None:
+            raise ValueError(f"cannot revert: {reason}. Re-enable it with its preview instead.")
+        return bound, True
 
     def inverse(self, ctx, entry):
         return self, make_item(

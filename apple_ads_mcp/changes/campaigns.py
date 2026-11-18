@@ -20,7 +20,9 @@ from apple_ads_mcp.changes.base import (
 from apple_ads_mcp.changes.common import (
     SETTABLE_STATUSES,
     StatusKind,
+    bound_check,
     campaign_budget,
+    campaign_enable_bound,
     metrics_block,
     metrics_warning,
     parse_choice,
@@ -63,6 +65,9 @@ class CampaignStatusKind(StatusKind):
     def update_body(self, status):
         return CampaignUpdate(status=CampaignStatus(status))
 
+    def enable_bound(self, ctx, campaign_id):
+        return campaign_enable_bound(ctx.campaign(campaign_id))
+
     def propose(
         self,
         ctx,
@@ -82,7 +87,11 @@ class CampaignStatusKind(StatusKind):
         spend, taps, impressions, installs, metrics_error = ctx.metrics_7d(
             "apps_campaign_reports", "campaignId", campaign_id
         )
-        projected = project_pause(spend) if target == "PAUSED" else Decimal("0")
+        bound_checks = []
+        if target == "PAUSED":
+            projected = project_pause(spend)
+        else:
+            projected, bound_checks = bound_check(*campaign_enable_bound(campaign))
         entity_serving = enum_value(campaign.display_status)
         warnings = serving_warning(entity_serving, "campaign") + metrics_warning(metrics_error)
         warnings.append("This stops or starts EVERY ad group and keyword in the campaign.")
@@ -104,8 +113,10 @@ class CampaignStatusKind(StatusKind):
             checks=[
                 check_campaign_in_scope(ctx.limits, campaign_id),
                 check_known_status("campaign_status_known", before),
+                *bound_checks,
             ],
             projected=projected,
+            is_enable=target == "ENABLED",
             warnings=warnings,
             note=(
                 "Reversible by re-enabling, but a paused campaign loses delivery "

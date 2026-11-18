@@ -156,6 +156,32 @@ def load_limits() -> Limits:
     )
 
 
+def limit_warnings(limits: Limits) -> list[str]:
+    """Combinations of limits that make some legitimate change impossible.
+
+    Checked at startup WITHOUT calling Apple (a server must start offline), so
+    it compares against max_daily_budget -- the largest budget this server could
+    have set -- rather than against each serving campaign. A campaign whose
+    budget exceeds the daily total can never be re-enabled from here, and its
+    campaign_status preview says so with both figures.
+    """
+    warnings = []
+    if limits.max_projected_delta_per_day_total < limits.max_daily_budget:
+        warnings.append(
+            f"max_projected_delta_per_day_total ({limits.max_projected_delta_per_day_total}) "
+            f"is below max_daily_budget ({limits.max_daily_budget}): re-enabling a "
+            f"campaign projects its whole daily budget against the daily total, so a "
+            f"campaign budgeted above the total could never be re-enabled from here."
+        )
+    if limits.max_projected_session_delta < limits.max_daily_budget:
+        warnings.append(
+            f"max_projected_session_delta ({limits.max_projected_session_delta}) is "
+            f"below max_daily_budget ({limits.max_daily_budget}): the same applies to "
+            f"the session total."
+        )
+    return warnings
+
+
 # --- read-only mode ----------------------------------------------------------
 
 READ_ONLY_ENV = "APPLE_ADS_READ_ONLY"
@@ -509,7 +535,24 @@ def check_count(limits: Limits, count: int) -> Check:
     )
 
 
-def check_projected_delta(limits: Limits, projected: Decimal) -> Check:
+def check_projected_delta(limits: Limits, projected: Decimal, kind: str = "change") -> Check:
+    """The PER-CHANGE spend bound. `kind` is "change" or "enable".
+
+    An ENABLE -- resuming a paused campaign, ad group, keyword or ad, or pausing
+    a negative keyword -- projects the whole spend it can resume, which on any
+    real campaign is over this per-change limit: a 100/day campaign could never
+    be re-enabled under a 50 limit. So an enable is exempt from this line (shown
+    as SKIP, not OK, so nobody mistakes it for having passed) and counted in full
+    against the DAILY total and the session total instead. Bid and budget
+    increases are not enables and must pass both.
+    """
+    if kind == "enable":
+        return Check(
+            "projected_daily_delta",
+            True,
+            "enable: counted against the daily total",
+            skipped=True,
+        )
     passed = projected <= limits.max_projected_delta_per_day
     return Check(
         "projected_daily_delta",

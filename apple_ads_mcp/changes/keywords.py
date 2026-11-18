@@ -34,6 +34,7 @@ from apple_ads_mcp.changes.common import (
     SETTABLE_STATUSES,
     StatusKind,
     bid_strategy_type,
+    bound_check,
     child_preview,
     existing_negatives,
     metrics_block,
@@ -362,13 +363,18 @@ class KeywordStatusKind(StatusKind):
         spend, taps, impressions, installs, metrics_error = ctx.metrics_7d(
             "apps_keyword_reports", "keywordId", keyword_id, keyword.campaign_id
         )
-        projected = project_pause(spend) if target == "PAUSED" else Decimal("0")
+        bound_checks = []
+        if target == "PAUSED":
+            projected = project_pause(spend)
+        else:
+            projected, bound_checks = bound_check(*self.enable_bound(ctx, keyword.campaign_id))
         entity_serving = enum_value(keyword.display_status)
         warnings = serving_warning(entity_serving, "keyword") + metrics_warning(metrics_error)
         if target == "ENABLED":
             warnings.append(
-                "Enabling a keyword RESUMES spend on it. The projection shows 0 "
-                "because past spend while paused is not a guide to future spend."
+                "Enabling a keyword RESUMES spend on it. The projection is the "
+                "campaign's unused daily budget -- the most it could add -- not a "
+                "forecast."
             )
         path = entity_path(campaign, ad_group, keyword.text)
         return Proposal(
@@ -388,8 +394,10 @@ class KeywordStatusKind(StatusKind):
             checks=[
                 check_campaign_in_scope(ctx.limits, keyword.campaign_id),
                 check_known_status("keyword_status_known", before),
+                *bound_checks,
             ],
             projected=projected,
+            is_enable=target == "ENABLED",
             warnings=warnings,
             note="Reversible: apply the opposite status to undo, or use revert_change.",
             entity_type="keyword",
@@ -420,6 +428,15 @@ class NegativeKeywordStatusKind(StatusKind):
     def update_body(self, status):
         return NegativeKeywordUpdate(status=NegativeKeywordStatus(status))
 
+    def revert_projection(self, ctx, entry, item):
+        # Inverted: it is PAUSING a negative that lets traffic back in.
+        if item["after"] != "PAUSED":
+            return Decimal("0"), False
+        bound, reason = self.enable_bound(ctx, item.get("campaign_id"))
+        if bound is None:
+            raise ValueError(f"cannot revert: {reason}.")
+        return bound, True
+
     def propose(
         self,
         ctx,
@@ -445,12 +462,15 @@ class NegativeKeywordStatusKind(StatusKind):
         path = entity_path(campaign, ad_group, negative.text, keyword_label="NegativeKeyword")
         entity_serving = enum_value(getattr(campaign, "display_status", None))
         warnings = serving_warning(entity_serving, "campaign")
+        bound_checks = []
+        projected = Decimal("0")
         if target == "PAUSED":
             warnings.append(
                 "Pausing a NEGATIVE keyword stops excluding this term, so traffic "
-                "and spend can go UP, not down."
+                "and spend can go UP, not down. The projection is the campaign's "
+                "unused daily budget -- the most the re-admitted traffic could add."
             )
-        projected = Decimal("0")
+            projected, bound_checks = bound_check(*self.enable_bound(ctx, negative.campaign_id))
         return Proposal(
             items=[
                 make_item(
@@ -468,8 +488,10 @@ class NegativeKeywordStatusKind(StatusKind):
             checks=[
                 check_campaign_in_scope(ctx.limits, negative.campaign_id),
                 check_known_status("negative_keyword_status_known", before),
+                *bound_checks,
             ],
             projected=projected,
+            is_enable=target == "PAUSED",
             warnings=warnings,
             note=(
                 "Pausing is the supported way to undo a negative keyword. Deletion "

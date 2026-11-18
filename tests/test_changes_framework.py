@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
+from decimal import Decimal
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
@@ -162,7 +163,10 @@ def test_negative_adds_record_the_created_ids_and_revert_by_pausing() -> None:
 
 
 def test_status_pairs_round_trip() -> None:
-    tools, apple, _ = rig(max_projected_delta_per_day=__import__("decimal").Decimal("1000"))
+    # Each revert re-enables, which counts its whole bound against the session
+    # and the day -- so give this round trip room for four of them.
+    big = Decimal("1000")
+    tools, apple, _ = rig(max_projected_session_delta=big, max_projected_delta_per_day_total=big)
     cases = [
         ("keyword_status", {"keyword_id": KEYWORD}, lambda: apple.keywords[KEYWORD].status),
         ("ad_group_status", {"ad_group_id": AD_GROUP}, lambda: apple.ad_groups[AD_GROUP].status),

@@ -37,7 +37,12 @@ if str(_REPO_ROOT) not in sys.path:
 from mcp.server.mcpserver import MCPServer  # noqa: E402
 
 from apple_ads_mcp import __version__, logdb, tools_read, tools_write  # noqa: E402
-from apple_ads_mcp.guardrails import Limits, SessionCounters, load_limits  # noqa: E402
+from apple_ads_mcp.guardrails import (  # noqa: E402
+    Limits,
+    SessionCounters,
+    limit_warnings,
+    load_limits,
+)
 from apple_ads_mcp.previews import PreviewStore  # noqa: E402
 
 SERVER_NAME = "apple-ads"
@@ -106,6 +111,9 @@ class ServerState:
 
 def build_state() -> ServerState:
     limits = load_limits()
+    # stderr is the MCP client's log, never the protocol stream (stdout).
+    for warning in limit_warnings(limits):
+        print(f"apple-ads: guardrails warning: {warning}", file=sys.stderr)
     return ServerState(
         limits=limits,
         counters=SessionCounters(limits),
