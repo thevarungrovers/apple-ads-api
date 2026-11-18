@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, TypeVar
 
@@ -107,10 +108,84 @@ def _build():
 
 
 def reset_api() -> None:
-    """Drop the cached client so the next call rebuilds it (and re-authenticates)."""
+    """Drop the cached client so the next call rebuilds it (and re-authenticates).
+
+    The old client's TokenManager is CLOSED first. It runs a background
+    `threading.Timer` that refreshes the token ahead of expiry, and dropping the
+    client without closing it left that timer alive for the life of the process
+    -- one leaked refresher per 401/403 rebuild, each still fetching tokens.
+    """
     global _api
     with _api_lock:
-        _api = None
+        old, _api = _api, None
+    _close_token_provider(old)
+
+
+def _close_token_provider(api: Any) -> None:
+    """`api.api_client._access_token_provider.close()`, if that path exists.
+
+    The attribute path is the SDK's private layout (AuthenticatedApiClient
+    keeps the provider it was built with); apple_ads_cli.py reads the same
+    attribute to get a token. A provider with no close() -- a fixed token --
+    has nothing to stop.
+    """
+    provider = getattr(getattr(api, "api_client", None), "_access_token_provider", None)
+    close = getattr(provider, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:  # noqa: BLE001 - a failed close must not mask the retry
+            pass
+
+
+# --- retries ------------------------------------------------------------------
+
+#: Attempts for a READ, including the first. Writes are never retried.
+READ_ATTEMPTS = 3
+#: Seconds before the 2nd and 3rd attempt, unless Apple's Retry-After says more.
+BACKOFF = (1.0, 2.0)
+#: Never wait longer than this on one Retry-After, whatever Apple asks.
+MAX_RETRY_AFTER = 30.0
+_RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+# Replaced by tests, so a backoff costs no wall-clock time.
+_sleep = time.sleep
+
+_READ_SUFFIXES = ("_query_post", "_get", "_reports", "_query")
+_READ_PREFIXES = ("get_", "query_", "search_")
+
+
+def is_read(method_name: str) -> bool:
+    """True for a method that cannot change the account, so a retry is safe.
+
+    Writes are NEVER retried: a create is not idempotent (a retried negative
+    keyword add makes two), and a write that timed out may well have landed --
+    its open ledger intent is what reconcile_ledger looks for. Retrying it
+    would turn "maybe landed once" into "maybe landed twice".
+    """
+    name = method_name.removesuffix("_without_preload_content")
+    return name.endswith(_READ_SUFFIXES) or name.startswith(_READ_PREFIXES)
+
+
+def _retry_after(exc: Any) -> float | None:
+    headers = getattr(exc, "headers", None) or {}
+    try:
+        raw = headers.get("Retry-After") or headers.get("retry-after")
+    except AttributeError:
+        return None
+    try:
+        return min(float(raw), MAX_RETRY_AFTER) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _transient(exc: BaseException) -> bool:
+    """A 429/5xx, or a network timeout or reset -- worth one more try for a read."""
+    if isinstance(exc, ApiException):
+        return getattr(exc, "status", None) in _RETRYABLE_STATUSES
+    import urllib3
+
+    return isinstance(exc, (urllib3.exceptions.HTTPError, TimeoutError, ConnectionError))
 
 
 def call(method_name: str, /, **kwargs: Any) -> Any:
@@ -130,7 +205,7 @@ def call(method_name: str, /, **kwargs: Any) -> Any:
     and a log that hid it would understate what the account actually saw.
     """
     try:
-        return _invoke(method_name, kwargs)
+        return _invoke_with_retries(method_name, kwargs)
     except ApiException as exc:
         if exc.status in (401, 403):
             # Could be an expired/revoked token, could be the context header. One
@@ -153,6 +228,22 @@ def call(method_name: str, /, **kwargs: Any) -> Any:
         raise ToolError(
             f"TRANSIENT: {method_name} failed to reach Apple: {type(exc).__name__}: {exc}"
         ) from exc
+
+
+def _invoke_with_retries(method_name: str, kwargs: dict[str, Any]) -> Any:
+    """`_invoke`, retried with backoff on 429/5xx/timeouts -- for READS only."""
+    attempts = READ_ATTEMPTS if is_read(method_name) else 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return _invoke(method_name, kwargs)
+        except Exception as exc:  # noqa: BLE001 - re-raised unless retryable
+            if attempt >= attempts or not _transient(exc):
+                raise
+            delay = _retry_after(exc)
+            if delay is None:
+                delay = BACKOFF[min(attempt - 1, len(BACKOFF) - 1)]
+            _sleep(delay)
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def _invoke(method_name: str, kwargs: dict[str, Any]) -> Any:

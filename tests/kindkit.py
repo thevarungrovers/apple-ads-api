@@ -43,6 +43,9 @@ APP = "1234567890"
 
 _TEMP_DIRS: list[tempfile.TemporaryDirectory] = []
 
+#: The real `client.call`, captured before any test replaces it with a fake.
+REAL_CALL = client.call
+
 
 def no_live_client() -> None:
     """Make building a real API client impossible for the rest of the process."""
