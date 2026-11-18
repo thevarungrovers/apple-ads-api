@@ -141,9 +141,15 @@ NAMED_COLLECTIONS = {
 
 def named_entity(method: str, path: str) -> str | None:
     """The entity type when this request creates (POST to the collection) or
-    updates (PUT to `<collection>/<id>`) a named entity; None otherwise."""
+    updates (PUT to `<collection>/<id>`) a named entity; None otherwise.
+
+    Classified on the URL's PATH: `campaigns?`, `campaigns#` and
+    `campaigns/123?x` still reach the collection at Apple, so they are named
+    too (and stamp_body refuses them).
+    """
     method = (method or "").strip().upper()
-    parts = [p.lower() for p in path.strip("/").split("/") if p]
+    split_path = urllib.parse.urlsplit(path or "").path
+    parts = [p.lower() for p in split_path.strip("/").split("/") if p]
     if method == "POST" and parts and parts[-1] in NAMED_COLLECTIONS:
         return NAMED_COLLECTIONS[parts[-1]]
     if method == "PUT" and len(parts) >= 2 and parts[-2] in NAMED_COLLECTIONS and parts[-1].isdigit():
@@ -163,6 +169,12 @@ def stamp_body(method: str, path: str, body: dict | None, identity: Identity):
     touched; every other request is sent exactly as given.
     """
     entity_type = named_entity(method, path)
+    if entity_type is not None and ("?" in path or "#" in path):
+        raise CliError(
+            f"{method.upper()} {path!r} creates or updates a {entity_type.replace('_', ' ')} "
+            f"but carries a '?' or '#'. Refused: send the plain path, so the name is "
+            f"stamped and the request is the one you see."
+        )
     if entity_type is None or not isinstance(body, dict) or not isinstance(body.get("name"), str):
         return body, None
     try:

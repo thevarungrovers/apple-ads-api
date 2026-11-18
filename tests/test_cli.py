@@ -184,7 +184,9 @@ def test_a_bypass_post_without_apply_sends_nothing() -> None:
     for path in BYPASS_PATHS[:5]:
         sent: list = []
         _wire(sent, tty=False, typed="")
-        assert cli._run(_args(method="POST", path=path, data="{}", apply=False)) == 0
+        # A dry run -- or, for one that would create a named entity, a refusal.
+        expected = 1 if cli.named_entity("POST", path) else 0
+        assert cli._run(_args(method="POST", path=path, data="{}", apply=False)) == expected, path
         assert sent == [], path
 
 
@@ -266,6 +268,27 @@ def test_a_request_that_names_no_entity_is_untouched() -> None:
         body = {"name": "Launch"}
         assert cli.stamp_body(method, path, body, identity) == (body, None), (method, path)
     assert cli.stamp_body("POST", "campaigns", {"status": "PAUSED"}, identity)[1] is None
+
+
+def test_a_named_mutation_hiding_behind_a_query_or_fragment_is_refused() -> None:
+    """`campaigns?` still creates a campaign at Apple; it must not skip the stamp."""
+    _as("AB", "max")
+    identity = cli.cli_identity()
+    for method, path in (("POST", "campaigns?"), ("POST", "campaigns#"),
+                         ("POST", "campaigns/1/adgroups?x=1"), ("PUT", "campaigns/123?x"),
+                         ("PUT", "ads/42#frag")):
+        assert cli.named_entity(method, path) is not None, (method, path)
+        try:
+            cli.stamp_body(method, path, {"name": "Launch"}, identity)
+        except cli.CliError as exc:
+            assert "?" in str(exc) and "Nothing" not in str(exc), exc
+        else:
+            raise AssertionError(f"{method} {path} should be refused")
+    sent: list = []
+    _wire(sent, tty=True, typed="campaigns?")
+    _as("AB", "max")
+    assert cli._run(_args(method="POST", path="campaigns?", data='{"name": "Launch"}')) == 1
+    assert sent == [] and ledger.entries() == []
 
 
 def test_the_installer_denies_the_cli_apply_to_the_agent() -> None:
