@@ -113,6 +113,7 @@ PREVIEW_TOOLS = frozenset(
         "preview_create_ad_group",
         "preview_budget_recommendation",
         "preview_target_cpa_recommendation",
+        "preview_low_risk_change",
     }
 )
 
@@ -149,6 +150,7 @@ APPLY_TOOLS = frozenset(
         "apply_create_ad_group",
         "apply_budget_recommendation",
         "apply_target_cpa_recommendation",
+        "apply_low_risk_change",
     }
 )
 
@@ -181,7 +183,6 @@ FORBIDDEN_METHODS = (
     "campaigns_id_delete",
     "adgroups_id_delete",
     "ads_id_delete",
-    "creatives_id_put",
     "creatives_id_delete",
     "keywords_post",
     "keywords_id_delete",

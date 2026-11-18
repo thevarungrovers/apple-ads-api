@@ -17,6 +17,7 @@ def all_kinds() -> list:
         CampaignSchedule,
     )
     from apple_ads_mcp.changes.campaigns import CampaignDailyBudget, CampaignStatusKind
+    from apple_ads_mcp.changes.low_risk import LowRiskChange
     from apple_ads_mcp.changes.recommendations import BudgetRecommendation, TargetCpaRecommendation
     from apple_ads_mcp.changes.targeting import (
         AdGroupAppDownloaders,
@@ -76,4 +77,6 @@ def all_kinds() -> list:
         # 3f: recommendations, through the typed kind each amounts to
         BudgetRecommendation(),
         TargetCpaRecommendation(),
+        # Phase 4: the one general tool, on a closed allowlist
+        LowRiskChange(),
     ]
