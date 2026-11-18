@@ -346,12 +346,26 @@ def _run(args: argparse.Namespace) -> int:
         raise
 
     if entry_id:
+        # A 5xx is Apple failing, not Apple refusing: the write may have been
+        # applied before the error, exactly like a timeout. UNKNOWN, as the MCP
+        # path records a TRANSIENT error, so the daily cap keeps counting it.
+        if status >= 500:
+            outcome, detail = ledger.UNKNOWN, f"HTTP {status}: outcome unknown, may have landed"
+        else:
+            outcome, detail = (ledger.APPLIED if status < 400 else ledger.FAILED), f"HTTP {status}"
         ledger.write_outcome(
             entry_id,
-            outcome=ledger.APPLIED if status < 400 else ledger.FAILED,
+            outcome=outcome,
             observed_after=payload[:2000],
-            detail=f"HTTP {status}",
+            detail=detail,
         )
+        if status >= 500:
+            print(
+                f"error: Apple answered HTTP {status}. The write MAY HAVE LANDED; check "
+                f"the account (reconcile_ledger, or the Apple Ads UI) before running it "
+                f"again.",
+                file=sys.stderr,
+            )
 
     if mutation:
         print(f"# {args.method.upper()} {args.path} on ad account {account} -> HTTP {status}",
