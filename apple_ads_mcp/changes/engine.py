@@ -143,7 +143,35 @@ class Engine:
         role = self.role_check()
         if role is not None:
             checks.append(role)
+        checks += self.naming_checks(ctx, kind, proposal)
         return checks
+
+    @staticmethod
+    def naming_checks(ctx, kind: ChangeKind, proposal: Proposal) -> list[Check]:
+        """The backstop: a creating kind must have stamped every name it sends.
+
+        Only when a prefix is configured -- with no identity in .env a name is
+        used exactly as given, so there is nothing to have forgotten.
+        """
+        if not kind.creates_named:
+            return []
+        prefix = ctx.identity.prefix
+        if not proposal.created_names:
+            return [Check(
+                "name_prefix", False,
+                f"{kind.name} creates named entities but reported no name -- a bug in "
+                f"the kind, refused rather than sent unchecked",
+            )]
+        if not prefix:
+            return []
+        missing = [name for _type, name in proposal.created_names if not name.startswith(prefix)]
+        if missing:
+            return [Check(
+                "name_prefix", False,
+                f"{', '.join(repr(n) for n in missing)} does not start with {prefix!r} -- "
+                f"the kind did not stamp it; refused rather than created unprefixed",
+            )]
+        return []
 
     @staticmethod
     def role_check():
@@ -244,6 +272,7 @@ class Engine:
             blocked=blocked,
             warnings=warnings,
             note=proposal.note,
+            naming=proposal.naming,
         )
 
     def extra_warnings(self, ctx, kind: ChangeKind, proposal: Proposal) -> list[str]:

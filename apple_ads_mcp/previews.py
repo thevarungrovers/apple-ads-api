@@ -100,6 +100,12 @@ class ChangePreview(BaseModel):
         default="",
         description="What the numbers mean and what approving this does",
     )
+    naming: dict[str, Any] | None = Field(
+        default=None,
+        description="For a creation or rename: the requested name, the EXACT final "
+        "name that will be sent, the prefix, the base, length / max_length, and "
+        "the rule that produced it",
+    )
 
 
 class BulkChangePreview(BaseModel):

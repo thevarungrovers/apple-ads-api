@@ -63,6 +63,37 @@ class ChangeContext:
         identity = getattr(self.state, "identity", None)
         return identity if identity is not None else Identity.load()
 
+    def name_for_create(self, entity_type: str, requested: str | None):
+        """The exact name a creation sends (naming.stamp), or a ToolError.
+
+        Returns the Stamped result: ``.final`` goes into the item, the request
+        and the preview; ``.checks()`` into the proposal's checks.
+        """
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        from apple_ads_mcp import naming
+
+        try:
+            return naming.stamp(self.identity, requested, entity_type=entity_type)
+        except naming.NameRefused as exc:
+            raise ToolError(str(exc)) from exc
+
+    def name_for_rename(self, entity_type: str, entity_id: Any, current: str | None,
+                        requested: str | None):
+        """The exact name a rename sends (naming.rename): only the agent's own
+        entities -- its prefix, or a ledger row showing this server created it."""
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        from apple_ads_mcp import ledger, naming
+
+        try:
+            return naming.rename(
+                self.identity, current, requested, entity_type=entity_type,
+                ledger_owned=ledger.created_by_us(entity_type, entity_id),
+            )
+        except naming.NameRefused as exc:
+            raise ToolError(str(exc)) from exc
+
     @property
     def daily(self):
         """Today's usage, read from the ledger on every use -- never cached."""

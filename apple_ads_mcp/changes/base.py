@@ -164,6 +164,14 @@ class Proposal:
     #: Per-item previews for a bulk kind, shown under the batch token.
     children: list[ChangePreview] = field(default_factory=list)
 
+    # -- naming (apple_ads_mcp/naming.py) -----------------------------------------
+    #: (entity_type, final name) for everything this proposal would CREATE with a
+    #: name. The engine fails the preview (`name_prefix`) when one lacks the
+    #: configured prefix -- the backstop for a kind that forgot to stamp.
+    created_names: list[tuple[str, str]] = field(default_factory=list)
+    #: The preview's `naming` block (naming.Stamped.block()).
+    naming: dict[str, Any] | None = None
+
 
 class ChangeKind:
     """One sort of change. Subclass, fill in the methods, register it.
@@ -188,6 +196,10 @@ class ChangeKind:
     #: (entity_type, field) pairs this kind writes to the ledger -- how
     #: revert_change finds the kind that can undo an entry.
     ledger_keys: tuple[tuple[str, str], ...] = ()
+    #: Entity types this kind CREATES with a name. Such a kind must stamp each
+    #: name through ctx.name_for_create and report it in Proposal.created_names;
+    #: tests/test_tool_surface.py runs every creating kind and checks both.
+    creates_named: tuple[str, ...] = ()
     #: Why an entry of this kind cannot be undone, or None if it can.
     not_revertible: str | None = None
     #: True when this kind's revert_projection is a CAMPAIGN's bound (its unused

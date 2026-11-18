@@ -269,6 +269,18 @@ class Stamped:
             "rule": RULES.get(self.rule, self.rule),
         }
 
+    def checks(self) -> list[Any]:
+        """The guardrail lines a preview carries: a FAIL per failure, else one OK."""
+        from apple_ads_mcp.guardrails import Check
+
+        if self.failures:
+            return [Check(name, False, detail) for name, detail in self.failures]
+        return [Check("name", True, f"{self.final!r} ({len(self.final)}/{self.max_length} characters)")]
+
+    def item_fields(self, identity: "Identity") -> dict[str, Any]:
+        """What the ledger row keeps: who it was named for, and what was asked."""
+        return {"identity": identity.ledger_record(), "requested_name": self.requested}
+
     def warning(self) -> str | None:
         if self.final == self.requested:
             return None

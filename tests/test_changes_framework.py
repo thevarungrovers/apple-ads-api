@@ -507,6 +507,46 @@ def test_resolving_an_unknown_write_that_never_landed_records_it_failed() -> Non
     assert apple.writes() == ["keywords_id_put"]
 
 
+def _unstamped_kind(name: str, created: list):
+    """A creating kind that forgets to stamp: the engine backstop must catch it."""
+    from decimal import Decimal
+
+    from apple_ads_mcp.changes.base import CREATED, NOTHING, ChangeKind, Proposal, item
+
+    class Forgetful(ChangeKind):
+        creates_named = ("campaign",)
+
+        def propose(self, ctx):
+            return Proposal(
+                items=[item(entity_type="campaign", entity_id=None, entity_name="plain", path="-",
+                            field=CREATED, before=NOTHING, after="PAUSED", campaign_id=None)],
+                checks=[], projected=Decimal("0"), created_names=created,
+                entity_type="campaign", entity_id="(new)", entity_name="plain",
+            )
+
+    Forgetful.name = name
+    return Forgetful()
+
+
+def test_the_engine_refuses_a_creation_whose_name_was_not_stamped() -> None:
+    from apple_ads_mcp import tools_write
+    from apple_ads_mcp.naming import Identity
+
+    rig()
+    engine = tools_write.ENGINE
+    plain = engine.preview(engine.add(_unstamped_kind("forgetful", [("campaign", "plain")])), {})
+    assert plain.blocked and failed(plain, "name_prefix"), plain.guardrail_checks
+    silent = engine.preview(engine.add(_unstamped_kind("silent", [])), {})
+    assert silent.blocked and failed(silent, "name_prefix"), silent.guardrail_checks
+    stamped = engine.preview(engine.add(_unstamped_kind("stamped", [("campaign", "AB-max-plain")])), {})
+    assert not failed(stamped, "name_prefix"), stamped.guardrail_checks
+    # With no identity in .env a name is used as given: nothing to backstop.
+    rig(identity=Identity())
+    engine = tools_write.ENGINE
+    bare = engine.preview(engine.add(_unstamped_kind("bare", [("campaign", "plain")])), {})
+    assert not failed(bare, "name_prefix"), bare.guardrail_checks
+
+
 def _three_bid_batch(tools, apple):
     for n in (1, 2):
         apple.keywords[KEYWORD + n] = apple.keywords[KEYWORD].model_copy(

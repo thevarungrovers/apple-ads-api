@@ -595,6 +595,18 @@ def complete_change(
     )
 
 
+def created_by_us(entity_type: str, entity_id: Any) -> bool:
+    """True when this checkout's ledger shows a creation of that entity landed."""
+    if entity_id in (None, ""):
+        return False
+    row = connect().execute(
+        "SELECT 1 FROM changes WHERE entity_type=? AND field='created' AND entity_id=? "
+        "AND outcome IN (?, ?) LIMIT 1",
+        (entity_type, str(entity_id), APPLIED, PARTIAL),
+    ).fetchone()
+    return row is not None
+
+
 def set_projected_delta(entry_id: str, projected_daily_spend_delta: str) -> None:
     """Re-attribute one finished row's projected spend, leaving its outcome alone.
 
