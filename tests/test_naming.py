@@ -174,5 +174,27 @@ def test_the_process_env_is_ignored_and_a_mismatch_is_reported() -> None:
             naming.ENV_FILES = saved
 
 
+def test_the_server_state_reads_the_identity_and_warns_on_a_process_env_mismatch() -> None:
+    import contextlib
+    import io
+    import os
+
+    from apple_ads_mcp.server import build_state
+
+    stderr = io.StringIO()
+    saved = os.environ.get(naming.AGENT_KEY)
+    os.environ[naming.AGENT_KEY] = "bot"
+    try:
+        with contextlib.redirect_stderr(stderr):
+            state = build_state()
+    finally:
+        if saved is None:
+            os.environ.pop(naming.AGENT_KEY, None)
+        else:
+            os.environ[naming.AGENT_KEY] = saved
+    assert state.identity.prefix == "AB-max-", "the process env must not win"
+    assert naming.AGENT_KEY in stderr.getvalue() and "ignored" in stderr.getvalue()
+
+
 if __name__ == "__main__":
     raise SystemExit(run(dict(globals())))

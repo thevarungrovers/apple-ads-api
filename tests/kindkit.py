@@ -29,7 +29,7 @@ for path in (REPO_ROOT, REPO_ROOT / "tests"):
 
 import apple_ads_platform as sdk  # noqa: E402
 
-from apple_ads_mcp import client, logdb, tools_write  # noqa: E402
+from apple_ads_mcp import client, logdb, naming, tools_write  # noqa: E402
 from apple_ads_mcp.guardrails import Limits, SessionCounters  # noqa: E402
 from apple_ads_mcp.previews import PreviewStore  # noqa: E402
 
@@ -42,6 +42,22 @@ CREATIVE = 6666
 APP = "1234567890"
 
 _TEMP_DIRS: list[tempfile.TemporaryDirectory] = []
+
+#: The placeholder identity every rig names creations after, unless a test asks
+#: for another. Never a real value: this repository is public.
+AB_MAX = naming.Identity.from_values("AB", "max", ".env")
+
+
+def placeholder_env() -> None:
+    """Point the naming identity at a throwaway .env, never the operator's real one."""
+    tmp = tempfile.TemporaryDirectory()
+    _TEMP_DIRS.append(tmp)
+    path = pathlib.Path(tmp.name) / ".env"
+    path.write_text("APPLE_ADS_OWNER_INITIALS=AB\nAPPLE_ADS_AGENT_NAME=max\n")
+    naming.ENV_FILES = [path]
+
+
+placeholder_env()
 
 #: The real `client.call`, captured before any test replaces it with a fake.
 REAL_CALL = client.call
@@ -405,8 +421,11 @@ def limits(**over) -> Limits:
     return Limits(**base)
 
 
-def rig(**limit_overrides):
-    """(tools, apple, state): every write tool wired to a fresh FakeApple and DB."""
+def rig(identity: naming.Identity | None = AB_MAX, **limit_overrides):
+    """(tools, apple, state): every write tool wired to a fresh FakeApple and DB.
+
+    ``identity`` is what creations are named after (``AB-max-`` by default).
+    """
     no_live_client()
     temp_db()
     apple = FakeApple()
@@ -414,7 +433,8 @@ def rig(**limit_overrides):
     tools_write.call = apple
     tools_write.writes_disabled = lambda: None
     lim = limits(**limit_overrides)
-    state = SimpleNamespace(limits=lim, counters=SessionCounters(lim), previews=PreviewStore())
+    state = SimpleNamespace(limits=lim, counters=SessionCounters(lim), previews=PreviewStore(),
+                            identity=identity if identity is not None else naming.Identity())
     registrar = Registrar()
     tools_write.register(registrar, state)
     return registrar.tools, apple, state

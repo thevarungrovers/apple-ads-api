@@ -44,6 +44,7 @@ from apple_ads_mcp.guardrails import (  # noqa: E402
     load_limits,
 )
 from apple_ads_mcp.previews import PreviewStore  # noqa: E402
+from apple_ads_mcp.naming import Identity, process_env_warnings  # noqa: E402
 
 SERVER_NAME = "apple-ads"
 
@@ -143,6 +144,9 @@ class ServerState:
     limits: Limits
     counters: SessionCounters
     previews: PreviewStore
+    #: Who this checkout's creations are named after (apple_ads_mcp/naming.py),
+    #: read once from .env. Never from a tool argument or the process env.
+    identity: Identity = Identity()
 
 
 def build_state() -> ServerState:
@@ -150,10 +154,16 @@ def build_state() -> ServerState:
     # stderr is the MCP client's log, never the protocol stream (stdout).
     for warning in limit_warnings(limits):
         print(f"apple-ads: guardrails warning: {warning}", file=sys.stderr)
+    identity = Identity.load()
+    for problem in identity.problems:
+        print(f"apple-ads: naming error: {problem}", file=sys.stderr)
+    for warning in process_env_warnings(identity):
+        print(f"apple-ads: naming warning: {warning}", file=sys.stderr)
     return ServerState(
         limits=limits,
         counters=SessionCounters(limits),
         previews=PreviewStore(),
+        identity=identity,
     )
 
 

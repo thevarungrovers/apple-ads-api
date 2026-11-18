@@ -56,6 +56,14 @@ class ChangeContext:
         return self.state.previews
 
     @property
+    def identity(self):
+        """Who creations are named after: the state's, read once from .env."""
+        from apple_ads_mcp.naming import Identity
+
+        identity = getattr(self.state, "identity", None)
+        return identity if identity is not None else Identity.load()
+
+    @property
     def daily(self):
         """Today's usage, read from the ledger on every use -- never cached."""
         from apple_ads_mcp.guardrails import DailyUsage
