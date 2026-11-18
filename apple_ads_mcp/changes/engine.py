@@ -951,10 +951,28 @@ class Engine:
                 # counted) rather than being left as open intents; send() has
                 # recorded the one that failed.
                 done = len(outcomes)
+                failing = ledger.find_entry(entry_ids[done]) or {}
+                unknown = failing.get("outcome") == ledger.UNKNOWN
+                # An UNKNOWN item may have landed, so it takes part in placing
+                # the campaign bound: when the bound sat on an earlier item of
+                # its campaign that did NOT land, it moves onto this one.
+                judged = outcomes + (
+                    [Outcome(landed=False, observed=None, unknown=True)] if unknown else []
+                )
+                recorded = self.revert_recorded(items[:len(judged)], judged)
                 landed = self.record_outcomes(
                     items[:done], entry_ids[:done], outcomes,
-                    self.revert_recorded(items[:done], outcomes),
+                    None if recorded is None else recorded[:done],
                 )
+                extra = Decimal("0")
+                if unknown and recorded is not None:
+                    # send() charged (and the intent recorded) the item's own
+                    # projection; charge what the bound now puts on it instead.
+                    value = recorded[done]
+                    already = max(Decimal(str(items[done].get("projected") or "0")), Decimal("0"))
+                    if value > already:
+                        ledger.write_projected(str(entry_ids[done]), str(value))
+                        extra = value - already
                 # The rest never left the process: say so, rather than leave
                 # their intents without an outcome forever.
                 for later in entry_ids[done + 1:]:
@@ -963,12 +981,11 @@ class Engine:
                         outcome=ledger.FAILED,
                         detail=f"not sent: batch stopped at item {done + 1} of {len(items)}",
                     )
-                if any(o.counted for o in outcomes):
-                    # Charge the items that landed. An UNKNOWN failure has
-                    # already charged this revert's one apply in send().
-                    failing = ledger.find_entry(entry_ids[done]) or {}
-                    charged = failing.get("outcome") == ledger.UNKNOWN
-                    ctx.counters.record(landed, 0 if charged else 1)
+                if any(o.counted for o in outcomes) or extra:
+                    # Charge the items that landed (and any bound moved onto
+                    # the unknown one). An UNKNOWN failure has already charged
+                    # this revert's one apply in send().
+                    ctx.counters.record(landed + extra, 0 if unknown else 1)
                 raise
         landed_total = self.record_outcomes(
             items, entry_ids, outcomes, self.revert_recorded(items, outcomes)

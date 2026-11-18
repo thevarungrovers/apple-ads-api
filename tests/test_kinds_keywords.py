@@ -212,6 +212,50 @@ def test_a_batch_revert_counts_each_campaigns_bound_once() -> None:
     assert state.counters.snapshot()["projected_session_delta"] == "90.00"
 
 
+def test_an_unknown_second_item_of_a_batch_revert_carries_the_campaign_bound() -> None:
+    """The bound sat on the first item, which Apple refused; the second timed out
+    and may have landed. The campaign's traffic may be back: charge its bound."""
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    from apple_ads_mcp.guardrails import DailyUsage
+
+    tools, apple, state = rig(max_projected_delta_per_day_total=Decimal("500"),
+                              max_projected_session_delta=Decimal("500"))
+    for negative_id in (NEGATIVE, NEGATIVE + 1):
+        source = apple.negatives[NEGATIVE]
+        apple.negatives[negative_id] = source.model_copy(
+            update={"id": negative_id, "text": f"term {negative_id}",
+                    "status": sdk.NegativeKeywordStatus("PAUSED")})
+    preview = tools["preview_negative_keyword_status"](
+        negative_keyword_ids=[NEGATIVE, NEGATIVE + 1], status="ENABLED"
+    )
+    result = tools["apply_negative_keyword_status"](preview_token=preview.preview_token)
+    assert result.succeeded == 2
+    assert DailyUsage(state.limits).usage()[1] == Decimal("0")
+    calls = {"n": 0}
+
+    def first_ignored_then_timeout(id, **_):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise ToolError("TRANSIENT: negative_keywords_id_put: read timed out")
+        # Apple answers 200 but echoes the old status: the first did not land.
+        return apple._negative_keywords_id_get(id=id)
+
+    apple._negative_keywords_id_put = first_ignored_then_timeout
+    try:
+        tools["revert_change"](entry_id=result.entry_id)
+    except ToolError as exc:
+        assert "OUTCOME UNKNOWN" in str(exc), exc
+    else:
+        raise AssertionError("the timed-out revert should raise")
+    rows = {r["reverts_entry_id"]: r for r in ledger.entries() if r["tool"] == "revert_change"}
+    first, second = (rows[e] for e in result.entry_ids)
+    assert (first["outcome"], second["outcome"]) == (ledger.FAILED, ledger.UNKNOWN), (first, second)
+    assert Decimal(second["projected_daily_spend_delta"]) == Decimal("90.00"), second
+    assert DailyUsage(state.limits).usage()[1] == Decimal("90.00")
+    assert Decimal(state.counters.snapshot()["projected_session_delta"]) == Decimal("90.00")
+
+
 def test_a_partial_negative_pause_still_counts_its_campaign_bound() -> None:
     from apple_ads_mcp import ledger
     from apple_ads_mcp.guardrails import DailyUsage
