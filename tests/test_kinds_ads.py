@@ -42,10 +42,40 @@ def test_a_creative_is_created_costs_three_and_cannot_be_reverted() -> None:
     result = tools["apply_create_creative"](preview_token=preview.preview_token)
     assert result.applied, result.failures
     new_id = int(result.entity_id)
-    assert apple.creatives[new_id].name == "Example CPP"
+    assert apple.creatives[new_id].name == "AB-max-Example CPP", "stamped with the identity"
     assert state.counters.snapshot()["applies_this_session"] == 3
     assert DailyUsage(limits()).usage()[0] == 3
     _raises(lambda: tools["revert_change"](entry_id=result.entry_id), "never deleted")
+
+
+def test_a_creative_and_an_ad_are_named_for_each_identity() -> None:
+    from apple_ads_mcp.naming import Identity
+
+    combos = {
+        ("AB", "max"): "AB-max-Spring", ("AB", ""): "AB-Spring",
+        ("", "max"): "max-Spring", ("", ""): "Spring",
+    }
+    for (owner, agent), expected in combos.items():
+        tools, apple, _ = rig(identity=Identity.from_values(owner, agent), **ROOMY)
+        creative = tools["preview_create_creative"](name="Spring", adam_id="1234567890")
+        assert creative.entity_name == expected and creative.naming["final"] == expected, creative
+        result = tools["apply_create_creative"](preview_token=creative.preview_token)
+        assert apple.creatives[int(result.entity_id)].name == expected
+        ad = tools["preview_create_ad"](ad_group_id=AD_GROUP, creative_id=CREATIVE, name="Spring")
+        assert ad.naming["final"] == expected and not ad.blocked, ad.guardrail_checks
+        result = tools["apply_create_ad"](preview_token=ad.preview_token)
+        new_id = int(ledger.find_entry(result.entry_id)["entity_id"])
+        assert apple.ads[new_id].name == expected
+        row = ledger.find_entry(result.entry_id)
+        assert row["detail"]["requested_name"] == "Spring", row
+        assert row["detail"]["identity"]["owner"] == (owner or None), row
+
+
+def test_a_duplicate_ad_name_is_a_warning_not_a_failure() -> None:
+    tools, apple, _ = rig(**ROOMY)
+    apple.ads[AD] = apple.ads[AD].model_copy(update={"name": "AB-max-Spring"})
+    ad = tools["preview_create_ad"](ad_group_id=AD_GROUP, creative_id=CREATIVE, name="Spring")
+    assert not ad.blocked and any("duplicate name" in w for w in ad.warnings), ad.warnings
 
 
 def test_a_creative_for_another_apps_page_is_blocked() -> None:

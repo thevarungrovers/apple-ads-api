@@ -41,6 +41,7 @@ from apple_ads_mcp.changes.common import (
     bound_check,
     metrics_block,
     metrics_warning,
+    name_clash_warning,
     parse_choice,
     serving_warning,
 )
@@ -125,6 +126,7 @@ class AdStatusKind(StatusKind):
 
 class CreateCreative(ChangeKind):
     name = "create_creative"
+    creates_named = ("creative",)
     preview_title = "Preview creating a creative for a product page (no write)"
     apply_title = "Create a creative (cannot serve until an ad attaches it; cannot be deleted here)"
     apply_annotations = APPLY_DESTRUCTIVE
@@ -154,13 +156,17 @@ class CreateCreative(ChangeKind):
         A CUSTOM_PRODUCT_PAGE creative when product_page_id is given, else a
         DEFAULT_PRODUCT_PAGE one. It has no status and cannot serve until an ad
         attaches it, so the projection is 0. Costs 3 applies.
+
+        Pass the BASE name only: the configured prefix (<OWNER>-<agent>-) is
+        added, and the preview shows the exact name that will be sent.
         """
-        name = (name or "").strip()
-        if not name:
-            raise ToolError("INVALID_REQUEST: name is empty")
+        stamped = ctx.name_for_create("creative", name)
+        name = stamped.final
         creative_type = "CUSTOM_PRODUCT_PAGE" if product_page_id else "DEFAULT_PRODUCT_PAGE"
-        checks = []
-        warnings = ["NOT idempotent: applying this twice creates two creatives."]
+        checks = stamped.checks()
+        warnings = [w for w in (stamped.warning(),) if w]
+        warnings += ["NOT idempotent: applying this twice creates two creatives."]
+        warnings += name_clash_warning("creative", name)
         if product_page_id:
             try:
                 page = unwrap(client.call("get_product_page_by_id", x_ap_context=context_header(),
@@ -182,8 +188,10 @@ class CreateCreative(ChangeKind):
                 entity_type="creative", entity_id=None, entity_name=name, path=path,
                 field=CREATED, before=NOTHING, after=after, campaign_id=None,
                 adam_id=str(adam_id), product_page_id=product_page_id, creative_type=creative_type,
+                **stamped.item_fields(ctx.identity),
             )],
             checks=checks, projected=Decimal("0"), warnings=warnings,
+            created_names=[("creative", name)], naming=stamped.block(),
             note="A creative cannot be deleted from here; it is inert until an ad uses it.",
             entity_type="creative", entity_id="(new)", entity_name=name, path=path,
             field_name="exists", before="absent", after=f"{creative_type} for app {adam_id}"
@@ -215,6 +223,7 @@ class CreateCreative(ChangeKind):
 
 class CreateAd(ChangeKind):
     name = "create_ad"
+    creates_named = ("ad",)
     preview_title = "Preview creating an ad in an ad group, created PAUSED (no write)"
     apply_title = "Create an ad (created PAUSED; never deleted -- pausing is the undo)"
     apply_annotations = APPLY_DESTRUCTIVE
@@ -233,13 +242,15 @@ class CreateAd(ChangeKind):
 
         The ad is created PAUSED, so the projection is 0; enabling it is a
         separate ad_status change. Costs 3 applies.
+
+        Pass the BASE name only: the configured prefix (<OWNER>-<agent>-) is
+        added, and the preview shows the exact name that will be sent.
         """
-        name = (name or "").strip()
-        if not name:
-            raise ToolError("INVALID_REQUEST: name is empty")
+        stamped = ctx.name_for_create("ad", name)
+        name = stamped.final
         ad_group = ctx.ad_group(ad_group_id)
         campaign = ctx.campaign(ad_group.campaign_id)
-        checks = [check_campaign_in_scope(ctx.limits, ad_group.campaign_id)]
+        checks = [check_campaign_in_scope(ctx.limits, ad_group.campaign_id), *stamped.checks()]
         try:
             creative = unwrap(client.call("creatives_id_get", id=str(creative_id),
                                           x_ap_context=context_header()), "creative")
@@ -253,9 +264,13 @@ class CreateAd(ChangeKind):
                 entity_type="ad", entity_id=None, entity_name=name, path=path, field=CREATED,
                 before=NOTHING, after="PAUSED", campaign_id=ad_group.campaign_id,
                 ad_group_id=ad_group_id, creative_id=creative_id,
+                **stamped.item_fields(ctx.identity),
             )],
             checks=checks, projected=Decimal("0"),
-            warnings=["NOT idempotent: applying this twice creates two ads."],
+            created_names=[("ad", name)], naming=stamped.block(),
+            warnings=[w for w in (stamped.warning(),) if w]
+            + ["NOT idempotent: applying this twice creates two ads."]
+            + name_clash_warning("ad", name, ad_group_id),
             entity_type="ad", entity_id="(new)", entity_name=name, path=path,
             field_name="exists", before="absent", after=f"ad with creative {creative_id}, PAUSED",
             campaign=campaign, entity_serving="(created PAUSED)",

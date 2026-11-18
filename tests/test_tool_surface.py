@@ -488,6 +488,50 @@ def test_readme_quotes_the_guardrail_text_verbatim() -> None:
     )
 
 
+NAMED_ENTITY_TYPES = frozenset({"campaign", "ad_group", "ad", "creative"})
+
+
+def test_every_creating_kind_declares_what_it_names() -> None:
+    """A kind that creates a named entity must declare it, so the engine's
+    name_prefix backstop runs on it. A new create kind cannot ship unprefixed."""
+    from apple_ads_mcp.changes import all_kinds
+    from apple_ads_mcp.changes.base import CREATED
+
+    for kind in all_kinds():
+        creates = {etype for etype, field in kind.ledger_keys if field == CREATED} & NAMED_ENTITY_TYPES
+        assert set(kind.creates_named) == creates, (
+            f"{kind.name} creates {sorted(creates)} but declares creates_named="
+            f"{kind.creates_named!r}"
+        )
+
+
+def test_every_creating_kind_sends_the_prefixed_name() -> None:
+    """Run each creation end to end and read the name off the request SENT."""
+    sys.path.insert(0, str(REPO_ROOT / "tests"))
+    from decimal import Decimal
+
+    from kindkit import AD_GROUP, APP, CAMPAIGN, CREATIVE, rig
+
+    roomy = dict(max_projected_session_delta=Decimal("500"),
+                 max_projected_delta_per_day_total=Decimal("500"))
+    cases = {
+        "create_campaign": dict(name="Launch", adam_id=APP, countries=["US"], daily_budget="40.00",
+                                regulation_responses=[]),
+        "create_ad_group": dict(campaign_id=CAMPAIGN, name="Launch", default_bid="1.50"),
+        "create_creative": dict(name="Launch", adam_id=APP),
+        "create_ad": dict(ad_group_id=AD_GROUP, creative_id=CREATIVE, name="Launch"),
+    }
+    for name, args in cases.items():
+        tools, apple, _ = rig(**roomy)
+        preview = tools[f"preview_{name}"](**args)
+        assert preview.naming["final"] == "AB-max-Launch", (name, preview.naming)
+        tools[f"apply_{name}"](preview_token=preview.preview_token)
+        [(method, kwargs)] = [c for c in apple.calls if c[0].endswith("_post") and "query" not in c[0]
+                              and "eligibilit" not in c[0]]
+        body = next(v for k, v in kwargs.items() if k.endswith("_create"))
+        assert body.name == "AB-max-Launch", (name, method, body.name)
+
+
 def test_there_is_no_generic_passthrough() -> None:
     names = frozenset(_tools())
     for suspicious in ("request", "raw_request", "call_api", "http", "execute"):

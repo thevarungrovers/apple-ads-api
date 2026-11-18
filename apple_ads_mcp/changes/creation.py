@@ -53,7 +53,7 @@ from apple_ads_mcp.changes.base import (
 )
 from apple_ads_mcp.changes.bidding import STRATEGY_GOALS, STRATEGY_TYPES, _parse_when
 from apple_ads_mcp.changes.campaigns import CampaignStatusKind
-from apple_ads_mcp.changes.common import campaign_currency, parse_choice
+from apple_ads_mcp.changes.common import campaign_currency, name_is_free, parse_choice
 from apple_ads_mcp.client import (
     context_header,
     entity_path,
@@ -133,6 +133,7 @@ def _eligibility_check(adam_id: str, countries: list[str]) -> tuple[Check, list[
 
 class CreateCampaign(ChangeKind):
     name = "create_campaign"
+    creates_named = ("campaign",)
     preview_title = "Preview creating a campaign, created PAUSED (no write)"
     apply_title = "Create a campaign (created PAUSED; carries a legal declaration; never deleted)"
     apply_annotations = APPLY_DESTRUCTIVE
@@ -170,10 +171,12 @@ class CreateCampaign(ChangeKind):
         Always created PAUSED, so the projection is 0: the budget counts when the
         campaign is enabled. Checks the budget against max_daily_budget, the
         account currency, and the app's eligibility. Costs 3 applies.
+
+        Pass the BASE name only: the configured prefix (<OWNER>-<agent>-) is
+        added, and the preview shows the exact name that will be sent.
         """
-        name = (name or "").strip()
-        if not name:
-            raise ToolError("INVALID_REQUEST: name is empty")
+        stamped = ctx.name_for_create("campaign", name)
+        name = stamped.final
         placement = parse_choice(supply_placement, PLACEMENTS, "supply_placement")
         billing = parse_choice(billing_event, {"TAPS", "IMPRESSIONS"}, "billing_event")
         cleaned = [str(c).strip().upper() for c in countries if str(c).strip()]
@@ -197,7 +200,11 @@ class CreateCampaign(ChangeKind):
             check_currency(ctx.limits, currency),
             check_ceiling("max_daily_budget", budget, ctx.limits.max_daily_budget, currency or ""),
             eligible,
+            *stamped.checks(),
+            name_is_free("campaign", name),
         ]
+        if stamped.warning():
+            warnings.insert(0, stamped.warning())
         if ctx.limits.allowed_campaign_ids:
             warnings.append(
                 "allowed_campaign_ids is pinned, and a new campaign is not in it: this "
@@ -222,8 +229,10 @@ class CreateCampaign(ChangeKind):
                 placement=placement, billing_event=billing, regulation_responses=answers,
                 start_time=start.isoformat() if start else None,
                 end_time=end.isoformat() if end else None,
+                **stamped.item_fields(ctx.identity),
             )],
             checks=checks, projected=Decimal("0"),
+            created_names=[("campaign", name)], naming=stamped.block(),
             warnings=["NOT idempotent: applying this twice creates two campaigns."] + warnings,
             note=f"Regulation responses being declared: {declaration}.",
             entity_type="campaign", entity_id="(new)", entity_name=name, path=path,
@@ -276,6 +285,7 @@ class CreateCampaign(ChangeKind):
 
 class CreateAdGroup(ChangeKind):
     name = "create_ad_group"
+    creates_named = ("ad_group",)
     preview_title = "Preview creating an ad group, created PAUSED (no write)"
     apply_title = "Create an ad group (created PAUSED; never deleted -- pausing is the undo)"
     apply_annotations = APPLY_DESTRUCTIVE
@@ -300,10 +310,12 @@ class CreateAdGroup(ChangeKind):
 
         Always created PAUSED, so the projection is 0. The default bid is checked
         against max_bid and the CPA goal against max_cpa_goal. Costs 3 applies.
+
+        Pass the BASE name only: the configured prefix (<OWNER>-<agent>-) is
+        added, and the preview shows the exact name that will be sent.
         """
-        name = (name or "").strip()
-        if not name:
-            raise ToolError("INVALID_REQUEST: name is empty")
+        stamped = ctx.name_for_create("ad_group", name)
+        name = stamped.final
         strategy_type = parse_choice(bid_strategy_type, STRATEGY_TYPES, "bid_strategy_type")
         goal = parse_choice(bid_strategy_goal, STRATEGY_GOALS, "bid_strategy_goal")
         pricing = parse_choice(pricing_model, {"CPT", "CPM"}, "pricing_model")
@@ -321,6 +333,7 @@ class CreateAdGroup(ChangeKind):
         ]
         if cpa is not None:
             checks.append(check_ceiling("max_cpa_goal", cpa, ctx.limits.max_cpa_goal, currency or ""))
+        checks += [*stamped.checks(), name_is_free("ad_group", name, campaign_id)]
         path = entity_path(campaign) + f" > AdGroup {name!r}"
         return Proposal(
             items=[make_item(
@@ -328,10 +341,12 @@ class CreateAdGroup(ChangeKind):
                 before=NOTHING, after="PAUSED", campaign_id=campaign_id, bid=str(bid),
                 currency=currency, strategy_type=strategy_type, goal=goal, pricing=pricing,
                 cpa=str(cpa) if cpa is not None else None, search_match=search_match,
-                devices=device_list,
+                devices=device_list, **stamped.item_fields(ctx.identity),
             )],
             checks=checks, projected=Decimal("0"),
-            warnings=["NOT idempotent: applying this twice creates two ad groups."],
+            created_names=[("ad_group", name)], naming=stamped.block(),
+            warnings=[w for w in (stamped.warning(),) if w]
+            + ["NOT idempotent: applying this twice creates two ad groups."],
             entity_type="ad_group", entity_id="(new)", entity_name=name, path=path,
             field_name="exists", before="absent",
             after=(

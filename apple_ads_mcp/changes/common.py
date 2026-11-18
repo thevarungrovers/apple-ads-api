@@ -437,3 +437,57 @@ class StatusKind(ChangeKind):
             after="PAUSED",
             campaign_id=campaign_id,
         )
+
+
+# --- naming ---------------------------------------------------------------------
+
+#: entity_type -> (query method, the parent filter field or None for the account)
+_NAME_SCOPES = {
+    "campaign": ("campaigns_query_post", None),
+    "ad_group": ("adgroups_query_post", "campaignId"),
+    "ad": ("ads_query_post", "adGroupId"),
+    "creative": ("creatives_query_post", None),
+}
+
+
+def name_taken(entity_type: str, final: str, parent_id: Any = None) -> tuple[bool | None, str]:
+    """(taken, where) for ``final`` among live entities of that type in its scope.
+
+    A campaign is compared within the ad account, an ad group within its
+    campaign, an ad within its ad group, a creative within the account; deleted
+    rows are ignored, and case is ignored too (two names that differ only in
+    case read as one in a report). ``taken`` is None when the read failed.
+    """
+    method, parent_field = _NAME_SCOPES[entity_type]
+    filters = [client.eq_filter(parent_field, parent_id)] if parent_field and parent_id else None
+    scope = f"{parent_field[:-2].replace('adGroup', 'ad group')} {parent_id}" if filters else "the ad account"
+    try:
+        rows, _truncated = client.query_all(method, filters)
+    except ToolError as exc:
+        return None, f"could not read existing names in {scope}: {str(exc)[:160]}"
+    wanted = final.casefold()
+    clash = [r for r in rows if not getattr(r, "deleted", False)
+             and str(getattr(r, "name", "") or "").casefold() == wanted]
+    if clash:
+        return True, f"{entity_type.replace('_', ' ')} {clash[0].id} in {scope} is already named {clash[0].name!r}"
+    return False, f"no other {entity_type.replace('_', ' ')} in {scope} is named {final!r}"
+
+
+def name_is_free(entity_type: str, final: str, parent_id: Any = None):
+    """A FAIL `name_is_free` check for a campaign or ad group whose final name
+    is already in use: Apple models no uniqueness error and has no validate-only
+    mode, and two identically named campaigns make every report unreadable."""
+    from apple_ads_mcp.guardrails import Check
+
+    taken, detail = name_taken(entity_type, final, parent_id)
+    return Check("name_is_free", taken is False, detail)
+
+
+def name_clash_warning(entity_type: str, final: str, parent_id: Any = None) -> list[str]:
+    """A WARN (not a FAIL) for an ad or creative whose name is already in use."""
+    taken, detail = name_taken(entity_type, final, parent_id)
+    if taken:
+        return [f"a duplicate name: {detail}. Allowed, but the two will be hard to tell apart."]
+    if taken is None:
+        return [detail]
+    return []
