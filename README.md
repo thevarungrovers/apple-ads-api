@@ -516,7 +516,9 @@ value. "Failed" stops it counting, so it needs more: the change must be at
 least 5 minutes old (Apple's read can lag its write -- earlier, it says "too
 early to tell" and when to try again), and no later change in the log may have
 touched the same field (then the old value proves nothing, and it stays
-`unknown`).
+`unknown`). Undoing a whole batch skips such an item -- it stays `unknown`,
+the result's `skipped` says why -- and undoes the items that landed; revert the
+skipped one later by its own entry id.
 
 A targeting change whose own dimension landed while Apple's read-back shows
 another dimension different (normalised or dropped) is recorded as `partial`:

@@ -189,6 +189,67 @@ def test_resolving_an_unknown_bulk_negative_pause_keeps_the_campaign_bound() -> 
     assert DailyUsage(state.limits).usage()[1] == Decimal("90.00")
 
 
+def _pause_batch_where_only_the_second_lands(tools, apple) -> tuple[str, dict, dict]:
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    _two_negatives(apple)
+    preview = tools["preview_negative_keyword_status"](
+        negative_keyword_ids=[NEGATIVE, NEGATIVE + 1], status="PAUSED"
+    )
+    real = apple._negative_keywords_bulk_update_post
+
+    def second_lands_then_times_out(**_):
+        apple.negatives[NEGATIVE + 1] = apple.negatives[NEGATIVE + 1].model_copy(
+            update={"status": sdk.NegativeKeywordStatus("PAUSED")})
+        raise ToolError("TRANSIENT: negative_keywords_bulk_update_post: read timed out")
+
+    apple._negative_keywords_bulk_update_post = second_lands_then_times_out
+    try:
+        tools["apply_negative_keyword_status"](preview_token=preview.preview_token)
+    except ToolError:
+        pass
+    apple._negative_keywords_bulk_update_post = real
+    [batch_id] = {r["batch_id"] for r in ledger.entries()}
+    first, second = ledger.batch_entries(batch_id)
+    return batch_id, first, second
+
+
+def test_a_batch_revert_skips_an_unknown_item_still_at_its_old_value() -> None:
+    """Only the second item of a timed-out batch landed. Reverting the batch
+    must undo that one and leave the first UNKNOWN -- not abort everything
+    because the first is too early (or, later, impossible) to call failed."""
+    tools, apple, _ = rig(max_projected_delta_per_day_total=Decimal("500"),
+                          max_projected_session_delta=Decimal("500"))
+    batch_id, first, second = _pause_batch_where_only_the_second_lands(tools, apple)
+
+    undo = tools["revert_change"](entry_id=batch_id)
+    assert apple.negatives[NEGATIVE + 1].status == sdk.NegativeKeywordStatus("ENABLED")
+    assert apple.negatives[NEGATIVE].status == sdk.NegativeKeywordStatus("ENABLED")
+    assert ledger.find_entry(second["entry_id"])["outcome"] == ledger.APPLIED
+    assert second["entry_id"] in ledger.reverted_entry_ids()
+    assert ledger.find_entry(first["entry_id"])["outcome"] == ledger.UNKNOWN
+    [skipped] = undo.skipped
+    assert first["entry_id"] in skipped and "too early" in skipped, skipped
+    assert first["entry_id"] in undo.note and "revert_change(entry_id=" in undo.note, undo.note
+
+
+def test_a_batch_revert_skips_an_unknown_item_a_later_row_touched() -> None:
+    tools, apple, _ = rig(max_projected_delta_per_day_total=Decimal("500"),
+                          max_projected_session_delta=Decimal("500"))
+    batch_id, first, second = _pause_batch_where_only_the_second_lands(tools, apple)
+    later = tools["preview_negative_keyword_status"](
+        negative_keyword_ids=[NEGATIVE], status="PAUSED")
+    applied = tools["apply_negative_keyword_status"](preview_token=later.preview_token)
+    tools["revert_change"](entry_id=applied.entry_id)
+    age_entry(first["entry_id"])
+
+    undo = tools["revert_change"](entry_id=batch_id)
+    assert apple.negatives[NEGATIVE + 1].status == sdk.NegativeKeywordStatus("ENABLED")
+    assert ledger.find_entry(first["entry_id"])["outcome"] == ledger.UNKNOWN
+    [skipped] = undo.skipped
+    assert first["entry_id"] in skipped and "later" in skipped, skipped
+
+
 def test_a_batch_revert_counts_each_campaigns_bound_once() -> None:
     from apple_ads_mcp.guardrails import DailyUsage
 

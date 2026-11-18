@@ -296,6 +296,11 @@ class ApplyResult(BaseModel):
         description="Today's applies and projected spend across every server process",
     )
     failures: list[str] = Field(default_factory=list)
+    skipped: list[str] = Field(
+        default_factory=list,
+        description="Batch revert only: '<entry_id>: why' for each item left 'unknown' "
+        "because Apple still shows its old value; revert one later by its entry_id",
+    )
     note: str = ""
 
 

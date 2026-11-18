@@ -67,6 +67,13 @@ from apple_ads_mcp.previews import (
 SETTLE_FAILED_AFTER = dt.timedelta(minutes=5)
 
 
+class StillAtBefore(ToolError):
+    """An UNKNOWN row whose entity Apple still shows at its BEFORE value, when
+    that cannot yet (too early) or ever (a later row touched it) be called
+    FAILED. A single revert refuses with it; a batch revert skips that item,
+    leaves it UNKNOWN, and reverts the items that landed."""
+
+
 class Engine:
     """Runs kinds against one :class:`~.context.ChangeContext`."""
 
@@ -836,7 +843,7 @@ class Engine:
         later = ledger.later_changes(entry_id)
         if later:
             ids = ", ".join(str(r.get("entry_id")) for r in later[:5])
-            raise ToolError(
+            raise StillAtBefore(
                 f"entry {entry_id}'s outcome is unknown and Apple shows the value from "
                 f"before it, but later ledger rows changed the same "
                 f"{str(entry.get('entity_type')).replace('_', ' ')} {entry.get('field')} "
@@ -849,7 +856,7 @@ class Engine:
             return
         ready = started + SETTLE_FAILED_AFTER
         if dt.datetime.now(dt.timezone.utc) < ready:
-            raise ToolError(
+            raise StillAtBefore(
                 f"entry {entry_id}'s outcome is unknown and Apple still shows the value "
                 f"from before it, but it is too early to tell: Apple's read can lag its "
                 f"write. Nothing was recorded; try again after "
@@ -974,14 +981,27 @@ class Engine:
                 f"batch {batch_id} has nothing left to revert: every entry in it was "
                 f"never applied or has already been reverted."
             )
-        plans, kept = [], []
+        plans, kept, skipped = [], [], []
         for entry in live:
             try:
                 plans.append(self.plan_revert(ctx, entry))
                 kept.append(entry)
             except NothingToUndo:
                 continue  # already where the inverse would put it
+            except StillAtBefore as exc:
+                # Apple shows this item where it started, but the row cannot be
+                # called failed (too early, or a later row touched it). There is
+                # nothing of it to undo now: leave it UNKNOWN and revert the rest.
+                skipped.append(f"{entry['entry_id']}: {exc}")
         if not plans:
+            if skipped:
+                raise ToolError(
+                    f"batch {batch_id}: nothing was reverted. Every item still to undo "
+                    f"is unknown and Apple shows it at its old value, so it stays "
+                    f"'unknown': " + " | ".join(skipped) + " Revert a single item "
+                    f"later with revert_change(entry_id='<its entry_id>'), or settle it "
+                    f"with resolve_unknown_change."
+                )
             raise ToolError(f"batch {batch_id}: every item is already back where it started.")
         live = kept
         # Each row records its OWN restored spend, so the daily cap -- which sums
@@ -1001,7 +1021,7 @@ class Engine:
             item["projected"] = str(restored)
             projected += restored
         self.refuse_if_over_caps(ctx, projected, 1)
-        return self.send_revert(ctx, live, plans, projected)
+        return self.send_revert(ctx, live, plans, projected, skipped=skipped)
 
     @staticmethod
     def revert_recorded(items, outcomes):
@@ -1011,7 +1031,9 @@ class Engine:
             return None
         return bound_once_per_campaign(items, outcomes)
 
-    def send_revert(self, ctx, entries, plans, projected: Decimal) -> ApplyResult:
+    def send_revert(
+        self, ctx, entries, plans, projected: Decimal, skipped: list[str] | None = None
+    ) -> ApplyResult:
         if len(plans) == 1:
             plans[0][1]["projected"] = str(projected)
         items = [item for _kind, item in plans]
@@ -1072,6 +1094,17 @@ class Engine:
         first, outcome = entries[0], outcomes[0]
         item = items[0]
         originals = ", ".join(str(e.get("entry_id")) for e in entries)
+        skipped = skipped or []
+        skipped_note = (
+            f" SKIPPED {len(skipped)} item(s) still 'unknown' that Apple shows at their "
+            f"old value ("
+            + ", ".join(s.split(":", 1)[0] for s in skipped)
+            + "): nothing of them to undo now -- read skipped for why. Revert one later "
+            "by its own id with revert_change(entry_id='<entry_id>'), or settle it with "
+            "resolve_unknown_change."
+            if skipped
+            else ""
+        )
         return ApplyResult(
             applied=all_landed,
             entry_id=entry_ids[0],
@@ -1098,15 +1131,16 @@ class Engine:
                 for it, o in zip(items, outcomes)
                 if not o.landed
             ],
+            skipped=skipped,
             note=(
-                f"Reverted entry {originals}."
+                f"Reverted entry {originals}." + skipped_note
                 if all_landed
                 else (
                     f"NOT REVERTED. Apple returned success and left the value alone, "
                     f"so entry {originals} still stands. For a bid this "
                     f"usually means the ad group moved onto an automated bid strategy, "
                     f"where Apple sets the bids. Recorded as failed, so the original "
-                    f"entry stays revertable once the cause is fixed."
+                    f"entry stays revertable once the cause is fixed." + skipped_note
                 )
             ),
         )
