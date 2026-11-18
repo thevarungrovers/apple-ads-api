@@ -21,6 +21,7 @@ from kindkit import (  # noqa: E402
     CAMPAIGN,
     KEYWORD,
     NEGATIVE,
+    age_entry,
     failed,
     rig,
     run,
@@ -459,6 +460,7 @@ def test_reverting_an_unknown_write_that_never_landed_says_so() -> None:
     _raises(lambda: tools["apply_keyword_bid"](preview_token=preview.preview_token), "TRANSIENT")
     [row] = ledger.entries()
     del apple.fail["keywords_id_put"]
+    age_entry(row["entry_id"])  # a FAILED verdict waits for Apple's read to catch up
     _raises(lambda: tools["revert_change"](entry_id=row["entry_id"]), "never landed")
     assert apple.writes() == ["keywords_id_put"]  # only the original attempt
     assert ledger.find_entry(row["entry_id"])["outcome"] == "failed"
@@ -501,10 +503,47 @@ def test_resolving_an_unknown_write_that_never_landed_records_it_failed() -> Non
     _raises(lambda: tools["apply_keyword_bid"](preview_token=preview.preview_token), "TRANSIENT")
     [row] = ledger.entries()
     del apple.fail["keywords_id_put"]
+    age_entry(row["entry_id"])  # a FAILED verdict waits for Apple's read to catch up
     result = tools["resolve_unknown_change"](entry_id=row["entry_id"])
     assert result.settled == {row["entry_id"]: ledger.FAILED}, result
     assert ledger.find_entry(row["entry_id"])["outcome"] == ledger.FAILED
     assert apple.writes() == ["keywords_id_put"]
+
+
+def test_a_failed_verdict_waits_for_apple_and_refuses_when_a_later_row_touched_it() -> None:
+    """Apple's read can lag its write, and the entity may have been put back
+    since. Either way "it shows the old value" does not prove it never landed."""
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    tools, apple, _ = rig()
+    preview = tools["preview_keyword_bid"](keyword_id=KEYWORD, new_bid="1.20")
+    apple.fail["keywords_id_put"] = ToolError(TIMEOUT)
+    _raises(lambda: tools["apply_keyword_bid"](preview_token=preview.preview_token), "TRANSIENT")
+    [row] = ledger.entries()
+    del apple.fail["keywords_id_put"]
+    # Too early: nothing is recorded, and the agent is told when to come back.
+    message = _raises(lambda: tools["resolve_unknown_change"](entry_id=row["entry_id"]), "too early")
+    assert "try again after" in message, message
+    _raises(lambda: tools["revert_change"](entry_id=row["entry_id"]), "too early")
+    assert ledger.find_entry(row["entry_id"])["outcome"] == ledger.UNKNOWN
+    # A later change to the same bid, since put back: the old value proves nothing.
+    later = tools["preview_keyword_bid"](keyword_id=KEYWORD, new_bid="1.10")
+    applied = tools["apply_keyword_bid"](preview_token=later.preview_token)
+    tools["revert_change"](entry_id=applied.entry_id)
+    assert apple.keywords[KEYWORD].bid.amount == "1.00"
+    age_entry(row["entry_id"])
+    _raises(lambda: tools["resolve_unknown_change"](entry_id=row["entry_id"]), "later")
+    assert ledger.find_entry(row["entry_id"])["outcome"] == ledger.UNKNOWN
+
+
+def test_an_applied_verdict_needs_no_wait() -> None:
+    tools, apple, _ = rig()
+    preview = tools["preview_keyword_bid"](keyword_id=KEYWORD, new_bid="1.20")
+    _timeout_after_landing(apple, "keywords_id_put")
+    _raises(lambda: tools["apply_keyword_bid"](preview_token=preview.preview_token), "TRANSIENT")
+    [row] = ledger.entries()
+    result = tools["resolve_unknown_change"](entry_id=row["entry_id"])
+    assert result.settled == {row["entry_id"]: ledger.APPLIED}, result
 
 
 def _unstamped_kind(name: str, created: list):

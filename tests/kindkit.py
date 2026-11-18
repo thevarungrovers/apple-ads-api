@@ -440,6 +440,16 @@ def rig(identity: naming.Identity | None = AB_MAX, **limit_overrides):
     return registrar.tools, apple, state
 
 
+def age_entry(entry_id: str, minutes: int = 10) -> None:
+    """Backdate a ledger row, so a FAILED verdict on it is no longer too early."""
+    import datetime as dt
+
+    stamp = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=minutes)
+    logdb.connect().execute(
+        "UPDATE changes SET ts=? WHERE entry_id=?", (stamp.isoformat(timespec="seconds"), entry_id)
+    )
+
+
 def failed(preview, name: str) -> bool:
     return any(line.startswith("FAIL") and f" {name}:" in line for line in preview.guardrail_checks)
 

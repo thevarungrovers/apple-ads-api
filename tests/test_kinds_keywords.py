@@ -13,7 +13,7 @@ from decimal import Decimal
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from kindkit import AD_GROUP, KEYWORD, NEGATIVE, failed, rig, run  # noqa: E402
+from kindkit import AD_GROUP, KEYWORD, NEGATIVE, age_entry, failed, rig, run  # noqa: E402
 
 import apple_ads_platform as sdk  # noqa: E402
 
@@ -178,6 +178,7 @@ def test_resolving_an_unknown_bulk_negative_pause_keeps_the_campaign_bound() -> 
     assert (first["outcome"], second["outcome"]) == (ledger.UNKNOWN, ledger.UNKNOWN)
     assert DailyUsage(state.limits).usage()[1] == Decimal("90.00")
 
+    age_entry(first["entry_id"])  # a FAILED verdict waits for Apple's read to catch up
     settled = tools["resolve_unknown_change"](entry_id=first["entry_id"])
     assert settled.settled == {first["entry_id"]: ledger.FAILED}, settled
     # The traffic may be back through the second item: the bound must survive.

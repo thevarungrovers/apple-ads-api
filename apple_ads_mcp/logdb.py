@@ -731,6 +731,25 @@ def find_entry(entry_id: str) -> dict[str, Any] | None:
     return None if row is None else _row_to_entry(row)
 
 
+def later_changes(entry_id: str) -> list[dict[str, Any]]:
+    """Rows written after ``entry_id`` that touch the same entity and field.
+
+    Any outcome counts: a later write, even one recorded failed, means the
+    value Apple shows now may not be the one this entry left behind.
+    """
+    row = connect().execute(
+        "SELECT rowid, entity_type, entity_id, field FROM changes WHERE entry_id=?", (entry_id,)
+    ).fetchone()
+    if row is None:
+        return []
+    rows = connect().execute(
+        "SELECT * FROM changes WHERE rowid > ? AND entity_type=? AND entity_id=? AND field=? "
+        "ORDER BY rowid",
+        (row["rowid"], row["entity_type"], row["entity_id"], row["field"]),
+    )
+    return [_row_to_entry(r) for r in rows]
+
+
 def reverted_entry_ids() -> set[str]:
     """Entries that some later, successful entry already reverted."""
     rows = connect().execute(

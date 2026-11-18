@@ -23,6 +23,7 @@ tool functions it generates carry annotations built at runtime, and string
 annotations would have to be resolved against globals where they do not exist.
 """
 
+import datetime as dt
 import inspect
 import secrets
 import sqlite3
@@ -60,6 +61,10 @@ from apple_ads_mcp.previews import (
     pct_change,
     render_checks,
 )
+
+#: How old an UNKNOWN row's intent must be before the read-back may call it
+#: FAILED: Apple's read can lag its write, and FAILED frees cap.
+SETTLE_FAILED_AFTER = dt.timedelta(minutes=5)
 
 
 class Engine:
@@ -764,6 +769,7 @@ class Engine:
         if now == normalized_value(str(entry.get("after"))):
             outcome, verdict = ledger.APPLIED, "it landed"
         elif now == normalized_value(str(entry.get("before"))):
+            self.refuse_early_failed_verdict(entry)
             outcome, verdict = ledger.FAILED, "it never landed"
         else:
             raise ToolError(
@@ -779,6 +785,40 @@ class Engine:
         )
         self.rebalance_batch(entry)
         return outcome, current
+
+    @staticmethod
+    def refuse_early_failed_verdict(entry: dict[str, Any]) -> None:
+        """Raise unless the old value Apple shows really means "never landed".
+
+        A FAILED verdict frees cap, so it needs more than one read. Apple's
+        read can lag its write, so the intent must be SETTLE_FAILED_AFTER old.
+        And a later ledger row on the same entity and field (a later change,
+        or one put back) means the old value may be that row's doing, so no
+        FAILED verdict is ever given then. An APPLIED verdict needs neither.
+        """
+        entry_id = str(entry.get("entry_id"))
+        later = ledger.later_changes(entry_id)
+        if later:
+            ids = ", ".join(str(r.get("entry_id")) for r in later[:5])
+            raise ToolError(
+                f"entry {entry_id}'s outcome is unknown and Apple shows the value from "
+                f"before it, but later ledger rows changed the same "
+                f"{str(entry.get('entity_type')).replace('_', ' ')} {entry.get('field')} "
+                f"({ids}), so that value does not prove it never landed. It stays "
+                f"'unknown' and counted against the caps; check the Apple Ads UI's "
+                f"change history."
+            )
+        started = ledger.parse_ts(entry.get("ts"))
+        if started is None:
+            return
+        ready = started + SETTLE_FAILED_AFTER
+        if dt.datetime.now(dt.timezone.utc) < ready:
+            raise ToolError(
+                f"entry {entry_id}'s outcome is unknown and Apple still shows the value "
+                f"from before it, but it is too early to tell: Apple's read can lag its "
+                f"write. Nothing was recorded; try again after "
+                f"{ready.astimezone().isoformat(timespec='seconds')}."
+            )
 
     def rebalance_batch(self, entry: dict[str, Any]) -> None:
         """Re-attribute a batch's projected spend after one of its rows settled.
