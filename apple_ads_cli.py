@@ -69,7 +69,16 @@ BASE_URL = "https://api.ads.apple.com/v1"
 # last one is `query`. Anything else -- a query string or fragment (which is
 # sent verbatim, so `campaigns?x=/query` would end in /query and still create
 # a campaign), percent-encoding, `.`/`..`, an empty path -- is a mutation.
-READ_ONLY_POST_SHAPE = re.compile(r"(?:[a-z0-9_-]+/)+query", re.IGNORECASE)
+#
+# re.ASCII as well: without it IGNORECASE folds non-ASCII letters onto ASCII
+# ones (the long s, U+017F, matches "s"), so `campaignſ/query` would pass for a
+# read and be sent verbatim.
+READ_ONLY_POST_SHAPE = re.compile(r"(?:[a-z0-9_-]+/)+query", re.IGNORECASE | re.ASCII)
+
+#: Anything outside printable ASCII without the space: whitespace, control
+#: characters and non-ASCII. urlsplit silently DROPS a tab, CR or LF and strips
+#: leading spaces, so it cannot be trusted to see them -- they are refused first.
+_UNSAFE_PATH_CHAR = re.compile(r"[^\x21-\x7e]")
 
 # Methods that never change anything. Every other method, including ones this
 # script has never heard of, is treated as a write.
@@ -94,6 +103,8 @@ def is_mutation(method: str, path: str) -> bool:
     if method in READ_METHODS:
         return False
     if method != "POST":
+        return True
+    if _UNSAFE_PATH_CHAR.search(path or ""):
         return True
     if "?" in path or "#" in path:
         return True

@@ -159,6 +159,14 @@ def test_a_post_hiding_query_in_its_query_string_or_fragment_is_a_mutation() -> 
         assert cli.is_mutation("post", path), path
 
 
+def test_a_query_post_with_whitespace_control_or_non_ascii_is_a_mutation() -> None:
+    # urlsplit drops a tab and leading spaces, and IGNORECASE folds the long s
+    # (U+017F) to "s": each would pass for campaigns/query and be sent verbatim.
+    for path in ("campaigns/query\t", " campaigns/query", "campaign\u017f/query",
+                 "campaigns/query\n", "campaigns/qu\x00ery", "campaigns/query "):
+        assert cli.is_mutation("POST", path), repr(path)
+
+
 def test_a_real_query_post_is_still_a_read() -> None:
     for path in ("campaigns/query", "/campaigns/query/", "reports/apps/campaigns/query",
                  "campaigns/1234567890/adgroups/query", "change-history/query",
