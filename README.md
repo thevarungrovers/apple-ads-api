@@ -304,8 +304,10 @@ negative keywords have no name field (only their text), so nothing is added to
 them.
 
 **Renames:** the agent may rename only **its own** entities -- the name carries
-this checkout's prefix, or the change log shows this server created it. A
-hand-made entity, or another agent's, is refused, with no override.
+this checkout's prefix, or the change log shows this server created it (under
+this identity, when the log recorded one). A hand-made entity, or another
+agent's, is refused, with no override -- and a name that reads as another full
+identity (`CD-bot-launch`) is refused even if the change log shows a creation.
 "Carries this checkout's prefix" means the whole prefix: with only the initials
 `AB` set, `AB-launch` is ours but `AB-bot-launch` (agent `bot`'s) and
 `AB-cli-launch` (a person's, through the escape hatch) are not. The same rule

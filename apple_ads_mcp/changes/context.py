@@ -89,7 +89,7 @@ class ChangeContext:
         try:
             return naming.rename(
                 self.identity, current, requested, entity_type=entity_type,
-                ledger_owned=ledger.created_by_us(entity_type, entity_id),
+                ledger_owned=ledger.created_by_us(entity_type, entity_id, self.identity),
             )
         except naming.NameRefused as exc:
             raise ToolError(str(exc)) from exc

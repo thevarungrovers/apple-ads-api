@@ -193,7 +193,9 @@ A duplicate campaign name, or ad group name in its campaign, fails
 scan in full ("could not verify the name is free").
 
 Renames (`low_risk_change`, field `name`) reach only YOUR entities -- the name
-carries your WHOLE prefix or the ledger shows this server created it. With only
+carries your WHOLE prefix or the ledger shows this server created it under your
+identity. A name that reads as another full identity (`CD-bot-x`) is refused
+whatever the ledger shows. With only
 initials `AB` set, `AB-bot-x` (agent `bot`'s) and `AB-cli-x` (a person's) are
 not yours, and neither counts for `mine=True`. Hand-made and other agents'
 entities are refused; tell the human to rename those in the Apple Ads UI. The

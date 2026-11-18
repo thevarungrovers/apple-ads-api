@@ -596,16 +596,34 @@ def complete_change(
     )
 
 
-def created_by_us(entity_type: str, entity_id: Any) -> bool:
-    """True when this checkout's ledger shows a creation of that entity landed."""
+def created_by_us(entity_type: str, entity_id: Any, identity: Any = None) -> bool:
+    """True when this checkout's ledger shows a creation of that entity landed.
+
+    With ``identity`` (a naming.Identity), a creation row that recorded the
+    identity it was named for counts only when that identity is this one: a
+    ledger shared with, or copied from, another identity's checkout does not
+    make its creations ours. A row that recorded none (written before
+    identities were) still counts.
+    """
     if entity_id in (None, ""):
         return False
-    row = connect().execute(
-        "SELECT 1 FROM changes WHERE entity_type=? AND field='created' AND entity_id=? "
-        "AND outcome IN (?, ?) LIMIT 1",
+    rows = connect().execute(
+        "SELECT extra_json FROM changes WHERE entity_type=? AND field='created' AND entity_id=? "
+        "AND outcome IN (?, ?)",
         (entity_type, str(entity_id), APPLIED, PARTIAL),
-    ).fetchone()
-    return row is not None
+    ).fetchall()
+    if identity is None:
+        return bool(rows)
+    ours = (identity.owner or None, identity.agent or None)
+    for row in rows:
+        extra = _loads(row["extra_json"])
+        extra = extra if isinstance(extra, dict) else {}
+        recorded = (extra.get("detail") or {}).get("identity") or extra.get("identity")
+        if not isinstance(recorded, dict):
+            return True
+        if (recorded.get("owner") or None, recorded.get("agent") or None) == ours:
+            return True
+    return False
 
 
 def created_ids(entity_type: str) -> set[str]:

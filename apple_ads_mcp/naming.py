@@ -394,21 +394,31 @@ def rename(
     this server created it. Anything else -- a hand-made entity, another
     agent's -- is refused, with no override. The prefix is kept (or, for a
     ledger-owned entity that lost it in the UI, restored); only the base changes.
+
+    A live name that parses as a FULL identity other than ours is refused even
+    when the ledger shows a creation: the name says it is someone else's now,
+    and renaming would re-stamp it as ours.
     """
     current = str(current or "")
-    if not (identity.owns(current) or ledger_owned):
-        other = parse(current)
+    other = parse(current)
+    foreign = other is not None and (other.owner, other.agent) != (identity.owner, identity.agent)
+    if foreign or not (identity.owns(current) or ledger_owned):
         whose = (
             f"its name carries {other.owner}-{other.agent}-, another agent's prefix"
             if other is not None and current
             else "its name does not carry this agent's prefix"
             + (f" ({identity.prefix})" if identity.prefix else "")
         )
+        ledger_note = (
+            "whatever the ledger shows, a name that reads as another identity's is not "
+            "this agent's"
+            if foreign
+            else "and the ledger shows no creation of it by this server"
+        )
         raise NameRefused(
             f"INVALID_REQUEST: {entity_type.replace('_', ' ')} {current!r} is not this "
-            f"agent's to rename: {whose}, and the ledger shows no creation of it by this "
-            f"server. The agent may rename only what it created. Rename it in the Apple "
-            f"Ads UI instead."
+            f"agent's to rename: {whose}, {ledger_note}. The agent may rename only what "
+            f"it created. Rename it in the Apple Ads UI instead."
         )
     stamped = stamp(identity, requested, entity_type=entity_type)
     if identity.prefix:

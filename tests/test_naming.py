@@ -165,6 +165,51 @@ def test_renames_only_the_agents_own_entities() -> None:
     assert restored.rule == "restored_prefix" and restored.final == "AB-max-launch2"
 
 
+def test_the_ledger_cannot_make_another_full_identitys_name_ours() -> None:
+    """A creation row in this ledger does not make `CD-bob-x` ours: its name
+    says it is CD-bob's, and renaming it would re-stamp it as ours."""
+    for identity in (BOTH, OWNER_ONLY, AGENT_ONLY, NEITHER):
+        for current in ("CD-bob-x", "AB-bot-x", "AB-cli-x"):
+            if (identity.owner, identity.agent) == tuple(current.split("-")[:2]):
+                continue
+            _refused(lambda identity=identity, current=current: rename(
+                identity, current, "y", entity_type="campaign", ledger_owned=True),
+                "not this agent's")
+    # Our own full identity, or a name that parses as no identity, still renames.
+    assert rename(BOTH, "AB-max-x", "y", entity_type="campaign", ledger_owned=True).final == "AB-max-y"
+    assert rename(BOTH, "x", "y", entity_type="campaign", ledger_owned=True).final == "AB-max-y"
+
+
+def test_created_by_us_compares_the_identity_on_the_creation_row() -> None:
+    from kindkit import temp_db
+
+    from apple_ads_mcp import ledger
+
+    temp_db()
+
+    def created(entity_id: str, identity: dict | None) -> None:
+        entry_id = ledger.new_entry_id()
+        ledger.write_intent(
+            entry_id, tool="apply_create_campaign", entity_type="campaign", entity_id=entity_id,
+            entity_name="x", path="-", field="created", before=None, after="PAUSED",
+            campaign_id=None, projected_daily_spend_delta="0",
+            extra={"detail": {"identity": identity}} if identity is not None else None,
+        )
+        ledger.write_outcome(entry_id, outcome=ledger.APPLIED)
+
+    created("1", {"owner": "CD", "agent": "bob", "source": ".env"})
+    created("2", {"owner": "AB", "agent": "max", "source": ".env"})
+    created("3", None)  # a row from before identities were recorded
+    created("4", {"owner": "AB", "agent": None, "source": ".env"})
+    assert not ledger.created_by_us("campaign", "1", BOTH)
+    assert ledger.created_by_us("campaign", "2", BOTH)
+    assert ledger.created_by_us("campaign", "3", BOTH)
+    assert not ledger.created_by_us("campaign", "4", BOTH)
+    assert ledger.created_by_us("campaign", "4", OWNER_ONLY)
+    assert not ledger.created_by_us("campaign", "2", OWNER_ONLY)
+    assert ledger.created_by_us("campaign", "1")  # no identity to compare: any creation
+
+
 def test_ownership_needs_the_whole_prefix_not_just_its_start() -> None:
     """`AB-` is a prefix of `AB-bot-x` and `AB-cli-x`, but neither is ours: a
     name that parses as a full two-part prefix is ours only when both parts are."""
