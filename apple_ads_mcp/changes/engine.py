@@ -123,7 +123,29 @@ class Engine:
             )
         )
         checks.append(ctx.daily.check(proposal.projected))
+        currency = self.account_currency_check(ctx)
+        if currency is not None:
+            checks.append(currency)
         return checks
+
+    @staticmethod
+    def account_currency_check(ctx):
+        """The ACCOUNT's currency against allowed_currencies.
+
+        Every limit here is a bare number -- "5.00" -- that only means something
+        once you know 5.00 of what. Checked on the account record rather than at
+        startup because a server must start without calling Apple; an unreadable
+        account skips the line rather than blocking every preview.
+        """
+        from apple_ads_mcp import client
+        from apple_ads_mcp.guardrails import check_currency
+
+        currency = client.account_currency()
+        if currency is None or not ctx.limits.allowed_currencies:
+            return None
+        check = check_currency(ctx.limits, currency)
+        check.name = "account_currency"
+        return check
 
     # -- preview -----------------------------------------------------------------
 

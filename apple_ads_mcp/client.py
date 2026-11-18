@@ -62,6 +62,8 @@ MAX_PAGE_SIZE = 1000
 _api = None
 _api_lock = threading.Lock()
 _ad_account_id: str | None = None
+#: The ad account's own record (timezone, currency), read once per process.
+_account: Any = None
 
 T = TypeVar("T")
 
@@ -81,6 +83,49 @@ def ad_account() -> str:
     if _ad_account_id is None:
         _ad_account_id = resolve_ad_account_id()
     return _ad_account_id
+
+
+def account() -> Any:
+    """The configured ad account's record, read ONCE per process, or None.
+
+    Its `timezone` decides what "today" means for every report window -- the
+    reports run in the account's zone (TimeRange's default ORTZ), so building
+    the window from the machine's date asked for the wrong day whenever the two
+    zones disagreed. Its `currency` is what every amount here is in.
+
+    A failed read is not cached and not fatal: callers fall back to the
+    machine's date and say so, rather than refusing to report.
+    """
+    global _account
+    if _account is None:
+        try:
+            response = call("ad_accounts_id_get", id=ad_account(), x_ap_context=context_header())
+            _account = unwrap(response, "ad account")
+        except Exception:  # noqa: BLE001 - a fallback, reported by the caller
+            return None
+    return _account
+
+
+def account_timezone() -> str | None:
+    return getattr(account(), "timezone", None) or None
+
+
+def account_currency() -> str | None:
+    return getattr(account(), "currency", None) or None
+
+
+def account_today() -> tuple[Any, str | None]:
+    """(today's date in the ad account's timezone, that timezone or None)."""
+    import datetime as dt
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    zone = account_timezone()
+    if zone:
+        try:
+            return dt.datetime.now(ZoneInfo(zone)).date(), zone
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    return dt.date.today(), None
 
 
 def get_api():

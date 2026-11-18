@@ -55,6 +55,7 @@ def no_live_client() -> None:
 
     client._build = refuse
     client._ad_account_id = "1234567890"
+    client._account = None
 
 
 def temp_db() -> None:

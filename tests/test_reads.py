@@ -11,6 +11,7 @@ import datetime as dt
 import pathlib
 import sys
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
@@ -127,6 +128,36 @@ def test_a_report_page_says_how_many_rows_exist() -> None:
     ]
     report = read_tools(state)["campaign_report"](limit=3)
     assert report.total_rows_available == 3 and report.next_offset is None and not report.truncated
+
+
+def test_report_windows_use_the_account_timezone() -> None:
+
+    _tools, apple, state = rig()
+    def account(id, **_):
+        import apple_ads_platform as sdk
+        return SimpleNamespace(result=sdk.AdAccount.model_validate(
+            {"id": int(id), "timezone": "Pacific/Kiritimati", "currency": "USD"}), error=None)
+    apple._ad_accounts_id_get = account
+    report = read_tools(state)["campaign_report"](days=1)
+    today_there = dt.datetime.now(ZoneInfo("Pacific/Kiritimati")).date().isoformat()
+    assert report.end == today_there and report.time_zone == "Pacific/Kiritimati", report
+
+
+def test_projections_use_seven_complete_days_ending_yesterday() -> None:
+    tools, apple, _ = rig()
+    tools["preview_campaign_status"](campaign_id=CAMPAIGN, status="PAUSED")
+    request = next(k["apps_reporting_request"] for m, k in apple.calls
+                   if m.endswith("_without_preload_content"))
+    today = dt.datetime.now(ZoneInfo("America/New_York")).date()
+    assert request.time_range.end == today - dt.timedelta(days=1), request.time_range
+    assert request.time_range.start == today - dt.timedelta(days=7), request.time_range
+
+
+def test_an_account_in_another_currency_blocks_every_preview() -> None:
+    tools, _apple, _ = rig(allowed_currencies=frozenset({"CAD"}))
+    preview = tools["preview_campaign_status"](campaign_id=CAMPAIGN, status="PAUSED")
+    assert preview.blocked
+    assert any(c.startswith("FAIL account_currency") for c in preview.guardrail_checks), preview.guardrail_checks
 
 
 if __name__ == "__main__":

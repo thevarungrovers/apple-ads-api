@@ -229,6 +229,11 @@ class Report(BaseModel):
     truncated: bool = Field(
         default=False, description="True when more rows exist than were returned"
     )
+    time_zone: str | None = Field(
+        default=None,
+        description="The ad account's timezone, which start/end are dates in. Null "
+        "when the account could not be read and the machine's date was used",
+    )
     note: str
 
 
@@ -353,9 +358,20 @@ class ReconcileReport(BaseModel):
 
 
 def _window(days: int) -> tuple[dt.date, dt.date]:
+    """`days` ending TODAY in the ad account's timezone (see client.account)."""
     days = max(1, min(days, MAX_REPORT_DAYS))
-    end = dt.date.today()
+    end, _zone = client.account_today()
     return end - dt.timedelta(days=days - 1), end
+
+
+def complete_days_window(days: int = 7) -> tuple[dt.date, dt.date]:
+    """`days` COMPLETE days ending yesterday, in the account's timezone.
+
+    What a projection divides by 7. A window ending today includes a partial
+    day, which understates the daily rate by up to a seventh.
+    """
+    today, _zone = client.account_today()
+    return today - dt.timedelta(days=days), today - dt.timedelta(days=1)
 
 
 def _json_money(value: Any) -> str:
@@ -641,7 +657,9 @@ def report_rows_7d(
         filters = [report_filter("campaignId", [campaign_id])]
 
     try:
-        page = run_report_all(method, id_key, days=7, filters=filters)
+        page = run_report_all(
+            method, id_key, days=7, filters=filters, window=complete_days_window(7)
+        )
     except ToolError as exc:
         return [], str(exc)
     return page.rows, None
@@ -1141,6 +1159,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             next_offset=next_offset,
             total_rows_available=page.total,
             truncated=truncated,
+            time_zone=client.account_timezone(),
             note=note,
         )
 
