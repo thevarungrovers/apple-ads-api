@@ -262,3 +262,52 @@ def render_checks(checks: list[Check]) -> list[str]:
 
 def any_failed(checks: list[Check]) -> bool:
     return any(not check.passed for check in checks)
+
+
+# --- apply results ------------------------------------------------------------
+
+
+class ApplyResult(BaseModel):
+    """What actually happened, as opposed to what was proposed."""
+
+    applied: bool
+    entry_id: str = Field(description="Pass this to revert_change to undo it")
+    tool: str
+    entity_type: str
+    entity_id: str
+    entity_name: str | None = None
+    path: str | None = None
+    field: str
+    before: str
+    after: str
+    observed_after: str | None = Field(
+        default=None, description="What Apple reports now, read back from its response"
+    )
+    projected_daily_spend_delta: str
+    session: dict[str, str]
+    daily: dict[str, str] = Field(
+        default_factory=dict,
+        description="Today's applies and projected spend across every server process",
+    )
+    failures: list[str] = Field(default_factory=list)
+    note: str = ""
+
+
+class BulkApplyResult(BaseModel):
+    applied: bool = Field(description="False when nothing landed; see succeeded/failed")
+    entry_id: str = Field(
+        description="The batch id when there is more than one item -- revert_change "
+        "takes it to undo every item that landed -- else the single entry id"
+    )
+    entry_ids: list[str] = Field(
+        default_factory=list, description="One ledger entry per item, in request order"
+    )
+    tool: str
+    succeeded: int
+    failed: int
+    results: list[str] = Field(description="One line per item, in request order")
+    failures: list[str] = Field(default_factory=list)
+    projected_daily_spend_delta: str
+    session: dict[str, str]
+    daily: dict[str, str] = Field(default_factory=dict)
+    note: str

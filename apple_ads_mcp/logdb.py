@@ -537,17 +537,24 @@ def complete_change(
     detail: str = "",
     observed_after: Any = None,
     failures: list[dict[str, Any]] | None = None,
+    entity_id: Any = None,
 ) -> None:
-    """Record how it went. A plain UPDATE, never an upsert -- see the docstring."""
+    """Record how it went. A plain UPDATE, never an upsert -- see the docstring.
+
+    `entity_id` is for a creation: the intent is written before Apple has
+    assigned an id, so the outcome fills it in. COALESCE keeps the intent's
+    value whenever no new one is given.
+    """
     connect().execute(
         "UPDATE changes SET outcome=?, outcome_ts=?, outcome_detail=?, observed_after=?, "
-        "failures_json=? WHERE entry_id=?",
+        "failures_json=?, entity_id=COALESCE(?, entity_id) WHERE entry_id=?",
         (
             outcome,
             _now(),
             detail,
             None if observed_after is None else str(observed_after),
             _dumps(failures or []),
+            None if entity_id is None else str(entity_id),
             entry_id,
         ),
     )
@@ -596,6 +603,20 @@ def entries(since: dt.datetime | None = None) -> list[dict[str, Any]]:
         params = (since.isoformat(timespec="seconds"),)
     sql += " ORDER BY ts DESC, rowid DESC"
     return [_row_to_entry(row) for row in connect().execute(sql, params)]
+
+
+def batch_entries(batch_id: str) -> list[dict[str, Any]]:
+    """Every row of one batch, in the order they were written.
+
+    A batch writes one row per entity, sharing `batch_id` in extra_json, so one
+    item can be reverted on its own and the whole batch by this id.
+    """
+    rows = connect().execute(
+        "SELECT * FROM changes WHERE json_extract(extra_json, '$.batch_id') = ? "
+        "ORDER BY ts, rowid",
+        (batch_id,),
+    )
+    return [_row_to_entry(row) for row in rows]
 
 
 def find_entry(entry_id: str) -> dict[str, Any] | None:

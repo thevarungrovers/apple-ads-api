@@ -63,6 +63,7 @@ REFUSED = logdb.REFUSED
 new_entry_id = logdb.new_entry_id
 entries = logdb.entries
 find_entry = logdb.find_entry
+batch_entries = logdb.batch_entries
 reverted_entry_ids = logdb.reverted_entry_ids
 
 
@@ -107,14 +108,19 @@ def write_outcome(
     detail: str = "",
     observed_after: Any = None,
     failures: list[dict[str, Any]] | None = None,
+    entity_id: Any = None,
 ) -> None:
-    """Record how it went. `outcome` is one of applied/failed/partial/refused."""
+    """Record how it went. `outcome` is one of applied/failed/partial/refused.
+
+    `entity_id` fills in the id Apple assigned to something just created.
+    """
     logdb.complete_change(
         entry_id,
         outcome=outcome,
         detail=detail,
         observed_after=observed_after,
         failures=failures,
+        entity_id=entity_id,
     )
 
 

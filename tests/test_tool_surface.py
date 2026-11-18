@@ -284,10 +284,10 @@ def test_out_of_scope_api_methods_are_unreachable() -> None:
     """
     forbidden = frozenset(FORBIDDEN_METHODS)
     offenders = []
-    for path in sorted((REPO_ROOT / "apple_ads_mcp").glob("*.py")):
+    for path in sorted((REPO_ROOT / "apple_ads_mcp").rglob("*.py")):
         for text in _live_strings(path.read_text()):
             if text.strip() in forbidden:
-                offenders.append(f"{path.name}: {text.strip()}")
+                offenders.append(f"{path.relative_to(REPO_ROOT)}: {text.strip()}")
     assert not offenders, (
         f"out-of-scope API methods are named in live code: {offenders}. If that is "
         f"intentional, each needs a preview/apply pair, a ledger entry and a line "

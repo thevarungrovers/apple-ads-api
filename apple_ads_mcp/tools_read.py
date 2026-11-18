@@ -35,7 +35,6 @@ from apple_ads_mcp import client, ledger
 from apple_ads_mcp.guardrails import read_only_mode, writes_disabled
 from apple_ads_mcp.client import (
     REPORT_TIMEOUT,
-    call,
     context_header,
     enum_value,
     eq_filter,
@@ -370,7 +369,7 @@ def run_report(
     routinely outruns the client's 30s default.
     """
     start, end = _window(days)
-    response = call(
+    response = client.call(
         f"{method}_without_preload_content",
         x_ap_context=context_header(),
         apps_reporting_request=AppsReportingRequest(
@@ -425,21 +424,41 @@ def entity_metrics_7d(
     confidence. The reason comes back as the fifth element so the preview can
     say so out loud.
     """
+    rows, error = report_rows_7d(method, id_key, campaign_id)
+    if error:
+        return Decimal("0"), 0, 0, 0, error
+    return pick_metrics(rows, entity_id)
+
+
+def report_rows_7d(
+    method: str, id_key: str, campaign_id: int | None
+) -> tuple[list[dict], str | None]:
+    """The raw 7-day report rows one entity's figures are picked out of.
+
+    Split out so a preview touching several entities in one campaign fetches
+    the campaign's report ONCE (see changes.context) rather than once per entity.
+    """
     # The CAMPAIGN report takes no filter at all -- even campaignId is rejected --
     # so it is fetched whole and the row is picked out. The keyword and ad-group
     # reports take campaignId and nothing else.
     if id_key == "campaignId":
         filters = None
     elif campaign_id is None:
-        return Decimal("0"), 0, 0, 0, "no campaign id for this entity, so its report cannot be scoped"
+        return [], "no campaign id for this entity, so its report cannot be scoped"
     else:
         filters = [report_filter("campaignId", [campaign_id])]
 
     try:
         rows, _grand_total, _start, _end = run_report(method, id_key, days=7, filters=filters)
     except ToolError as exc:
-        return Decimal("0"), 0, 0, 0, str(exc)
+        return [], str(exc)
+    return rows, None
 
+
+def pick_metrics(
+    rows: list[dict], entity_id: Any
+) -> tuple[Decimal, int, int, int, str | None]:
+    """(spend, taps, impressions, installs, None) for one entity's row."""
     metrics = next(
         (
             row.get("totalMetrics")
@@ -610,7 +629,7 @@ def query_audit(
     until = until or dt.datetime.now(dt.timezone.utc)
     rows: list[Any] = []
     for entity_type in entity_types:
-        response = call(
+        response = client.call(
             "query_audit_summary",
             x_ap_context=context_header(),
             audit_query=AuditQuery(
@@ -648,8 +667,8 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         when the configured adAccountId is wrong -- which makes it the right
         first thing to run when anything else returns 401/403.
         """
-        me = unwrap(call("get_me"), "me")
-        acls = unwrap(call("get_user_acls"), "ACLs")
+        me = unwrap(client.call("get_me"), "me")
+        acls = unwrap(client.call("get_user_acls"), "ACLs")
         in_use = client.ad_account()
         accounts = [
             AdAccountInfo(
@@ -681,7 +700,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         limit: Annotated[int, Field(description="Max campaigns to return", ge=1, le=1000)] = 100,
     ) -> CampaignList:
         """Every campaign, with status, serving status and daily budget."""
-        response = call(
+        response = client.call(
             "campaigns_query_post",
             x_ap_context=context_header(),
             query_request=query(page_size=limit),
@@ -709,7 +728,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
     ) -> AdGroupList:
         """Ad groups, with status, serving status and default bid."""
         filters = [eq_filter("campaignId", campaign_id)] if campaign_id else None
-        response = call(
+        response = client.call(
             "adgroups_query_post",
             x_ap_context=context_header(),
             query_request=query(page_size=limit, filters=filters),
@@ -745,7 +764,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             filters.append(eq_filter("adGroupId", ad_group_id))
         if campaign_id:
             filters.append(eq_filter("campaignId", campaign_id))
-        response = call(
+        response = client.call(
             "keywords_query_post",
             x_ap_context=context_header(),
             query_request=query(page_size=limit, filters=filters or None),
@@ -793,7 +812,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             ad_group_ids = [ad_group_id]
         else:
             groups = unwrap(
-                call(
+                client.call(
                     "adgroups_query_post",
                     x_ap_context=context_header(),
                     query_request=query(page_size=1000, filters=[eq_filter("campaignId", campaign_id)]),
@@ -806,7 +825,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         for group_id in ad_group_ids:
             if len(rows) >= limit:
                 break
-            response = call(
+            response = client.call(
                 "negative_keywords_query_post",
                 x_ap_context=context_header(),
                 query_request=query(
@@ -834,7 +853,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         all, so there is no way to say which account an update applies to. Until
         that is resolved, editing a shared budget is a job for the Apple Ads UI.
         """
-        response = call(
+        response = client.call(
             "shared_budgets_query_post",
             x_ap_context=context_header(),
             query_request=query(page_size=limit),
@@ -1044,7 +1063,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         limit: Annotated[int, Field(description="Max suggestions", ge=1, le=200)] = 50,
     ) -> SuggestionList:
         """Keywords Apple suggests for this account. Suggestions only -- nothing is added."""
-        response = call(
+        response = client.call(
             "query_keyword_suggestions",
             x_ap_context=context_header(),
             recommendation_query_request=RecommendationQueryRequest(),
@@ -1077,7 +1096,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         not exposed: a one-call "apply Apple's advice" would move real money with
         no preview, no bound and no ledger line.
         """
-        response = call(
+        response = client.call(
             "query_daily_budget_recommendations",
             x_ap_context=context_header(),
             recommendation_query_request=RecommendationQueryRequest(),
