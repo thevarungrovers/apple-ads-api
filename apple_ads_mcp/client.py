@@ -26,6 +26,7 @@ invalidated server-side mid-session.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from decimal import Decimal, InvalidOperation
@@ -465,6 +466,11 @@ def landed(observed: str | None, intended: str) -> bool:
     return normalized_value(observed) == normalized_value(intended)
 
 
+#: The one spelling of money accepted: ASCII digits, optionally a point and
+#: one or two more digits.
+_PLAIN_DECIMAL = re.compile(r"[0-9]+(?:\.[0-9]{1,2})?")
+
+
 def parse_decimal(raw: str, field: str) -> Decimal:
     """Money arrives as a decimal STRING, never as cents-as-int.
 
@@ -474,6 +480,16 @@ def parse_decimal(raw: str, field: str) -> Decimal:
     text = str(raw).strip()
     if not text:
         raise ToolError(f"{field} is empty; give an amount like \"1.20\"")
+    if not _PLAIN_DECIMAL.fullmatch(text):
+        # Decimal() also takes "5E+1", "1_000", "+1", ".5" and non-ASCII digits,
+        # and str() of an exponent value is sent verbatim. A human approves
+        # the text shown in the prompt, so only one spelling is accepted.
+        raise ToolError(
+            f"{field}={raw!r} is not a plain decimal amount. Write money as digits "
+            f'with an optional point and up to 2 decimals, e.g. "1.20" -- no '
+            f"exponent, sign, separator or leading point, and never cents as an "
+            f"integer."
+        )
     try:
         value = Decimal(text)
     except InvalidOperation:
@@ -490,7 +506,12 @@ def parse_decimal(raw: str, field: str) -> Decimal:
 
 
 def to_money(amount: Decimal | str, currency: str | None) -> Money:
-    return Money(amount=str(amount), currency=currency)
+    """Money for a request, its amount ALWAYS a plain string ("50", never "5E+1")."""
+    try:
+        text = format(Decimal(str(amount)), "f")
+    except InvalidOperation:
+        text = str(amount)
+    return Money(amount=text, currency=currency)
 
 
 # --- queries -----------------------------------------------------------------

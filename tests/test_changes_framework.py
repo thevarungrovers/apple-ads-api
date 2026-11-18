@@ -481,5 +481,31 @@ def test_an_inheriting_keyword_bid_refuses_a_moved_ad_group_default() -> None:
     assert apple.writes() == []
 
 
+
+def test_money_rejects_exponents_and_other_non_plain_spellings() -> None:
+    from apple_ads_mcp.client import parse_decimal
+
+    for raw in ("5E+1", "5e1", "1E-2", "1.2e0", "1_000", "+1.20", ".5", "1.", "1,20",
+                "\uff11.\uff12\uff10", "0x10", "NaN", "Infinity", "-1.00"):
+        _raises(lambda raw=raw: parse_decimal(raw, "new_bid"), "new_bid")
+    assert str(parse_decimal("1.20", "x")) == "1.20"
+    assert str(parse_decimal(" 0.5 ", "x")) == "0.5"
+    assert str(parse_decimal("007", "x")) == "7"
+    assert str(parse_decimal("10", "x")) == "10"
+
+
+def test_an_exponent_bid_is_refused_before_anything_is_previewed() -> None:
+    tools, apple, _ = rig()
+    _raises(lambda: tools["preview_keyword_bid"](keyword_id=KEYWORD, new_bid="5E-1"), "plain decimal")
+    assert apple.writes() == []
+
+
+def test_money_is_always_sent_as_a_plain_string() -> None:
+    from apple_ads_mcp.client import to_money
+
+    assert to_money(Decimal("5E+1"), "USD").amount == "50"
+    assert to_money("1.20", "USD").amount == "1.20"
+
+
 if __name__ == "__main__":
     raise SystemExit(run(dict(globals())))
