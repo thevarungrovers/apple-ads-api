@@ -107,22 +107,24 @@ def test_invisible_and_format_characters_are_refused() -> None:
 
 
 CYRILLIC_A, CYRILLIC_O, CYRILLIC_C = "\u0430", "\u043e", "\u0421"
-DASHES = ("\u2010", "\u2011", "\u2013", "\u2014", "\ufe63", "\uff0d", "\u2212")
+DASHES = ("\u2010", "\u2011", "\u2013", "\u2014", "\ufe58", "\ufe63", "\uff0d", "\u2212",
+          "\u2043", "\u02d7", "\u2796")
+GREEK_O, CYRILLIC_DE = "\u039f", "\u0414"
 FILLERS = ("\u115f", "\u1160", "\u3164", "\uffa0", "\u034f")
 
 
-def test_look_alike_characters_where_a_prefix_sits_are_refused() -> None:
+def test_look_alike_characters_that_read_as_a_prefix_are_refused() -> None:
     """A Cyrillic letter or a Unicode dash makes a name LOOK like another
     identity's while the ASCII prefix checks see a plain base."""
-    cases = [(NEITHER, f"{CYRILLIC_C}D-bot-x"), (NEITHER, f"CD-b{CYRILLIC_O}t-x")]
+    cases = [(NEITHER, f"{CYRILLIC_C}D-bot-x"), (NEITHER, f"CD-b{CYRILLIC_O}t-x"),
+             (NEITHER, f"{GREEK_O}K-bot-x"), (NEITHER, "\uff23\uff24-bot-x"),
+             (NEITHER, f"C{CYRILLIC_DE}-bot-x")]
     cases += [(NEITHER, f"CD{d}bot{d}x") for d in DASHES]
     cases += [(NEITHER, f"CD-bot{d}x") for d in DASHES]
     cases += [(NEITHER, f"CD{d}bot-x") for d in DASHES]
     # Under initials only, the base's first word sits where an agent name would.
     cases += [(OWNER_ONLY, f"m{CYRILLIC_A}x-launch"), (OWNER_ONLY, f"AB-m{CYRILLIC_A}x-x"),
-              (OWNER_ONLY, "bot\u2010launch")]
-    # Under an agent name only, where the initials would sit.
-    cases += [(AGENT_ONLY, f"{CYRILLIC_C}D-launch"), (AGENT_ONLY, "CD\u2013launch")]
+              (OWNER_ONLY, "bot\u2010launch"), (OWNER_ONLY, f"b{CYRILLIC_O}t-x")]
     for identity, name in cases:
         _refused(lambda identity=identity, name=name: stamp(
             identity, name, entity_type="campaign"), "look")
@@ -131,6 +133,25 @@ def test_look_alike_characters_where_a_prefix_sits_are_refused() -> None:
     assert not OWNER_ONLY.owns("AB-bot\u2010x") and not OWNER_ONLY.owns("AB\u2010bot-x")
     _refused(lambda: rename(OWNER_ONLY, f"AB-b{CYRILLIC_O}t-x", "y", entity_type="campaign",
                             ledger_owned=False), "not this agent's")
+    # Reading as THIS checkout's own prefix counts too.
+    assert naming.lookalike_in_prefix("\u0410B-x", "AB-") == "\u0410"
+    assert naming.lookalike_in_prefix("max\u2010x", "max-") == "\u2010"
+    assert naming.lookalike_in_prefix("\u0410B-x") is None
+
+
+def test_plain_names_that_do_not_read_as_a_prefix_are_used_as_given() -> None:
+    """With no identity the name is used exactly as given: accents, other
+    scripts and Unicode dashes are refused only when they make it read as a
+    prefix."""
+    for name in ("Caf\u00e9-Paris-promo", "Summer \u2013 Sale", "Paris-caf\u00e9",
+                 "\u00c9t\u00e9 \u2013 soldes", f"{CYRILLIC_DE}{CYRILLIC_A}-x"):
+        assert stamp(NEITHER, name, entity_type="campaign").final == name
+    owned = stamp(OWNER_ONLY, "AB-Caf\u00e9-x", entity_type="campaign")
+    assert (owned.final, owned.base, owned.rule) == ("AB-Caf\u00e9-x", "Caf\u00e9-x", "already_ours")
+    assert OWNER_ONLY.owns("AB-Caf\u00e9-x")
+    # Under an agent name only, a non-ASCII first word does not read as initials.
+    assert stamp(AGENT_ONLY, f"{CYRILLIC_C}D-launch", entity_type="ad").final == f"max-{CYRILLIC_C}D-launch"
+    assert stamp(AGENT_ONLY, "CD\u2013launch", entity_type="ad").final == "max-CD\u2013launch"
 
 
 def test_non_ascii_stays_allowed_in_the_base() -> None:

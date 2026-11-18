@@ -285,13 +285,15 @@ Either can be left empty -- that part is simply skipped, never an error:
 - **Invisible characters are refused**: control characters (tab, newline,
   NUL), zero-width and bidi marks, the byte-order mark, line or paragraph
   separators, and the blank Hangul fillers and combining grapheme joiner.
-- **Look-alikes are refused where a prefix sits.** The first two
-  dash-terminated words of the final name, and the dashes after them, must be
-  ASCII: a Cyrillic `С` or a Unicode hyphen (`CD‐bot‐x`) would look like
-  another identity's prefix while the checks read a plain name. Accents, other
-  scripts and dashes stay allowed in the base after a full prefix
-  (`AB-max-café — été`) and in a name with no dash-terminated non-ASCII word
-  at its start (`Paris café`, `Paris-café`).
+- **Look-alikes are refused only when they make a name read as a prefix.**
+  The first two dash-separated words are folded to a skeleton (NFKC, every
+  Unicode dash to `-`, common Cyrillic and Greek look-alikes to Latin). If the
+  skeleton reads as `XX-agent-` or as this checkout's own prefix and the
+  original differs from it, the name is refused: `СD-bot-x` with a Cyrillic
+  `С`, or `CD‐bot‐x` with a Unicode hyphen, would look like another
+  identity's prefix while the checks read a plain name. Any other name is used
+  as given, accents and dashes included (`Café-Paris-promo`,
+  `Summer – Sale`, `AB-Café-x` under initials only).
 - **The preview shows the exact name** that will be sent (`entity_name`, `path`
   and a `naming` block with the requested name, the final one, the prefix and
   the length), and warns when it differs from what was asked.

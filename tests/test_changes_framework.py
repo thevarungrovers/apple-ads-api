@@ -610,6 +610,10 @@ def test_the_backstop_checks_the_name_actually_sent_not_the_one_reported() -> No
     # ... or that only LOOKS like someone else's, through a Unicode hyphen.
     looks = preview("looks", [("campaign", "plain")], "CD\u2010bot\u2010plain", Identity())
     assert looks.blocked and failed(looks, "name_prefix"), looks.guardrail_checks
+    # ... but a plain name with accents or a Unicode dash is sent as given.
+    plain = preview("plain", [("campaign", "Caf\u00e9-Paris-promo")], "Summer \u2013 Caf\u00e9",
+                    Identity())
+    assert not failed(plain, "name_prefix"), plain.guardrail_checks
     # Over the length cap, prefix included.
     long = preview("long", [("campaign", "AB-max-x")], "AB-max-" + "x" * 194)
     assert long.blocked and failed(long, "name_length"), long.guardrail_checks

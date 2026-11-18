@@ -86,9 +86,28 @@ _INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
 #: joiner. Refused anywhere in a name.
 INVISIBLE_FILLERS = frozenset("\u115f\u1160\u3164\uffa0\u034f")
 
-#: Characters that read as `-` but are not it: every dash punctuation (Pd)
-#: besides the hyphen-minus, plus the minus signs and the hyphen bullet.
-_DASH_LOOKALIKES = frozenset("\u2212\u2043\u02d7\u2796")
+#: Characters that read as `-` but are not it, beyond dash punctuation (Pd):
+#: the minus signs, the hyphen bullet, the modifier minus and the heavy minus.
+_DASH_LOOKALIKES = frozenset("\u2212\u2043\u02d7\u2796\ufe58\ufe63\uff0d")
+
+#: Cyrillic and Greek letters that render like a Latin one. Small and explicit:
+#: it only has to catch what would make a name READ as a prefix.
+_CONFUSABLES = str.maketrans({
+    # Cyrillic lowercase
+    "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p", "\u0441": "c",
+    "\u0445": "x", "\u0443": "y", "\u0456": "i", "\u0458": "j", "\u0455": "s",
+    # Cyrillic uppercase
+    "\u0410": "A", "\u0412": "B", "\u0415": "E", "\u041a": "K", "\u041c": "M",
+    "\u041d": "H", "\u041e": "O", "\u0420": "P", "\u0421": "C", "\u0422": "T",
+    "\u0425": "X", "\u0414": "D",
+    # Greek uppercase
+    "\u0391": "A", "\u0392": "B", "\u0395": "E", "\u0396": "Z", "\u0397": "H",
+    "\u0399": "I", "\u039a": "K", "\u039c": "M", "\u039d": "N", "\u039f": "O",
+    "\u03a1": "P", "\u03a4": "T", "\u03a7": "X", "\u03a5": "Y",
+})
+
+#: What a full two-part prefix looks like once folded to its skeleton.
+_SKELETON_PREFIX = re.compile(r"[A-Z]{2,4}-[a-z][a-z0-9_]{1,23}-", re.ASCII)
 
 
 def invisible_character(text: str) -> str | None:
@@ -103,35 +122,46 @@ def invisible_character(text: str) -> str | None:
     )
 
 
-def _is_dash(c: str) -> bool:
-    return c == "-" or c in _DASH_LOOKALIKES or unicodedata.category(c) == "Pd"
+def _fold(c: str) -> str:
+    """One character's skeleton: NFKC, every dash look-alike to `-`, confusables to Latin."""
+    return "".join(
+        "-" if x in _DASH_LOOKALIKES or unicodedata.category(x) == "Pd" else x.translate(_CONFUSABLES)
+        for x in unicodedata.normalize("NFKC", c)
+    )
 
 
-def lookalike_in_prefix(name: str | None) -> str | None:
-    """The first non-ASCII character where a prefix would sit, if any.
+def lookalike_in_prefix(name: str | None, own_prefix: str = "") -> str | None:
+    """The first look-alike character that makes ``name`` READ as a prefix, if any.
 
-    A prefix is two dash-terminated words at the start of a name. Every
-    ownership and impersonation check here is ASCII (FULL_PREFIX, startswith),
-    so `C\u0421-bot-x` with a Cyrillic letter, or `CD\u2010bot\u2010x` with
-    a Unicode hyphen, would pass them while LOOKING like CD-bot's. So the first
-    two words -- each counted only when a dash (or a dash look-alike) follows
-    it -- and the dashes after them must be ASCII. Later text is the base, and
-    may be anything visible.
+    Every ownership and impersonation check here is ASCII (FULL_PREFIX,
+    startswith), so `C\u0421-bot-x` with a Cyrillic letter, or `CD\u2010bot\u2010x`
+    with a Unicode hyphen, would pass them while LOOKING like CD-bot's. So the
+    name is folded to a skeleton (NFKC, dash look-alikes to `-`, Cyrillic and
+    Greek confusables to Latin). When the skeleton starts with a full two-part
+    prefix (`XX-agent-`) or with ``own_prefix``, and the original differs from
+    the skeleton there, the first differing character is returned.
+
+    A name that does not read as a prefix once folded is left alone, whatever
+    it contains: `Caf\u00e9-Paris-promo` and `Summer \u2013 Sale` are plain names.
     """
     text = str(name or "")
-    words = 0
-    start = 0
-    for index, c in enumerate(text):
-        if words >= 2:
+    pieces = [_fold(c) for c in text]
+    skeleton = "".join(pieces)
+    ends = []
+    match = _SKELETON_PREFIX.match(skeleton)
+    if match:
+        ends.append(match.end())
+    if own_prefix and skeleton.startswith(own_prefix):
+        ends.append(len(own_prefix))
+    if not ends:
+        return None
+    end, position = max(ends), 0
+    for c, piece in zip(text, pieces):
+        if position >= end:
             break
-        if _is_dash(c):
-            if c != "-":
-                return c
-            bad = next((x for x in text[start:index] if not x.isascii()), None)
-            if bad is not None:
-                return bad
-            words += 1
-            start = index + 1
+        if piece != c:
+            return c
+        position += len(piece)
     return None
 
 
@@ -216,7 +246,7 @@ class Identity:
         text = str(name or "")
         if not self.prefix or not text.startswith(self.prefix):
             return False
-        if lookalike_in_prefix(text) is not None or invisible_character(text) is not None:
+        if lookalike_in_prefix(text, self.prefix) is not None or invisible_character(text) is not None:
             return False  # looks like someone else's, or hides something
         parsed = parse(text)
         return parsed is None or (parsed.owner, parsed.agent) == (self.owner, self.agent)
@@ -414,14 +444,14 @@ def stamp(identity: Identity, requested: str | None, *, entity_type: str) -> Sta
             f"zero-width and bidi marks, line separators and blank fillers are refused. "
             f"Remove it."
         )
-    look = lookalike_in_prefix(final)
+    look = lookalike_in_prefix(final, prefix)
     if look is not None:
         raise NameRefused(
-            f"INVALID_REQUEST: {final!r} has U+{ord(look):04X} "
-            f"{unicodedata.name(look, 'unnamed')} in its first two dash-separated words, "
-            f"where a prefix sits. A non-ASCII letter or a Unicode dash there can make a "
-            f"name look like another identity's (CD-bot-) while reading as a plain base. "
-            f"Use ASCII letters and '-' there, or move the word later in the name."
+            f"INVALID_REQUEST: {final!r} reads as a prefix (XX-agent- or this checkout's "
+            f"{prefix or 'none'}) through U+{ord(look):04X} "
+            f"{unicodedata.name(look, 'unnamed')}, a look-alike letter or dash. It could "
+            f"pass for another identity's name while the checks read a plain one. Use "
+            f"ASCII letters and '-' there, or reorder the name."
         )
     claimed = parse(final)
     if claimed is not None and (claimed.owner, claimed.agent) != (identity.owner, identity.agent):

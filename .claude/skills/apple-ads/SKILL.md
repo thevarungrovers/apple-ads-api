@@ -187,9 +187,9 @@ reads as anyone else's prefix (`CD-bot-...`, `AB-cli-...`) is ALWAYS refused --
 even when no identity is configured -- because it would impersonate them. Over
 200 characters (prefix included) is refused, not truncated, and so is any
 invisible character (control, zero-width, bidi mark, line separator, Hangul
-filler). The first two dash-terminated words of the final name must be ASCII,
-with ASCII `-` after them: a non-ASCII letter or a Unicode dash there could
-look like another identity's prefix.
+filler). A name that only READS as a prefix through look-alike letters or
+dashes (Cyrillic `СD-bot-`, `CD‐bot‐`) is refused too; any other
+name, accents and Unicode dashes included, is used as given.
 A house-style name, if the team has one, is the base: the prefix goes first.
 A duplicate campaign name, or ad group name in its campaign, fails
 `name_is_free` -- on a create or a rename -- and so does a scope too big to
