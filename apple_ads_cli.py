@@ -2,9 +2,9 @@
 """Break-glass CLI for the Apple Ads Platform API: any endpoint, driven by a human.
 
 The MCP server in `apple_ads_mcp/` is the normal path, and it deliberately
-exposes a narrow surface -- no creates, no deletes, no generic passthrough. This
-script is the other half of that bargain: when you need something the server
-refuses to expose (create a campaign, delete a negative keyword, call an
+exposes a narrow surface -- typed preview/apply pairs, no deletes, no generic
+passthrough. This script is the other half of that bargain: when you need
+something the server refuses to expose (delete a negative keyword, call an
 endpoint nobody has wrapped), you reach for this instead of widening the agent's
 surface.
 
@@ -31,6 +31,15 @@ kill switch (.audit/DISABLE_WRITES) stops this CLI too, and every write it
 sends gets a row in the `changes` ledger (tool="cli"), so the daily cap and
 reconcile_ledger see it.
 
+NAMES GET THE CLI PREFIX. A POST that creates a campaign, ad group, ad or
+creative, or a PUT to one by id, with a "name" in its body has that name stamped
+`<OWNER>-cli-<base>` (apple_ads_mcp/naming.py) when APPLE_ADS_OWNER_INITIALS is
+set in .env, and left exactly as given when it is not -- `cli` tells a human
+from an agent under the same owner, so with no owner there is nothing to mark.
+The dry run prints the final body, the confirmation shows the final name, and
+the ledger row records the identity. Another agent's prefix is refused; there
+is no --no-prefix (a person who wants an unprefixed name uses the Apple Ads UI).
+
 Paths are relative to https://api.ads.apple.com/v1 and the context header is
 added for you. `/acls` and `/me` are the two endpoints that must NOT carry it,
 and this script leaves it off for those.
@@ -55,6 +64,7 @@ from apple_ads_mcp import ledger, logdb
 from apple_ads_mcp.client import context_header, get_api
 from apple_ads_mcp.config import ConfigError, resolve_ad_account_id
 from apple_ads_mcp.guardrails import writes_disabled
+from apple_ads_mcp.naming import Identity, NameRefused, stamp
 
 BASE_URL = "https://api.ads.apple.com/v1"
 
@@ -118,6 +128,50 @@ def is_mutation(method: str, path: str) -> bool:
 # credential and what can it reach", which is the question you ask when the
 # context itself is what you doubt. Note the path is `/acls`, NOT `/me/acls`.
 NO_CONTEXT_PATHS = frozenset({"me", "acls"})
+
+
+#: Collections whose entities carry a name, as the path spells them.
+NAMED_COLLECTIONS = {
+    "campaigns": "campaign",
+    "adgroups": "ad_group",
+    "ads": "ad",
+    "creatives": "creative",
+}
+
+
+def named_entity(method: str, path: str) -> str | None:
+    """The entity type when this request creates (POST to the collection) or
+    updates (PUT to `<collection>/<id>`) a named entity; None otherwise."""
+    method = (method or "").strip().upper()
+    parts = [p.lower() for p in path.strip("/").split("/") if p]
+    if method == "POST" and parts and parts[-1] in NAMED_COLLECTIONS:
+        return NAMED_COLLECTIONS[parts[-1]]
+    if method == "PUT" and len(parts) >= 2 and parts[-2] in NAMED_COLLECTIONS and parts[-1].isdigit():
+        return NAMED_COLLECTIONS[parts[-2]]
+    return None
+
+
+def cli_identity() -> Identity:
+    """`<OWNER>-cli-` from .env, or no prefix when the initials are empty."""
+    return Identity.load().cli()
+
+
+def stamp_body(method: str, path: str, body: dict | None, identity: Identity):
+    """(body with its name stamped, the Stamped result or None). Raises CliError.
+
+    Only a create or an update of a named entity with a string "name" is
+    touched; every other request is sent exactly as given.
+    """
+    entity_type = named_entity(method, path)
+    if entity_type is None or not isinstance(body, dict) or not isinstance(body.get("name"), str):
+        return body, None
+    try:
+        stamped = stamp(identity, body["name"], entity_type=entity_type)
+    except NameRefused as exc:
+        raise CliError(str(exc)) from None
+    if stamped.failures:
+        raise CliError("; ".join(detail for _name, detail in stamped.failures))
+    return {**body, "name": stamped.final}, stamped
 
 
 def needs_context(path: str) -> bool:
@@ -276,6 +330,20 @@ def _run(args: argparse.Namespace) -> int:
         return 1
 
     mutation = is_mutation(args.method, args.path)
+    stamped = None
+    identity = cli_identity()
+    if mutation:
+        try:
+            body, stamped = stamp_body(args.method, args.path, body, identity)
+        except CliError as exc:
+            print(f"error: {exc} Nothing was sent.", file=sys.stderr)
+            return 1
+    if stamped is not None:
+        print(
+            f"naming: {stamped.requested!r} -> {stamped.final!r} "
+            f"(prefix {stamped.prefix!r} from .env; {stamped.block()['rule']})",
+            file=sys.stderr,
+        )
 
     if mutation and not args.apply:
         print("DRY RUN — nothing was sent.\n")
@@ -289,6 +357,8 @@ def _run(args: argparse.Namespace) -> int:
         return 0
 
     if mutation and args.apply:
+        if stamped is not None:
+            print(f"The name that will be sent: {stamped.final!r}", file=sys.stderr)
         refusal = confirm_apply(args.path)
         if refusal:
             print(f"error: {refusal}", file=sys.stderr)
@@ -333,7 +403,11 @@ def _run(args: argparse.Namespace) -> int:
             after=json.dumps(body)[:2000] if body is not None else "",
             campaign_id=int(campaign_id) if campaign_id else None,
             projected_daily_spend_delta="0",
-            extra={"source": "apple_ads_cli", "unbounded": True},
+            extra={
+                "source": "apple_ads_cli", "unbounded": True,
+                **({"identity": identity.ledger_record(), "requested_name": stamped.requested}
+                   if stamped is not None else {}),
+            },
         )
 
     try:

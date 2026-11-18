@@ -195,6 +195,79 @@ def test_a_bypass_post_with_apply_but_no_terminal_sends_nothing() -> None:
     assert sent == [] and ledger.entries() == []
 
 
+def _as(owner: str, agent: str) -> None:
+    from apple_ads_mcp.naming import Identity
+
+    cli.cli_identity = lambda: Identity.from_values(owner, agent, ".env").cli()
+
+
+CLI_COMBOS = {("AB", "max"): "AB-cli-Launch", ("AB", ""): "AB-cli-Launch",
+              ("", "max"): "Launch", ("", ""): "Launch"}
+
+
+def test_a_dry_run_create_shows_the_cli_prefix_for_each_identity() -> None:
+    import contextlib
+
+    for (owner, agent), expected in CLI_COMBOS.items():
+        sent: list = []
+        _wire(sent, tty=False, typed="")
+        _as(owner, agent)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            assert cli._run(_args(method="POST", path="campaigns", data='{"name": "Launch"}',
+                                  apply=False)) == 0
+        assert sent == [] and f'"name": "{expected}"' in out.getvalue(), out.getvalue()
+
+
+def test_an_applied_create_and_rename_send_the_cli_prefix_for_each_identity() -> None:
+    for (owner, agent), expected in CLI_COMBOS.items():
+        for method, path in (("POST", "campaigns/1234567890/adgroups"), ("PUT", "ads/42")):
+            sent: list = []
+            _wire(sent, tty=True, typed=path)
+            _as(owner, agent)
+            assert cli._run(_args(method=method, path=path, data='{"name": "Launch"}')) == 0
+            assert sent[-1][2] == {"name": expected}, (owner, agent, method, sent)
+            row = ledger.entries()[0]
+            assert row["requested_name"] == "Launch" and row["identity"]["owner"] == (owner or None)
+
+
+def test_a_cli_name_that_is_already_ours_is_not_doubled_and_a_foreign_one_is_refused() -> None:
+    sent: list = []
+    _wire(sent, tty=True, typed="campaigns")
+    _as("AB", "max")
+    assert cli._run(_args(method="POST", path="campaigns", data='{"name": "AB-cli-Launch"}')) == 0
+    assert sent[-1][2] == {"name": "AB-cli-Launch"}
+    for name in ("AB-max-Launch", "CD-bot-Launch", "x" * 200):
+        sent = []
+        _wire(sent, tty=True, typed="campaigns")
+        _as("AB", "max")
+        assert cli._run(_args(method="POST", path="campaigns", data=f'{{"name": "{name}"}}')) == 1
+        assert sent == [] and ledger.entries() == [], name
+
+
+def test_a_malformed_owner_is_refused_by_the_cli_naming_its_key() -> None:
+    import contextlib
+
+    sent: list = []
+    _wire(sent, tty=True, typed="campaigns")
+    _as("a1", "max")
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        assert cli._run(_args(method="POST", path="campaigns", data='{"name": "Launch"}')) == 1
+    assert sent == [] and "APPLE_ADS_OWNER_INITIALS" in err.getvalue()
+
+
+def test_a_request_that_names_no_entity_is_untouched() -> None:
+    _as("AB", "max")
+    identity = cli.cli_identity()
+    for method, path in (("POST", "campaigns/1/adgroups/2/negativekeywords"),
+                         ("PUT", "campaigns/1/adgroups/2/targetingkeywords/bulk"),
+                         ("POST", "campaigns/query"), ("PUT", "campaigns")):
+        body = {"name": "Launch"}
+        assert cli.stamp_body(method, path, body, identity) == (body, None), (method, path)
+    assert cli.stamp_body("POST", "campaigns", {"status": "PAUSED"}, identity)[1] is None
+
+
 def test_the_installer_denies_the_cli_apply_to_the_agent() -> None:
     assert "Bash(*apple_ads_cli.py*--apply*)" in install.CLI_DENY_RULES
 
