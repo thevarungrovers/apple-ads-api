@@ -88,6 +88,12 @@ NOTHING = "(none)"
 CREATED = "created"
 
 
+class NothingToUndo(ValueError):
+    """Reverting this entry would change nothing -- it is already where the
+    inverse would put it (a keyword created PAUSED and never enabled). A batch
+    revert skips such rows; a single revert reports it."""
+
+
 @dataclass
 class Outcome:
     """What Apple said about one item, judged by read-back rather than status."""
@@ -186,6 +192,20 @@ class ChangeKind:
     def observe(self, ctx, response: Any, items: list[dict[str, Any]]) -> list[Outcome]:
         """One Outcome per item, in order."""  # pragma: no cover
         raise NotImplementedError
+
+    def execute(self, ctx, items: list[dict[str, Any]], call) -> list[Outcome]:
+        """Send ``items`` and judge each by read-back. One request by default.
+
+        A kind whose change takes more than one request (add a keyword, THEN
+        pause the old one) overrides this. A ToolError raised here marks every
+        item failed; a kind that has already landed part of its change returns
+        an Outcome with ``error`` for the rest instead of raising.
+        """
+        from apple_ads_mcp.client import WRITE_TIMEOUT
+
+        method, kwargs = self.request(ctx, items)
+        response = call(method, _request_timeout=WRITE_TIMEOUT, **kwargs)
+        return self.observe(ctx, response, items)
 
     # -- revert ------------------------------------------------------------------
 

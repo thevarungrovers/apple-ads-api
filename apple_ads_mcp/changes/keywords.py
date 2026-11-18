@@ -6,7 +6,14 @@ from decimal import Decimal
 from typing import Annotated, Any
 
 from apple_ads_platform import (
+    BulkKeywordCreate,
     BulkKeywordUpdate,
+    BulkNegativeKeywordUpdate,
+    KeywordCreateBulkRequest,
+    KeywordCreateBulkRequestItem,
+    KeywordMatchType,
+    NegativeKeywordUpdateBulkRequest,
+    NegativeKeywordUpdateBulkRequestItem,
     BulkNegativeKeywordCreate,
     KeywordStatus,
     KeywordUpdate,
@@ -46,6 +53,7 @@ from apple_ads_mcp.changes.common import (
 )
 from apple_ads_mcp.client import (
     context_header,
+    eq_filter,
     entity_path,
     enum_value,
     format_money,
@@ -685,11 +693,350 @@ class NegativeKeywordsAdd(ChangeKind):
         return _bulk_outcomes(response, items, "bulk negative keyword create", read)
 
     def inverse(self, ctx, entry):
-        status_kind = NegativeKeywordStatusKind()
-        return status_kind, status_kind.pause_item(
-            entry["entity_id"],
-            entry.get("entity_name"),
-            str(entry.get("path")),
-            entry.get("campaign_id"),
-            before="ENABLED",
+        return NegativeKeywordStatusKind().undo_creation(entry)
+
+
+# --- 3a: creating keywords, changing a match type, negatives in bulk ------------------
+
+
+class AddKeywords(ChangeKind):
+    name = "add_keywords"
+    preview_title = "Preview adding keywords to an ad group, created PAUSED (no write)"
+    apply_title = "Apply new keywords (created PAUSED; not idempotent)"
+    apply_annotations = APPLY
+    bulk = True
+    ledger_keys = (("keyword", CREATED),)
+    success_note = (
+        "They were created PAUSED and spend nothing until enabled with "
+        "preview_keyword_status. revert_change on an entry pauses that keyword; "
+        "deletion is not exposed."
+    )
+
+    def propose(
+        self,
+        ctx,
+        ad_group_id: Annotated[int, Field(description="Ad group to add them to")],
+        texts: Annotated[list[str], Field(description="Keyword texts to add")],
+        match_type: Annotated[str, Field(description="EXACT or BROAD")] = "EXACT",
+        bid: Annotated[
+            str | None,
+            Field(description='Bid for each, a decimal string like "1.20"; omit to use '
+                  "the ad group default"),
+        ] = None,
+    ) -> Proposal:
+        """Show what adding these keywords would do. Writes nothing.
+
+        Every keyword is created PAUSED, so approving this spends nothing:
+        enabling one is a separate preview_keyword_status, projected against the
+        campaign's budget. NOT idempotent -- applying twice adds duplicates.
+        """
+        target_match = parse_choice(match_type, {"EXACT", "BROAD"}, "match_type")
+        cleaned = list(dict.fromkeys(t.strip() for t in texts if t and t.strip()))
+        if not cleaned:
+            raise ToolError("texts is empty; there is nothing to add.")
+        ad_group = ctx.ad_group(ad_group_id)
+        campaign = ctx.campaign(ad_group.campaign_id)
+        currency = money_currency(ad_group_bid(ad_group)) or campaign_currency(campaign)
+        checks = [check_campaign_in_scope(ctx.limits, ad_group.campaign_id)]
+        bid_num = None
+        if bid is not None:
+            bid_num = parse_decimal(bid, "bid")
+            checks += [
+                check_currency(ctx.limits, currency),
+                check_ceiling("max_bid", bid_num, ctx.limits.max_bid, currency or ""),
+                check_bid_settable(bid_strategy_type(ad_group)),
+            ]
+        try:
+            existing_rows, _cut = client.query_all(
+                "keywords_query_post", [eq_filter("adGroupId", ad_group_id)], cap=5000
+            )
+            existing = {
+                ((k.text or "").lower(), enum_value(k.match_type)) for k in existing_rows if not k.deleted
+            }
+            unchecked = None
+        except ToolError as exc:
+            existing, unchecked = set(), f"duplicates could not be checked: {str(exc)[:160]}"
+        scope = entity_path(campaign, ad_group)
+        items, children = [], []
+        for text in cleaned:
+            path = f"{scope} > Keyword {text!r}"
+            items.append(make_item(
+                entity_type="keyword", entity_id=None, entity_name=text, path=path,
+                field=CREATED, before=NOTHING, after="PAUSED", campaign_id=ad_group.campaign_id,
+                ad_group_id=ad_group_id, text=text, match_type=target_match,
+                bid=str(bid_num) if bid_num is not None else None, currency=currency,
+            ))
+            children.append(child_preview(
+                tool="apply_add_keywords", entity_type="keyword", entity_id="(new)",
+                entity_name=text, path=path, field="exists", before="absent",
+                after=f"{target_match} keyword, PAUSED"
+                + (f", bid {bid_num} {currency or ''}".rstrip() if bid_num is not None else ", default bid"),
+                campaign=campaign, entity_serving="(created PAUSED)", projected=Decimal("0"),
+                warnings=["already present with this match type -- adding it again creates a duplicate"]
+                if (text.lower(), target_match) in existing else [],
+            ))
+        duplicates = [t for t in cleaned if (t.lower(), target_match) in existing]
+        warnings = ["NOT idempotent: applying this twice adds every keyword twice."]
+        if unchecked:
+            warnings.append(unchecked)
+        if duplicates:
+            warnings.append(
+                f"{len(duplicates)} of these already exist as {target_match} keywords: "
+                + ", ".join(repr(d) for d in duplicates[:10])
+            )
+        return Proposal(
+            items=items, checks=checks, projected=Decimal("0"), children=children,
+            warnings=warnings,
+            note=(
+                "Created PAUSED, so the projection is 0: nothing serves until a keyword "
+                "is enabled, and that change projects the campaign's unused budget."
+            ),
         )
+
+    def current(self, ctx, item):
+        return None
+
+    def request(self, ctx, items):
+        return "keywords_bulk_create_post", {
+            "x_ap_context": context_header(),
+            "keyword_create_bulk_request": KeywordCreateBulkRequest(
+                allow_partial_success=True,
+                items=[
+                    KeywordCreateBulkRequestItem(
+                        correlation_id=index,
+                        data=BulkKeywordCreate(
+                            ad_group_id=int(item["ad_group_id"]),
+                            text=item["text"],
+                            match_type=KeywordMatchType(item["match_type"]),
+                            bid=to_money(item["bid"], item.get("currency")) if item.get("bid") else None,
+                            status=KeywordStatus("PAUSED"),
+                        ),
+                    )
+                    for index, item in enumerate(items)
+                ],
+            ),
+        }
+
+    def observe(self, ctx, response, items):
+        def read(result, item):
+            new_id = getattr(result, "id", None)
+            observed = enum_value(getattr(result, "status", None))
+            return Outcome(
+                new_id is not None and landed(observed, item["after"]),
+                observed,
+                created_id=str(new_id) if new_id is not None else None,
+            )
+
+        return _bulk_outcomes(response, items, "bulk keyword create", read)
+
+    def inverse(self, ctx, entry):
+        return KeywordStatusKind().undo_creation(entry)
+
+
+class KeywordMatchTypeKind(ChangeKind):
+    name = "keyword_match_type"
+    preview_title = "Preview changing a keyword's match type: add a PAUSED copy, pause the old (no write)"
+    apply_title = "Apply a match type change (adds a PAUSED keyword and PAUSES the old one)"
+    apply_annotations = APPLY
+    bulk = True
+    ledger_keys = ()  # its rows are (keyword, created) and (keyword, status)
+    success_note = (
+        "Both keywords are now PAUSED. Enable the new one with "
+        "preview_keyword_status when you are ready -- that is a separate change, "
+        "projected against the campaign's budget. revert_change on the batch "
+        "re-enables the old keyword."
+    )
+
+    def propose(
+        self,
+        ctx,
+        keyword_id: Annotated[int, Field(description="The keyword whose match type to change")],
+        new_match_type: Annotated[str, Field(description="EXACT or BROAD")],
+    ) -> Proposal:
+        """Show what changing a keyword's match type would do. Writes nothing.
+
+        Apple does not let a keyword's match type be edited. The replacement, in
+        one preview: add a new keyword with the same text, bid and the new match
+        type, created PAUSED, and pause the old one. Both end PAUSED -- enable
+        the new one separately when you are ready. revert_change on the batch
+        re-enables the old keyword.
+        """
+        target = parse_choice(new_match_type, {"EXACT", "BROAD"}, "new_match_type")
+        keyword = client.get_keyword(keyword_id)
+        current_match = enum_value(keyword.match_type)
+        if current_match == target:
+            raise ToolError(f"keyword {keyword_id} is already {target}; nothing to change.")
+        before_status = enum_value(keyword.status)
+        ad_group = ctx.ad_group(keyword.ad_group_id)
+        campaign = ctx.campaign(keyword.campaign_id)
+        spend, taps, impressions, installs, metrics_error = ctx.metrics_7d(
+            "apps_keyword_reports", "keywordId", keyword_id, keyword.campaign_id
+        )
+        pause_delta = project_pause(spend) if before_status == "ENABLED" else Decimal("0")
+        bid = money_amount(keyword.bid)
+        currency = money_currency(keyword.bid) or campaign_currency(campaign)
+        scope = entity_path(campaign, ad_group)
+        new_path = f"{scope} > Keyword {keyword.text!r} ({target})"
+        old_path = entity_path(campaign, ad_group, keyword.text)
+        items = [
+            make_item(
+                entity_type="keyword", entity_id=None, entity_name=keyword.text, path=new_path,
+                field=CREATED, before=NOTHING, after="PAUSED", campaign_id=keyword.campaign_id,
+                ad_group_id=keyword.ad_group_id, text=keyword.text, match_type=target,
+                bid=str(bid) if bid is not None else None, currency=currency,
+            ),
+            make_item(
+                entity_type="keyword", entity_id=keyword_id, entity_name=keyword.text,
+                path=old_path, field="status", before=before_status, after="PAUSED",
+                campaign_id=keyword.campaign_id, projected=pause_delta,
+            ),
+        ]
+        children = [
+            child_preview(
+                tool="apply_keyword_match_type", entity_type="keyword", entity_id="(new)",
+                entity_name=keyword.text, path=new_path, field="exists", before="absent",
+                after=f"{target} keyword, PAUSED, bid {format_money(keyword.bid) if bid is not None else 'default'}",
+                campaign=campaign, entity_serving="(created PAUSED)", projected=Decimal("0"),
+            ),
+            child_preview(
+                tool="apply_keyword_match_type", entity_type="keyword", entity_id=keyword_id,
+                entity_name=keyword.text, path=old_path, field="status",
+                before=f"{before_status} ({current_match})", after="PAUSED",
+                campaign=campaign, entity_serving=enum_value(keyword.display_status),
+                projected=pause_delta, metrics=metrics_block(spend, taps, impressions, installs),
+            ),
+        ]
+        warnings = serving_warning(enum_value(keyword.display_status), "keyword") + metrics_warning(metrics_error)
+        warnings.append(
+            "After this, NEITHER keyword serves until you enable the new one: the old "
+            "is paused and the new is created paused."
+        )
+        return Proposal(
+            items=items,
+            checks=[
+                check_campaign_in_scope(ctx.limits, keyword.campaign_id),
+                check_known_status("keyword_status_known", before_status),
+            ],
+            projected=pause_delta, children=children, warnings=warnings,
+            note="Apple does not allow a keyword's match type to be edited in place.",
+        )
+
+    def current(self, ctx, item):
+        if item["field"] == CREATED:
+            return None
+        return enum_value(client.get_keyword(item["entity_id"]).status) or "unknown"
+
+    def execute(self, ctx, items, call):
+        from apple_ads_mcp.client import WRITE_TIMEOUT
+
+        create, pause = items
+        add = AddKeywords()
+        method, kwargs = add.request(ctx, [create])
+        created = add.observe(ctx, call(method, _request_timeout=WRITE_TIMEOUT, **kwargs), [create])[0]
+        if not created.landed:
+            # Nothing created, so the old keyword is left exactly as it was.
+            return [created, Outcome(False, None, error="not paused: the new keyword was not created")]
+        status = KeywordStatusKind()
+        try:
+            method, kwargs = status.request(ctx, [pause])
+            paused = status.observe(ctx, call(method, _request_timeout=WRITE_TIMEOUT, **kwargs), [pause])[0]
+        except ToolError as exc:
+            paused = Outcome(False, None, error=f"the new keyword was created but the old was not paused: {exc}")
+        return [created, paused]
+
+
+class NegativeKeywordStatusBulk(ChangeKind):
+    name = "negative_keyword_status"
+    preview_title = "Preview pausing or enabling several negative keywords (no write)"
+    apply_title = "Apply a negative keyword status change in bulk (CHANGES WHAT TRAFFIC IS EXCLUDED)"
+    apply_annotations = APPLY
+    bulk = True
+    ledger_keys = ()  # its rows are (negative_keyword, status), owned by negative_keyword_pause
+
+    def propose(
+        self,
+        ctx,
+        negative_keyword_ids: Annotated[list[int], Field(description="Negative keyword ids")],
+        status: Annotated[str, Field(description="PAUSED to stop excluding, ENABLED to resume")],
+    ) -> Proposal:
+        """Show what pausing or enabling several negative keywords would do.
+
+        Pausing a negative lets its traffic back in, so it can INCREASE spend:
+        each campaign touched is projected at its unused daily budget, once.
+        """
+        target = parse_choice(status, SETTABLE_STATUSES)
+        ids = list(dict.fromkeys(negative_keyword_ids))
+        if not ids:
+            raise ToolError("negative_keyword_ids is empty; there is nothing to change.")
+        single = NegativeKeywordStatusKind()
+        items, children, checks = [], [], []
+        bounded: set[Any] = set()
+        total = Decimal("0")
+        for negative_id in ids:
+            negative = client.get_negative_keyword(negative_id)
+            before = enum_value(negative.status)
+            if before == target:
+                raise ToolError(f"negative keyword {negative_id} is already {target}; drop it from the list.")
+            campaign = ctx.campaign(negative.campaign_id)
+            ad_group = ctx.ad_group(negative.ad_group_id)
+            path = entity_path(campaign, ad_group, negative.text, keyword_label="NegativeKeyword")
+            projected = Decimal("0")
+            if target == "PAUSED" and negative.campaign_id not in bounded:
+                bounded.add(negative.campaign_id)
+                projected, bound = bound_check(*single.enable_bound(ctx, negative.campaign_id))
+                checks.extend(bound)
+            total += projected
+            checks += [
+                check_campaign_in_scope(ctx.limits, negative.campaign_id),
+                check_known_status("negative_keyword_status_known", before),
+            ]
+            items.append(make_item(
+                entity_type="negative_keyword", entity_id=negative_id, entity_name=negative.text,
+                path=path, field="status", before=before, after=target,
+                campaign_id=negative.campaign_id, projected=projected,
+            ))
+            children.append(child_preview(
+                tool="apply_negative_keyword_status", entity_type="negative_keyword",
+                entity_id=negative_id, entity_name=negative.text, path=path, field="status",
+                before=before or "unknown", after=target, campaign=campaign,
+                entity_serving=enum_value(getattr(campaign, "display_status", None)),
+                projected=projected,
+            ))
+        warnings = []
+        if target == "PAUSED":
+            warnings.append(
+                "Pausing NEGATIVE keywords stops excluding these terms, so traffic and "
+                "spend can go UP. Each campaign is projected at its unused daily budget."
+            )
+        return Proposal(
+            items=items, checks=checks, projected=total, children=children,
+            warnings=warnings, is_enable=target == "PAUSED",
+            note="Undo one item or the whole batch with revert_change.",
+        )
+
+    def current(self, ctx, item):
+        return enum_value(client.get_negative_keyword(item["entity_id"]).status) or "unknown"
+
+    def request(self, ctx, items):
+        return "negative_keywords_bulk_update_post", {
+            "x_ap_context": context_header(),
+            "negative_keyword_update_bulk_request": NegativeKeywordUpdateBulkRequest(
+                allow_partial_success=True,
+                items=[
+                    NegativeKeywordUpdateBulkRequestItem(
+                        correlation_id=index,
+                        data=BulkNegativeKeywordUpdate(
+                            id=int(item["entity_id"]), status=NegativeKeywordStatus(item["after"])
+                        ),
+                    )
+                    for index, item in enumerate(items)
+                ],
+            ),
+        }
+
+    def observe(self, ctx, response, items):
+        def read(result, item):
+            observed = enum_value(getattr(result, "status", None))
+            return Outcome(landed(observed, item["after"]), observed)
+
+        return _bulk_outcomes(response, items, "bulk negative keyword update", read)

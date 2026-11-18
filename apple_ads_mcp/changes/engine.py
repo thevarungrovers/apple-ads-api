@@ -34,8 +34,8 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from apple_ads_mcp import ledger
-from apple_ads_mcp.changes.base import PREVIEW, ChangeKind, Outcome, Proposal
-from apple_ads_mcp.client import WRITE_TIMEOUT, normalized_value
+from apple_ads_mcp.changes.base import PREVIEW, ChangeKind, NothingToUndo, Outcome, Proposal
+from apple_ads_mcp.client import normalized_value
 from apple_ads_mcp.guardrails import (
     Check,
     check_campaign_in_scope,
@@ -355,10 +355,8 @@ class Engine:
 
     def send(self, ctx, kind: ChangeKind, items, entry_ids) -> list[Outcome]:
         """The request. A failure is recorded against every row, then re-raised."""
-        method, kwargs = kind.request(ctx, items)
         try:
-            response = ctx.call(method, _request_timeout=WRITE_TIMEOUT, **kwargs)
-            return kind.observe(ctx, response, items)
+            return kind.execute(ctx, items, ctx.call)
         except ToolError as exc:
             for entry_id in entry_ids:
                 ledger.write_outcome(entry_id, outcome=ledger.FAILED, detail=str(exc))
@@ -487,6 +485,12 @@ class Engine:
     # -- revert ------------------------------------------------------------------
 
     def revert(self, entry_id: str) -> ApplyResult:
+        try:
+            return self._revert(entry_id)
+        except NothingToUndo as exc:
+            raise ToolError(str(exc)) from exc
+
+    def _revert(self, entry_id: str) -> ApplyResult:
         ctx = self.ctx.fork()
         self.guard_writes()
         # A revert is a real write to the live account, so it answers to the
@@ -551,6 +555,8 @@ class Engine:
             )
         try:
             send_kind, item = kind.inverse(ctx, entry)
+        except NothingToUndo:
+            raise
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
         current = send_kind.current(ctx, item)
@@ -594,7 +600,16 @@ class Engine:
                 f"batch {batch_id} has nothing left to revert: every entry in it was "
                 f"never applied or has already been reverted."
             )
-        plans = [self.plan_revert(ctx, entry) for entry in live]
+        plans, kept = [], []
+        for entry in live:
+            try:
+                plans.append(self.plan_revert(ctx, entry))
+                kept.append(entry)
+            except NothingToUndo:
+                continue  # already where the inverse would put it
+        if not plans:
+            raise ToolError(f"batch {batch_id}: every item is already back where it started.")
+        live = kept
         projected = sum(
             (self.revert_projection(ctx, e, item, k) for e, (k, item) in zip(live, plans)),
             Decimal("0"),

@@ -383,6 +383,31 @@ class StatusKind(ChangeKind):
             campaign_id=entry.get("campaign_id"),
         )
 
+    def undo_creation(self, entry: dict[str, Any]):
+        """A creation's inverse: PAUSE what was made. Nothing is ever deleted.
+
+        Reads the entity's status now. Already PAUSED -- created paused and never
+        enabled, or paused since -- means there is nothing to undo, which a batch
+        revert skips and a single revert reports.
+        """
+        from apple_ads_mcp.changes.base import NothingToUndo
+
+        if not entry.get("entity_id") or entry.get("entity_id") in ("(new)", "None"):
+            raise ValueError(
+                f"entry {entry.get('entry_id')} has no created id recorded, so it cannot "
+                f"be traced to the {self.label} it made."
+            )
+        current = enum_value(self.fetch(entry["entity_id"]).status) or "unknown"
+        if current == "PAUSED":
+            raise NothingToUndo(
+                f"{self.label} {entry['entity_id']} is already PAUSED, so undoing its "
+                f"creation changes nothing. Nothing is ever deleted from here."
+            )
+        return self, self.pause_item(
+            entry["entity_id"], entry.get("entity_name"), str(entry.get("path")),
+            entry.get("campaign_id"), before=current,
+        )
+
     def pause_item(self, entity_id: Any, entity_name: str | None, path: str, campaign_id: Any, before: str):
         """The item that pauses one entity -- a creation's inverse."""
         return make_item(

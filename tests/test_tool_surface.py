@@ -92,6 +92,9 @@ PREVIEW_TOOLS = frozenset(
         "preview_campaign_daily_budget",
         "preview_negative_keywords_add",
         "preview_negative_keyword_pause",
+        "preview_add_keywords",
+        "preview_keyword_match_type",
+        "preview_negative_keyword_status",
     }
 )
 
@@ -107,6 +110,9 @@ APPLY_TOOLS = frozenset(
         "apply_negative_keywords_add",
         "apply_negative_keyword_pause",
         "revert_change",
+        "apply_add_keywords",
+        "apply_keyword_match_type",
+        "apply_negative_keyword_status",
     }
 )
 

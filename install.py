@@ -105,6 +105,9 @@ SAFE_TOOLS = (
     "supported_languages",
     "get_change_details",
     "ad_report",
+    "preview_add_keywords",
+    "preview_keyword_match_type",
+    "preview_negative_keyword_status",
 )
 
 #: The tools that move real money. Never allowlisted, by any answer to anything.
@@ -119,6 +122,9 @@ WRITE_TOOLS = (
     "apply_negative_keywords_add",
     "apply_negative_keyword_pause",
     "revert_change",
+    "apply_add_keywords",
+    "apply_keyword_match_type",
+    "apply_negative_keyword_status",
 )
 
 READ_ONLY_ENV = "APPLE_ADS_READ_ONLY"

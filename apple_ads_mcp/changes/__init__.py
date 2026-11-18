@@ -11,10 +11,13 @@ def all_kinds() -> list:
     from apple_ads_mcp.changes.adgroups import AdGroupDefaultBid, AdGroupStatusKind
     from apple_ads_mcp.changes.campaigns import CampaignDailyBudget, CampaignStatusKind
     from apple_ads_mcp.changes.keywords import (
+        AddKeywords,
         KeywordBid,
         KeywordBidsBulk,
+        KeywordMatchTypeKind,
         KeywordStatusKind,
         NegativeKeywordsAdd,
+        NegativeKeywordStatusBulk,
         NegativeKeywordStatusKind,
     )
 
@@ -28,4 +31,8 @@ def all_kinds() -> list:
         CampaignDailyBudget(),
         NegativeKeywordsAdd(),
         NegativeKeywordStatusKind(),
+        # 3a: keywords and search terms
+        AddKeywords(),
+        KeywordMatchTypeKind(),
+        NegativeKeywordStatusBulk(),
     ]
