@@ -79,9 +79,10 @@ WHAT IS NOT HERE, deliberately: creating or deleting campaigns, ad groups, ads,
 creatives and assets; deleting negative keywords (pause them instead -- it is
 reversible and achieves the same thing); applying Apple's budget
 recommendations in one call. There is no generic request/passthrough tool, so if
-an operation is not listed it cannot be performed here. Use the break-glass CLI,
-`apple_ads_cli.py <path> -X PUT -d '{...}' --apply`, and tell the human you are
-doing so.
+an operation is not listed it cannot be performed here. Say so, and if the
+human wants it done anyway, hand THEM the break-glass command to run in their
+own terminal -- never run `apple_ads_cli.py ... --apply` yourself: it needs an
+interactive terminal and a typed confirmation, and it is denied to agents.
 
 Before proposing anything, get_guardrails tells you the bounds and how much of
 this session's change budget is left. list_my_changes shows what you have

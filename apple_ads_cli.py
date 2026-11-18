@@ -22,6 +22,15 @@ NOTHING IS SENT WITHOUT --apply. A mutation without it prints the exact request
 and exits. That is the same contract the retired v5 CLI had, and the reason to
 keep it: the dry run is the thing you read before you mean it.
 
+--apply IS FOR HUMANS ONLY. A flag is a guard an agent can defeat by typing it,
+so --apply also requires an interactive terminal (stdin is a TTY) and the path
+typed back at a prompt. An agent's shell has no TTY, so it cannot send a write
+from here; the MCP server tells it to hand the command to a human instead, and
+install.py adds a Claude Code deny rule for `apple_ads_cli.py ... --apply`. The
+kill switch (.audit/DISABLE_WRITES) stops this CLI too, and every write it
+sends gets a row in the `changes` ledger (tool="cli"), so the daily cap and
+reconcile_ledger see it.
+
 Paths are relative to https://api.ads.apple.com/v1 and the context header is
 added for you. `/acls` and `/me` are the two endpoints that must NOT carry it,
 and this script leaves it off for those.
@@ -40,9 +49,10 @@ ensure_venv()  # re-exec under venv/ if launched with a bare `python3`
 
 import urllib3
 
-from apple_ads_mcp import logdb
+from apple_ads_mcp import ledger, logdb
 from apple_ads_mcp.client import context_header, get_api
 from apple_ads_mcp.config import ConfigError, resolve_ad_account_id
+from apple_ads_mcp.guardrails import writes_disabled
 
 BASE_URL = "https://api.ads.apple.com/v1"
 
@@ -109,6 +119,58 @@ def serving_campaign_id(path: str) -> str | None:
     if len(parts) >= 2 and parts[0].lower() == "campaigns" and parts[1].isdigit():
         return parts[1]
     return None
+
+
+def _input_stream():
+    """Where the confirmation is read from. A function so tests can swap it."""
+    return sys.stdin
+
+
+def confirm_apply(path: str, *, stdin=None, ask=None) -> str | None:
+    """Why this --apply must not go ahead, or None when a human confirmed it.
+
+    Three gates, all of which an agent's non-interactive shell fails:
+      - the kill switch, which stops every write path including this one;
+      - an interactive terminal -- stdin must be a TTY;
+      - the path, typed back exactly at a prompt.
+    """
+    reason = writes_disabled()
+    if reason:
+        return f"writes are disabled: {reason}. Remove .audit/DISABLE_WRITES to re-enable them."
+    stdin = _input_stream() if stdin is None else stdin
+    ask = ask or input
+    try:
+        interactive = stdin.isatty()
+    except (AttributeError, ValueError):
+        interactive = False
+    if not interactive:
+        return (
+            "--apply needs an interactive terminal and a typed confirmation. This "
+            "CLI is the break-glass path for a HUMAN; an agent must hand the "
+            "command over rather than run it."
+        )
+    wanted = path.strip("/")
+    try:
+        typed = ask(f"Live account. Type the path to confirm ({wanted}): ").strip().strip("/")
+    except EOFError:
+        typed = ""
+    if typed != wanted:
+        return f"confirmation did not match ({typed!r} is not {wanted!r}); nothing was sent."
+    return None
+
+
+def ledger_target(path: str) -> tuple[str, str]:
+    """(entity_type, entity_id) for the ledger row, from a path like `campaigns/123`.
+
+    A guess from a URL, labelled as one: the row exists so the daily cap and
+    reconcile_ledger can SEE the write, not so revert_change can undo it -- its
+    field is the HTTP method and path, which no change kind owns, so a revert
+    of a CLI row is refused.
+    """
+    parts = [p for p in path.strip("/").split("/") if p]
+    entity_type = f"cli:{parts[0]}" if parts else "cli"
+    numeric = [p for p in parts if p.isdigit()]
+    return entity_type, numeric[-1] if numeric else "(new)"
 
 
 def request(method: str, path: str, body: dict | None, token: str) -> tuple[int, str]:
@@ -196,6 +258,12 @@ def _run(args: argparse.Namespace) -> int:
         print("\nAdd --apply to send it.")
         return 0
 
+    if mutation and args.apply:
+        refusal = confirm_apply(args.path)
+        if refusal:
+            print(f"error: {refusal}", file=sys.stderr)
+            return 1
+
     # Before writing to a NAMED campaign, read it back and refuse if it is
     # serving. Reading first costs one GET and is the difference between
     # "I meant to write" and "I meant to write to something spending money now".
@@ -216,7 +284,42 @@ def _run(args: argparse.Namespace) -> int:
                     )
                     return 1
 
-    status, payload = request(args.method, args.path, body, token)
+    entry_id = None
+    if mutation:
+        # The intent goes in BEFORE the request, exactly as on the MCP path: a
+        # crash between the two leaves an open intent for reconcile_ledger.
+        entity_type, entity_id = ledger_target(args.path)
+        entry_id = ledger.new_entry_id()
+        campaign_id = serving_campaign_id(args.path)
+        ledger.write_intent(
+            entry_id,
+            tool="cli",
+            entity_type=entity_type,
+            entity_id=entity_id,
+            entity_name=None,
+            path=args.path.strip("/"),
+            field=f"{args.method.upper()} {args.path.strip('/')}",
+            before=None,
+            after=json.dumps(body)[:2000] if body is not None else "",
+            campaign_id=int(campaign_id) if campaign_id else None,
+            projected_daily_spend_delta="0",
+            extra={"source": "apple_ads_cli", "unbounded": True},
+        )
+
+    try:
+        status, payload = request(args.method, args.path, body, token)
+    except Exception as exc:
+        if entry_id:
+            ledger.write_outcome(entry_id, outcome=ledger.FAILED, detail=str(exc)[:500])
+        raise
+
+    if entry_id:
+        ledger.write_outcome(
+            entry_id,
+            outcome=ledger.APPLIED if status < 400 else ledger.FAILED,
+            observed_after=payload[:2000],
+            detail=f"HTTP {status}",
+        )
 
     if mutation:
         print(f"# {args.method.upper()} {args.path} on ad account {account} -> HTTP {status}",

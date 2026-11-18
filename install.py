@@ -280,6 +280,44 @@ def install_json_client(
     return notes
 
 
+#: Claude Code deny rule: the agent may never run the break-glass CLI with
+#: --apply. The CLI itself also refuses without a TTY and a typed confirmation;
+#: this stops the attempt before it starts. Added on every Claude Code install,
+#: whatever the read-only answer.
+CLI_DENY_RULES = ("Bash(*apple_ads_cli.py*--apply*)",)
+
+
+def install_claude_code_cli_deny(dry_run: bool) -> list[str]:
+    """Add CLI_DENY_RULES to permissions.deny in Claude Code's settings."""
+    path = claude_code_settings()
+    data = load_json(path)
+    permissions = data.get("permissions")
+    if permissions is None:
+        permissions = {}
+    if not isinstance(permissions, dict):
+        raise InstallError(f"{path}: 'permissions' is not an object; refusing to touch it.")
+    deny = permissions.get("deny")
+    if deny is None:
+        deny = []
+    if not isinstance(deny, list):
+        raise InstallError(f"{path}: 'permissions.deny' is not a list; refusing to touch it.")
+    added = [rule for rule in CLI_DENY_RULES if rule not in deny]
+    if not added:
+        return ["permissions: the break-glass CLI deny rule was already present."]
+    if dry_run:
+        return [f"permissions: WOULD deny {', '.join(added)} in {path}"]
+    deny.extend(added)
+    permissions["deny"] = deny
+    data["permissions"] = permissions
+    saved = backup(path)
+    write_json(path, data)
+    return [
+        f"permissions: denied {', '.join(added)} in {path}"
+        + (f"  (backup: {saved.name})" if saved else "  (new file)"),
+        "            the agent cannot run the break-glass CLI with --apply; a human can.",
+    ]
+
+
 def install_claude_code_permissions(dry_run: bool) -> list[str]:
     """Pre-approve the 28 tools that cannot change anything.
 
@@ -480,6 +518,7 @@ def install(agent: str, read_only: bool, dry_run: bool) -> list[str]:
         # express "ask me about writes", which is strictly more useful than not
         # publishing them, and leaves the preview/apply pair intact.
         notes += install_json_client(claude_code_config(), False, dry_run, "claude-code")
+        notes += install_claude_code_cli_deny(dry_run)
         if read_only:
             notes += install_claude_code_permissions(dry_run)
         else:
