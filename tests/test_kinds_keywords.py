@@ -89,6 +89,10 @@ def test_a_match_type_change_adds_a_paused_copy_and_pauses_the_old() -> None:
     undo = tools["revert_change"](entry_id=result.entry_id)
     assert undo.applied, undo.failures
     assert apple.keywords[KEYWORD].status.value == "ENABLED"
+    # Re-enabling the old keyword restores spend, and its row records it, so the
+    # daily cap (which sums rows) sees it.
+    rows = [r for r in ledger.entries() if r["tool"] == "revert_change"]
+    assert [r["projected_daily_spend_delta"] for r in rows] == ["90.00"], rows
     assert apple.keywords[new_id].status.value == "PAUSED"
 
 
@@ -114,6 +118,8 @@ def test_negative_status_in_bulk_projects_each_campaign_once() -> None:
     assert apple.negatives[NEGATIVE + 1].status.value == "PAUSED"
     undo = tools["revert_change"](entry_id=result.entry_id)
     assert undo.applied and apple.negatives[NEGATIVE].status.value == "ENABLED"
+    # Re-enabling a negative narrows: the revert restores no spend, row by row.
+    assert undo.projected_daily_spend_delta == "0"
 
 
 def test_a_stale_negative_status_is_refused() -> None:

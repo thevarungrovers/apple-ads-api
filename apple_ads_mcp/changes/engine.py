@@ -610,16 +610,19 @@ class Engine:
         if not plans:
             raise ToolError(f"batch {batch_id}: every item is already back where it started.")
         live = kept
-        projected = sum(
-            (self.revert_projection(ctx, e, item, k) for e, (k, item) in zip(live, plans)),
-            Decimal("0"),
-        )
+        # Each row records its OWN restored spend, so the daily cap -- which sums
+        # rows -- sees the batch's total, and a partial revert only what landed.
+        projected = Decimal("0")
+        for entry, (kind, item) in zip(live, plans):
+            restored = self.revert_projection(ctx, entry, item, kind)
+            item["projected"] = str(restored)
+            projected += restored
         self.refuse_if_over_caps(ctx, projected, 1)
         return self.send_revert(ctx, live, plans, projected)
 
     def send_revert(self, ctx, entries, plans, projected: Decimal) -> ApplyResult:
-        for (_kind, item), entry in zip(plans, entries):
-            item["projected"] = str(projected if len(entries) == 1 else item.get("projected", "0"))
+        if len(plans) == 1:
+            plans[0][1]["projected"] = str(projected)
         items = [item for _kind, item in plans]
         entry_ids, _batch = self.write_intents(
             "revert_change", items, 1, reverts=[str(e.get("entry_id")) for e in entries]
