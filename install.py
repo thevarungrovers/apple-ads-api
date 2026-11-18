@@ -108,6 +108,10 @@ SAFE_TOOLS = (
     "preview_add_keywords",
     "preview_keyword_match_type",
     "preview_negative_keyword_status",
+    "preview_ad_group_bid_strategy",
+    "preview_ad_group_cpa_goal",
+    "preview_campaign_bid_strategy",
+    "preview_campaign_schedule",
 )
 
 #: The tools that move real money. Never allowlisted, by any answer to anything.
@@ -125,6 +129,10 @@ WRITE_TOOLS = (
     "apply_add_keywords",
     "apply_keyword_match_type",
     "apply_negative_keyword_status",
+    "apply_ad_group_bid_strategy",
+    "apply_ad_group_cpa_goal",
+    "apply_campaign_bid_strategy",
+    "apply_campaign_schedule",
 )
 
 READ_ONLY_ENV = "APPLE_ADS_READ_ONLY"

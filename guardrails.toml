@@ -19,6 +19,8 @@ max_daily_budget            = "150.00"
 max_budget_change_pct       = 25.0
 max_entities_per_call       = 25       # ceiling on a bulk apply
 max_projected_delta_per_day = "50.00"  # upper-bound extra spend from one change
+max_cpa_goal                = "20.00"  # ceiling on an ad group's CPA goal (cpaCap)
+max_cpa_goal_change_pct     = 50.0     # relative to the current CPA goal
 
 # --- per-session bounds ------------------------------------------------------
 # These matter more than the per-call ones. A per-call limit does nothing to stop

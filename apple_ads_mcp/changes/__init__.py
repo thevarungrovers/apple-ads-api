@@ -9,6 +9,12 @@ from __future__ import annotations
 
 def all_kinds() -> list:
     from apple_ads_mcp.changes.adgroups import AdGroupDefaultBid, AdGroupStatusKind
+    from apple_ads_mcp.changes.bidding import (
+        AdGroupBidStrategy,
+        AdGroupCpaGoal,
+        CampaignBidStrategy,
+        CampaignSchedule,
+    )
     from apple_ads_mcp.changes.campaigns import CampaignDailyBudget, CampaignStatusKind
     from apple_ads_mcp.changes.keywords import (
         AddKeywords,
@@ -35,4 +41,9 @@ def all_kinds() -> list:
         AddKeywords(),
         KeywordMatchTypeKind(),
         NegativeKeywordStatusBulk(),
+        # 3b: bidding and goals
+        AdGroupBidStrategy(),
+        AdGroupCpaGoal(),
+        CampaignBidStrategy(),
+        CampaignSchedule(),
     ]

@@ -1547,6 +1547,8 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
                 "max_projected_delta_per_day": str(limits.max_projected_delta_per_day),
                 "max_applies_per_session": str(limits.max_applies_per_session),
                 "max_projected_session_delta": str(limits.max_projected_session_delta),
+                "max_cpa_goal": str(limits.max_cpa_goal),
+                "max_cpa_goal_change_pct": str(limits.max_cpa_goal_change_pct),
                 "max_applies_per_day": str(limits.max_applies_per_day),
                 "max_projected_delta_per_day_total": str(
                     limits.max_projected_delta_per_day_total

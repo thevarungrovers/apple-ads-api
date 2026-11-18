@@ -49,6 +49,8 @@ _DEFAULTS: dict[str, object] = {
     "max_projected_delta_per_day": "50.00",
     "max_applies_per_session": 20,
     "max_projected_session_delta": "150.00",
+    "max_cpa_goal": "20.00",
+    "max_cpa_goal_change_pct": 50.0,
     "max_applies_per_day": 40,
     "max_projected_delta_per_day_total": "200.00",
 }
@@ -73,6 +75,8 @@ class Limits:
     max_applies_per_session: int
     max_projected_session_delta: Decimal
     max_applies_per_day: int = 40
+    max_cpa_goal: Decimal = Decimal("20.00")
+    max_cpa_goal_change_pct: float = 50.0
     max_projected_delta_per_day_total: Decimal = Decimal("200.00")
     allowed_campaign_ids: frozenset[int] = field(default_factory=frozenset)
     allowed_currencies: frozenset[str] = field(default_factory=frozenset)
@@ -86,9 +90,10 @@ def _coerce(key: str, value: object) -> object:
         "max_projected_delta_per_day",
         "max_projected_session_delta",
         "max_projected_delta_per_day_total",
+        "max_cpa_goal",
     ):
         return Decimal(str(value))
-    if key in ("max_bid_increase_pct", "max_budget_change_pct"):
+    if key in ("max_bid_increase_pct", "max_budget_change_pct", "max_cpa_goal_change_pct"):
         return float(value)
     if key in ("max_entities_per_call", "max_applies_per_session", "max_applies_per_day"):
         return int(value)

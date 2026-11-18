@@ -95,6 +95,10 @@ PREVIEW_TOOLS = frozenset(
         "preview_add_keywords",
         "preview_keyword_match_type",
         "preview_negative_keyword_status",
+        "preview_ad_group_bid_strategy",
+        "preview_ad_group_cpa_goal",
+        "preview_campaign_bid_strategy",
+        "preview_campaign_schedule",
     }
 )
 
@@ -113,6 +117,10 @@ APPLY_TOOLS = frozenset(
         "apply_add_keywords",
         "apply_keyword_match_type",
         "apply_negative_keyword_status",
+        "apply_ad_group_bid_strategy",
+        "apply_ad_group_cpa_goal",
+        "apply_campaign_bid_strategy",
+        "apply_campaign_schedule",
     }
 )
 
@@ -121,7 +129,14 @@ EXPECTED_TOOLS = READ_TOOLS | PREVIEW_TOOLS | APPLY_TOOLS
 # Destructive only where the action moves money in a way that is not a one-call
 # undo. Pausing a keyword is reversible; marking it destructive would train you
 # to click through the loud prompts, which is how the loud prompts stop working.
-DESTRUCTIVE_TOOLS = frozenset({"apply_campaign_status", "apply_campaign_daily_budget"})
+DESTRUCTIVE_TOOLS = frozenset(
+    {
+        "apply_campaign_status",
+        "apply_campaign_daily_budget",
+        "apply_campaign_bid_strategy",
+        "apply_campaign_schedule",
+    }
+)
 
 # The only two tools that answer from this process without calling Apple, and so
 # the only two that carry open_world_hint=False.
