@@ -810,11 +810,24 @@ class Engine:
                 outcomes.extend(self.send(ctx, kind, [item], [entry_id], cost=1))
             except ToolError:
                 # The ones already sent still get their outcome recorded (and
-                # counted) rather than being left as open intents.
+                # counted) rather than being left as open intents; send() has
+                # recorded the one that failed.
                 done = len(outcomes)
                 landed = self.record_outcomes(items[:done], entry_ids[:done], outcomes)
-                if any(o.landed for o in outcomes):
-                    ctx.counters.record(landed, 0)
+                # The rest never left the process: say so, rather than leave
+                # their intents without an outcome forever.
+                for later in entry_ids[done + 1:]:
+                    ledger.write_outcome(
+                        later,
+                        outcome=ledger.FAILED,
+                        detail=f"not sent: batch stopped at item {done + 1} of {len(items)}",
+                    )
+                if any(o.counted for o in outcomes):
+                    # Charge the items that landed. An UNKNOWN failure has
+                    # already charged this revert's one apply in send().
+                    failing = ledger.find_entry(entry_ids[done]) or {}
+                    charged = failing.get("outcome") == ledger.UNKNOWN
+                    ctx.counters.record(landed, 0 if charged else 1)
                 raise
         landed_total = self.record_outcomes(items, entry_ids, outcomes)
         all_landed = all(o.landed for o in outcomes)

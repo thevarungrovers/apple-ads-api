@@ -465,6 +465,64 @@ def test_reverting_an_unknown_write_that_never_landed_says_so() -> None:
 
 
 
+def _three_bid_batch(tools, apple):
+    for n in (1, 2):
+        apple.keywords[KEYWORD + n] = apple.keywords[KEYWORD].model_copy(
+            update={"id": KEYWORD + n, "text": f"term {n}"})
+    preview = tools["preview_keyword_bids_bulk"](
+        keyword_ids=[KEYWORD, KEYWORD + 1, KEYWORD + 2], new_bids=["1.10", "1.10", "1.10"])
+    result = tools["apply_keyword_bids_bulk"](preview_token=preview.preview_token)
+    assert result.succeeded == 3, result
+    return result
+
+
+def _nth_revert_put_fails(apple, n: int, exc: Exception) -> None:
+    real = apple._keywords_id_put
+    seen = {"calls": 0}
+
+    def put(**kwargs):
+        seen["calls"] += 1
+        if seen["calls"] == n:
+            raise exc
+        return real(**kwargs)
+
+    apple._keywords_id_put = put
+
+
+def test_a_refused_item_mid_batch_revert_leaves_no_row_unfinished() -> None:
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    tools, apple, state = rig()
+    result = _three_bid_batch(tools, apple)
+    before = state.counters.snapshot()["applies_this_session"]
+    _nth_revert_put_fails(apple, 2, ToolError("INVALID: Apple returned HTTP 400 for keywords_id_put"))
+    _raises(lambda: tools["revert_change"](entry_id=result.entry_id), "INVALID")
+    by_original = {r["reverts_entry_id"]: r for r in ledger.entries() if r["tool"] == "revert_change"}
+    first, second, third = (by_original[e] for e in result.entry_ids)
+    assert first["outcome"] == ledger.APPLIED, first
+    assert second["outcome"] == ledger.FAILED, second
+    assert third["outcome"] == ledger.FAILED, third
+    assert "not sent: batch stopped at item 2" in third["outcome_detail"], third
+    # The item that landed is charged to the session.
+    assert state.counters.snapshot()["applies_this_session"] == before + 1
+
+
+def test_an_unknown_item_mid_batch_revert_is_charged_once() -> None:
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    tools, apple, state = rig()
+    result = _three_bid_batch(tools, apple)
+    before = state.counters.snapshot()["applies_this_session"]
+    _nth_revert_put_fails(apple, 2, ToolError(TIMEOUT))
+    _raises(lambda: tools["revert_change"](entry_id=result.entry_id), "TRANSIENT")
+    by_original = {r["reverts_entry_id"]: r for r in ledger.entries() if r["tool"] == "revert_change"}
+    first, second, third = (by_original[e] for e in result.entry_ids)
+    assert (first["outcome"], second["outcome"], third["outcome"]) == (
+        ledger.APPLIED, ledger.UNKNOWN, ledger.FAILED), (first, second, third)
+    assert "not sent: batch stopped at item 2" in third["outcome_detail"], third
+    assert state.counters.snapshot()["applies_this_session"] == before + 1
+
+
 def test_an_inheriting_keyword_bid_refuses_a_moved_ad_group_default() -> None:
     tools, apple, _ = rig()
     apple.keywords[KEYWORD] = apple.keywords[KEYWORD].model_copy(update={"bid": None})
