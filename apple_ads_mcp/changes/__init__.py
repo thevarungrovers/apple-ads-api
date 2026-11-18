@@ -26,6 +26,7 @@ def all_kinds() -> list:
         AdGroupSearchMatch,
         CampaignCountries,
     )
+    from apple_ads_mcp.changes.creation import CreateAdGroup, CreateCampaign
     from apple_ads_mcp.changes.keywords import (
         AddKeywords,
         KeywordBid,
@@ -68,4 +69,7 @@ def all_kinds() -> list:
         CreateCreative(),
         CreateAd(),
         AdStatusKind(),
+        # 3e: creation
+        CreateCampaign(),
+        CreateAdGroup(),
     ]

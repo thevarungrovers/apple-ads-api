@@ -291,6 +291,24 @@ class FakeApple:
     def _creatives_id_put(self, id, creative_update, **_):
         return self._put(self.creatives, id, creative_update)
 
+    def _campaigns_post(self, campaign_create, **_):
+        data = campaign_create.model_dump(by_alias=True, exclude_none=True)
+        data.update({"id": self.new_id(), "displayStatus": "PAUSED"})
+        new = sdk.Campaign.model_validate(data)
+        self.campaigns[new.id] = new
+        return _Resp(new)
+
+    def _adgroups_post(self, ad_group_create, **_):
+        data = ad_group_create.model_dump(by_alias=True, exclude_none=True)
+        data.update({"id": self.new_id(), "displayStatus": "PAUSED"})
+        new = sdk.AdGroup.model_validate(data)
+        self.ad_groups[new.id] = new
+        return _Resp(new)
+
+    def _eligibilities_apps_query_post(self, eligibility_query_request, **_):
+        return _Resp([sdk.EligibilityResponse.model_validate(
+            {"adamId": int(APP), "state": "ELIGIBLE", "countryOrRegion": "US"})])
+
     def _creatives_post(self, creative_create, **_):
         new = sdk.Creative.model_validate({
             "id": self.new_id(), "name": creative_create.name,

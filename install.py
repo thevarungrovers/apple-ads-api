@@ -122,6 +122,8 @@ SAFE_TOOLS = (
     "preview_create_creative",
     "preview_create_ad",
     "preview_ad_status",
+    "preview_create_campaign",
+    "preview_create_ad_group",
 )
 
 #: The tools that move real money. Never allowlisted, by any answer to anything.
@@ -153,6 +155,8 @@ WRITE_TOOLS = (
     "apply_create_creative",
     "apply_create_ad",
     "apply_ad_status",
+    "apply_create_campaign",
+    "apply_create_ad_group",
 )
 
 READ_ONLY_ENV = "APPLE_ADS_READ_ONLY"

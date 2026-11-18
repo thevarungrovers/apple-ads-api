@@ -109,6 +109,8 @@ PREVIEW_TOOLS = frozenset(
         "preview_create_creative",
         "preview_create_ad",
         "preview_ad_status",
+        "preview_create_campaign",
+        "preview_create_ad_group",
     }
 )
 
@@ -141,6 +143,8 @@ APPLY_TOOLS = frozenset(
         "apply_create_creative",
         "apply_create_ad",
         "apply_ad_status",
+        "apply_create_campaign",
+        "apply_create_ad_group",
     }
 )
 
@@ -158,6 +162,8 @@ DESTRUCTIVE_TOOLS = frozenset(
         "apply_campaign_countries",
         "apply_create_creative",
         "apply_create_ad",
+        "apply_create_campaign",
+        "apply_create_ad_group",
     }
 )
 
@@ -167,9 +173,7 @@ LOCAL_ONLY_TOOLS = frozenset({"get_guardrails", "list_my_changes"})
 
 # In scope for the credential, deliberately unreachable from here.
 FORBIDDEN_METHODS = (
-    "campaigns_post",
     "campaigns_id_delete",
-    "adgroups_post",
     "adgroups_id_delete",
     "ads_id_delete",
     "creatives_id_put",
