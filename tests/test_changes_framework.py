@@ -213,5 +213,22 @@ def test_one_report_per_campaign_in_a_bulk_preview() -> None:
     assert len(campaigns) == 1, campaigns
 
 
+def test_a_keyword_without_its_own_bid_is_measured_against_the_default() -> None:
+    tools, apple, _ = rig()
+    apple.keywords[KEYWORD] = apple.keywords[KEYWORD].model_copy(update={"bid": None})
+    preview = tools["preview_keyword_bid"](keyword_id=KEYWORD, new_bid="1.20")
+    assert preview.before == "1.00 USD (ad group default)", preview.before
+    assert preview.after == "1.20 USD"
+    assert preview.projected_daily_spend_delta == "1.00", preview.projected_daily_spend_delta
+    assert preview.pct_change == "+20.0%"
+    assert not failed(preview, "currency"), preview.guardrail_checks
+    assert any("no bid of its own" in w for w in preview.warnings)
+    over = tools["preview_keyword_bid"](keyword_id=KEYWORD, new_bid="2.00")
+    assert failed(over, "max_bid_increase_pct"), over.guardrail_checks
+    result = tools["apply_keyword_bid"](preview_token=preview.preview_token)
+    assert result.applied
+    _raises(lambda: tools["revert_change"](entry_id=result.entry_id), "no previous value")
+
+
 if __name__ == "__main__":
     raise SystemExit(run(dict(globals())))

@@ -32,6 +32,8 @@ from apple_ads_mcp.changes.base import (
 )
 from apple_ads_mcp.changes.common import (
     SETTABLE_STATUSES,
+    ad_group_bid,
+    campaign_currency,
     StatusKind,
     bid_strategy_type,
     bound_check,
@@ -174,8 +176,15 @@ def keyword_bid_item(ctx, keyword_id: int, raw_bid: str, label: str) -> dict[str
     keyword = client.get_keyword(keyword_id)
     ad_group = ctx.ad_group(keyword.ad_group_id)
     campaign = ctx.campaign(keyword.campaign_id)
-    before_num = money_amount(keyword.bid)
-    currency = money_currency(keyword.bid) or None
+    own_bid = money_amount(keyword.bid)
+    # A keyword with no bid of its own pays the ad group default. Using its own
+    # (absent) bid as `before` made the projection 0, the % check pass with "no
+    # previous value", and the currency check FAIL for want of a currency -- so
+    # the effective bid is what the change is measured against.
+    inherited = own_bid is None
+    effective = keyword.bid if not inherited else ad_group_bid(ad_group)
+    before_num = money_amount(effective)
+    currency = money_currency(effective) or campaign_currency(campaign) or None
     spend, taps, impressions, installs, metrics_error = ctx.metrics_7d(
         "apps_keyword_reports", "keywordId", keyword_id, keyword.campaign_id
     )
@@ -197,6 +206,13 @@ def keyword_bid_item(ctx, keyword_id: int, raw_bid: str, label: str) -> dict[str
         warnings.append(
             "The keyword itself is PAUSED, so this bid will not spend until it is enabled."
         )
+    if inherited:
+        warnings.append(
+            f"This keyword has no bid of its own: it pays the ad group default "
+            f"({format_money(effective)}), which is what this change is measured "
+            f"against. Setting a bid detaches it from the default for good, and "
+            f"revert_change cannot put it back to inheriting -- it will refuse this entry."
+        )
     path = entity_path(campaign, ad_group, keyword.text)
     return {
         "keyword": keyword,
@@ -206,7 +222,7 @@ def keyword_bid_item(ctx, keyword_id: int, raw_bid: str, label: str) -> dict[str
         "projected": projected,
         "before_num": before_num,
         "after_num": after_num,
-        "before_text": format_money(keyword.bid),
+        "before_text": format_money(effective) + (" (ad group default)" if inherited else ""),
         "after_text": f"{after_num} {currency or ''}".strip(),
         "metrics": metrics_block(spend, taps, impressions, installs),
         "item": make_item(
@@ -215,7 +231,9 @@ def keyword_bid_item(ctx, keyword_id: int, raw_bid: str, label: str) -> dict[str
             entity_name=keyword.text,
             path=path,
             field="bid",
-            before=str(before_num) if before_num is not None else None,
+            # The keyword's OWN bid: that is what staleness re-reads and what a
+            # revert would write back. None when it inherits.
+            before=str(own_bid) if own_bid is not None else None,
             after=str(after_num),
             campaign_id=keyword.campaign_id,
             projected=projected,
