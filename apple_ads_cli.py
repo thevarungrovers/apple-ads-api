@@ -31,8 +31,12 @@ kill switch (.audit/DISABLE_WRITES) stops this CLI too, and every write it
 sends gets a row in the `changes` ledger (tool="cli"), so the daily cap and
 reconcile_ledger see it.
 
+A WRITE'S PATH MUST BE PLAIN. A mutation whose path starts with `//`, has an
+empty, `.` or `..` segment, or carries `%`, `;`, `?` or `#` is refused before
+anything is sent: what you read must be what Apple resolves.
+
 NAMES GET THE CLI PREFIX. A POST that creates a campaign, ad group, ad or
-creative, or a PUT to one by id, with a "name" in its body has that name stamped
+creative, or a PUT or PATCH to one by id, with a "name" in its body has that name stamped
 `<OWNER>-cli-<base>` (apple_ads_mcp/naming.py) when APPLE_ADS_OWNER_INITIALS is
 set in .env, and left exactly as given when it is not -- `cli` tells a human
 from an agent under the same owner, so with no owner there is nothing to mark.
@@ -139,20 +143,70 @@ NAMED_COLLECTIONS = {
 }
 
 
+#: Characters a mutation's path may not carry: `%` (percent-encoding Apple
+#: decodes and we would not), `;` (path parameters), `?` and `#` (a query or
+#: fragment), plus everything _UNSAFE_PATH_CHAR already refuses.
+_REFUSED_MUTATION_CHARS = frozenset("%;?#")
+
+#: Methods that update an entity in place, so a name in the body renames it.
+UPDATE_METHODS = frozenset({"PUT", "PATCH"})
+
+
+def unsafe_mutation_path(path: str) -> str | None:
+    """Why this path is refused for a mutation, or None when it is plain.
+
+    A mutation's path must be plain `segment/segment/...` -- what the operator
+    reads is exactly what Apple resolves. Each refused shape can reach a named
+    collection while reading as something else here, so the name would go out
+    unstamped or the running-campaign check would look at the wrong segment:
+    a leading `//` (urlsplit reads the first segment as a host), an empty,
+    `.` or `..` segment, `%`, `;`, `?`, `#`, whitespace, control or non-ASCII.
+    """
+    text = path or ""
+    bad = _UNSAFE_PATH_CHAR.search(text)
+    if bad:
+        return f"it contains {bad.group()!r} (whitespace, control or non-ASCII)"
+    refused = sorted({c for c in text if c in _REFUSED_MUTATION_CHARS})
+    if refused:
+        return f"it contains {' '.join(repr(c) for c in refused)}"
+    if text.startswith("//"):
+        return "it starts with '//'"
+    segments = text.strip("/").split("/")
+    if any(seg in ("", ".", "..") for seg in segments):
+        return "it has an empty, '.' or '..' segment"
+    return None
+
+
+def refuse_unsafe_mutation_path(method: str, path: str) -> None:
+    """Raise CliError when a mutation's path is not plain (unsafe_mutation_path)."""
+    why = unsafe_mutation_path(path)
+    if why is not None:
+        raise CliError(
+            f"{(method or '').strip().upper()} {path!r} is a write and its path is not "
+            f"plain: {why}. Refused: send the plain path (like campaigns/123), so the "
+            f"request Apple resolves is the one you see, its name is stamped and the "
+            f"running-campaign check reads the right id."
+        )
+
+
 def named_entity(method: str, path: str) -> str | None:
     """The entity type when this request creates (POST to the collection) or
-    updates (PUT to `<collection>/<id>`) a named entity; None otherwise.
+    updates (PUT or PATCH to `<collection>/<id>`) a named entity; None otherwise.
 
-    Classified on the URL's PATH: `campaigns?`, `campaigns#` and
-    `campaigns/123?x` still reach the collection at Apple, so they are named
-    too (and stamp_body refuses them).
+    Classified on the plain `/`-separated segments of the path. A mutation
+    whose path is not plain is refused before this matters
+    (refuse_unsafe_mutation_path).
     """
     method = (method or "").strip().upper()
-    split_path = urllib.parse.urlsplit(path or "").path
-    parts = [p.lower() for p in split_path.strip("/").split("/") if p]
-    if method == "POST" and parts and parts[-1] in NAMED_COLLECTIONS:
+    parts = [p.lower() for p in (path or "").strip("/").split("/")]
+    if method == "POST" and parts[-1] in NAMED_COLLECTIONS:
         return NAMED_COLLECTIONS[parts[-1]]
-    if method == "PUT" and len(parts) >= 2 and parts[-2] in NAMED_COLLECTIONS and parts[-1].isdigit():
+    if (
+        method in UPDATE_METHODS
+        and len(parts) >= 2
+        and parts[-2] in NAMED_COLLECTIONS
+        and parts[-1].isdigit()
+    ):
         return NAMED_COLLECTIONS[parts[-2]]
     return None
 
@@ -166,15 +220,11 @@ def stamp_body(method: str, path: str, body: dict | None, identity: Identity):
     """(body with its name stamped, the Stamped result or None). Raises CliError.
 
     Only a create or an update of a named entity with a string "name" is
-    touched; every other request is sent exactly as given.
+    touched; every other request is sent exactly as given. Every mutation's
+    path must be plain first (refuse_unsafe_mutation_path).
     """
+    refuse_unsafe_mutation_path(method, path)
     entity_type = named_entity(method, path)
-    if entity_type is not None and ("?" in path or "#" in path):
-        raise CliError(
-            f"{method.upper()} {path!r} creates or updates a {entity_type.replace('_', ' ')} "
-            f"but carries a '?' or '#'. Refused: send the plain path, so the name is "
-            f"stamped and the request is the one you see."
-        )
     if entity_type is None or not isinstance(body, dict) or not isinstance(body.get("name"), str):
         return body, None
     try:
@@ -210,6 +260,8 @@ def serving_campaign_id(path: str) -> str | None:
 
     Used to decide whether --confirm-live is required. `campaigns/query` and
     `campaigns` (a create) match no existing campaign, so neither is gated.
+    It reads the first segment, so it is sound only on a plain path: a
+    mutation with `..` (`x/../campaigns/123`) is refused before it is asked.
     """
     parts = [p for p in path.strip("/").split("/") if p]
     if len(parts) >= 2 and parts[0].lower() == "campaigns" and parts[1].isdigit():
@@ -353,6 +405,7 @@ def _run(args: argparse.Namespace) -> int:
     identity = cli_identity()
     if mutation:
         try:
+            refuse_unsafe_mutation_path(args.method, args.path)
             body, stamped = stamp_body(args.method, args.path, body, identity)
         except CliError as exc:
             print(f"error: {exc} Nothing was sent.", file=sys.stderr)

@@ -219,9 +219,8 @@ def test_a_bypass_post_without_apply_sends_nothing() -> None:
     for path in BYPASS_PATHS[:5]:
         sent: list = []
         _wire(sent, tty=False, typed="")
-        # A dry run -- or, for one that would create a named entity, a refusal.
-        expected = 1 if cli.named_entity("POST", path) else 0
-        assert cli._run(_args(method="POST", path=path, data="{}", apply=False)) == expected, path
+        # A write whose path carries '?' or '#' is refused outright, dry run or not.
+        assert cli._run(_args(method="POST", path=path, data="{}", apply=False)) == 1, path
         assert sent == [], path
 
 
@@ -312,17 +311,63 @@ def test_a_named_mutation_hiding_behind_a_query_or_fragment_is_refused() -> None
     for method, path in (("POST", "campaigns?"), ("POST", "campaigns#"),
                          ("POST", "campaigns/1/adgroups?x=1"), ("PUT", "campaigns/123?x"),
                          ("PUT", "ads/42#frag")):
-        assert cli.named_entity(method, path) is not None, (method, path)
         try:
             cli.stamp_body(method, path, {"name": "Launch"}, identity)
         except cli.CliError as exc:
-            assert "?" in str(exc) and "Nothing" not in str(exc), exc
+            assert "not plain" in str(exc) and "Nothing" not in str(exc), exc
         else:
             raise AssertionError(f"{method} {path} should be refused")
     sent: list = []
     _wire(sent, tty=True, typed="campaigns?")
     _as("AB", "max")
     assert cli._run(_args(method="POST", path="campaigns?", data='{"name": "Launch"}')) == 1
+    assert sent == [] and ledger.entries() == []
+
+
+UNSAFE_MUTATION_PATHS = (
+    "//campaigns", "//campaigns/123", "campaigns/.", "campaigns/123/.", "./campaigns",
+    "campaigns/..", "campaigns/123/../456", "campaign%73", "campaigns/%31%32%33",
+    "campaigns;x", "campaigns/123;x", "campaigns//123", "campaigns?x", "campaigns#x",
+    "keywords/bulk?_=/query", "", "/",
+)
+
+
+def test_any_mutation_with_an_ambiguous_path_is_refused_before_anything_is_sent() -> None:
+    """Each of these reaches (or may reach) a named collection at Apple while
+    reading as something else here, so the name would go out unstamped."""
+    for method in ("POST", "PUT", "PATCH", "DELETE"):
+        for path in UNSAFE_MUTATION_PATHS:
+            for apply in (True, False):
+                sent: list = []
+                _wire(sent, tty=True, typed=path)
+                _as("AB", "max")
+                code = cli._run(_args(method=method, path=path, data='{"name": "Launch"}',
+                                      apply=apply))
+                assert code == 1, (method, path, apply)
+                assert sent == [] and ledger.entries() == [], (method, path, apply)
+
+
+def test_a_patch_to_a_named_entity_is_stamped_like_a_put() -> None:
+    _as("AB", "max")
+    identity = cli.cli_identity()
+    for path in ("campaigns/123", "/campaigns/123/", "ads/42", "Campaigns/123"):
+        assert cli.named_entity("PATCH", path) is not None, path
+        body, stamped = cli.stamp_body("PATCH", path, {"name": "Launch"}, identity)
+        assert body == {"name": "AB-cli-Launch"} and stamped is not None, path
+    sent: list = []
+    _wire(sent, tty=True, typed="campaigns/123")
+    _as("AB", "max")
+    assert cli._run(_args(method="PATCH", path="campaigns/123", data='{"name": "Launch"}')) == 0
+    assert sent[-1][2] == {"name": "AB-cli-Launch"}, sent
+
+
+def test_a_dot_segment_cannot_skip_the_running_campaign_check() -> None:
+    """`x/../campaigns/123` is campaign 123 once normalised, but its first
+    segment is not `campaigns`: it must not get past --confirm-live."""
+    sent: list = []
+    _wire(sent, tty=True, typed="x/../campaigns/123")
+    assert cli._run(_args(path="x/../campaigns/123", data='{"status": "PAUSED"}',
+                          confirm_live=False)) == 1
     assert sent == [] and ledger.entries() == []
 
 

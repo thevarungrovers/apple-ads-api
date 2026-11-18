@@ -317,9 +317,11 @@ old name exactly.
 **The escape hatch** names its creations and renames `<OWNER>-cli-<base>` when
 the initials are set (`AB-cli-launch`), and leaves the name as given when they
 are not: `cli` only separates a person from an agent under the same initials.
-It refuses a create or update path carrying `?` or `#` (`campaigns?`), which
-would otherwise slip past the stamp, and takes no abbreviated flags: `--appl`
-is not `--apply`.
+It refuses any write whose path is not plain -- a leading `//`, an empty, `.`
+or `..` segment, or `%`, `;`, `?` or `#` (`campaigns?`, `campaigns/.`,
+`campaign%73`) -- which would otherwise slip past the stamp or the
+running-campaign check, and takes no abbreviated flags: `--appl` is not
+`--apply`.
 
 **Finding them:** the list tools filter by `origin` (`agent`, `cli` or `manual`,
 read from the name), `agent_name`, `owner`, or `mine=True` (this checkout's
@@ -636,7 +638,7 @@ recorded in the change log, so it counts against the daily limits.
 you mean it.
 
 A create (`POST campaigns`, `.../adgroups`, `ads`, `creatives`) or an update by
-id with a `"name"` in its body gets `<OWNER>-cli-<base>` when
+id (`PUT` or `PATCH`) with a `"name"` in its body gets `<OWNER>-cli-<base>` when
 `APPLE_ADS_OWNER_INITIALS` is set, and the dry run prints the final name.
 
 ---
