@@ -325,6 +325,18 @@ def stamp(identity: Identity, requested: str | None, *, entity_type: str) -> Sta
         base, rule = text[len(prefix):].strip(), "already_ours"
         if not base:
             raise NameRefused(f"INVALID_REQUEST: the name is only the prefix {prefix!r}; give a base name")
+        if base.startswith(prefix):
+            raise NameRefused(
+                f"INVALID_REQUEST: the name carries the prefix {prefix!r} twice; pass the "
+                f"base name only and it is added once."
+            )
+        inner = parse(base)
+        if inner is not None:
+            raise NameRefused(
+                f"INVALID_REQUEST: after the prefix {prefix!r}, the name starts with "
+                f"{inner.owner}-{inner.agent}-, which reads as another prefix. Pass the base "
+                f"name only; if the base itself starts like that, reorder it."
+            )
     if _CONTROL.search(base):
         raise NameRefused("INVALID_REQUEST: the name contains a control character (tab, newline, NUL...)")
     final = prefix + base

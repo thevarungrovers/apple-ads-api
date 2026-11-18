@@ -59,6 +59,16 @@ def test_our_prefix_is_never_added_twice() -> None:
         assert again.final == expected and again.rule == "already_ours", (label, again)
 
 
+def test_a_doubled_prefix_is_refused_not_kept() -> None:
+    _refused(lambda: stamp(BOTH, "AB-max-AB-max-x", entity_type="campaign"), "twice")
+    _refused(lambda: stamp(OWNER_ONLY, "AB-AB-x", entity_type="campaign"), "twice")
+    _refused(lambda: stamp(AGENT_ONLY, "max-max-x", entity_type="campaign"), "twice")
+    # Our prefix, then someone else's: the base still parses as a prefix.
+    _refused(lambda: stamp(BOTH, "AB-max-CD-bot-x", entity_type="campaign"), "CD-bot-")
+    _refused(lambda: rename(BOTH, "AB-max-a", "AB-max-AB-max-b", entity_type="ad_group",
+                            ledger_owned=False), "twice")
+
+
 def test_another_agents_prefix_is_refused() -> None:
     _refused(lambda: stamp(BOTH, "CD-bot-launch", entity_type="campaign"), "CD-bot-")
     _refused(lambda: stamp(OWNER_ONLY, "CD-bot-launch", entity_type="campaign"), "CD-bot-")
