@@ -106,6 +106,58 @@ def test_a_read_needs_no_confirmation_and_writes_no_ledger_row() -> None:
     assert sent and ledger.entries() == []
 
 
+BYPASS_PATHS = (
+    "campaigns?x=/query",
+    "campaigns/?x=/query",
+    "keywords/bulk?_=/query",
+    "campaigns/1234567890/adgroups/1/targetingkeywords/bulk?_=/query",
+    "campaigns#/query",
+    "campaigns/1234567890#/query",
+    "campaigns/query?x=1",
+    "campaigns/query#frag",
+    "campaigns/1234567890/../query",
+    "campaigns/%71uery",
+    "campaigns%2Fquery",
+    "query",
+    "/query",
+    "",
+)
+
+
+def test_a_post_hiding_query_in_its_query_string_or_fragment_is_a_mutation() -> None:
+    for path in BYPASS_PATHS:
+        assert cli.is_mutation("POST", path), path
+        assert cli.is_mutation("post", path), path
+
+
+def test_a_real_query_post_is_still_a_read() -> None:
+    for path in ("campaigns/query", "/campaigns/query/", "reports/apps/campaigns/query",
+                 "campaigns/1234567890/adgroups/query", "change-history/query",
+                 "Campaigns/Query"):
+        assert not cli.is_mutation("POST", path), path
+
+
+def test_an_unknown_method_fails_closed() -> None:
+    assert not cli.is_mutation("GET", "campaigns/1234567890?x=1")
+    for method in ("PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT", "FOO", ""):
+        assert cli.is_mutation(method, "campaigns/query"), method
+
+
+def test_a_bypass_post_without_apply_sends_nothing() -> None:
+    for path in BYPASS_PATHS[:5]:
+        sent: list = []
+        _wire(sent, tty=False, typed="")
+        assert cli._run(_args(method="POST", path=path, data="{}", apply=False)) == 0
+        assert sent == [], path
+
+
+def test_a_bypass_post_with_apply_but_no_terminal_sends_nothing() -> None:
+    sent: list = []
+    _wire(sent, tty=False, typed="")
+    assert cli._run(_args(method="POST", path="campaigns?x=/query", data="{}")) == 1
+    assert sent == [] and ledger.entries() == []
+
+
 def test_the_installer_denies_the_cli_apply_to_the_agent() -> None:
     assert "Bash(*apple_ads_cli.py*--apply*)" in install.CLI_DENY_RULES
 

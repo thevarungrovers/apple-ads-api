@@ -41,7 +41,9 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import re
 import sys
+import urllib.parse
 
 from _bootstrap import ensure_venv
 
@@ -61,7 +63,17 @@ BASE_URL = "https://api.ads.apple.com/v1"
 # cleaner rule than v5's, which needed both a `reports/` prefix and a `/find`
 # suffix to describe the same idea. Verified against all 80 resource paths in
 # apple-ads-platform 1.109.0 on 2026-10-09.
-READ_ONLY_POST_SUFFIX = "/query"
+#
+# The rule is applied FAIL-CLOSED, to the whole path rather than its tail: a
+# POST is a read only when every segment is a plain resource name or id and the
+# last one is `query`. Anything else -- a query string or fragment (which is
+# sent verbatim, so `campaigns?x=/query` would end in /query and still create
+# a campaign), percent-encoding, `.`/`..`, an empty path -- is a mutation.
+READ_ONLY_POST_SHAPE = re.compile(r"(?:[a-z0-9_-]+/)+query", re.IGNORECASE)
+
+# Methods that never change anything. Every other method, including ones this
+# script has never heard of, is treated as a write.
+READ_METHODS = frozenset({"GET", "HEAD"})
 
 TIMEOUT = 60.0
 
@@ -74,14 +86,21 @@ def is_mutation(method: str, path: str) -> bool:
     """True when this request would CHANGE something at Apple's end.
 
     Method alone is not a reliable signal: this API uses POST for every
-    query-by-selector and every report. Classify by method AND path.
+    query-by-selector and every report. Classify by method AND path, and when
+    in doubt, call it a mutation -- the cost of a wrong "write" is a dry run,
+    the cost of a wrong "read" is an unguarded live write.
     """
-    method = method.upper()
-    if method in ("PUT", "PATCH", "DELETE"):
-        return True
-    if method != "POST":
+    method = (method or "").strip().upper()
+    if method in READ_METHODS:
         return False
-    return not path.strip("/").lower().endswith(READ_ONLY_POST_SUFFIX)
+    if method != "POST":
+        return True
+    if "?" in path or "#" in path:
+        return True
+    split = urllib.parse.urlsplit(path)
+    if split.scheme or split.netloc or split.query or split.fragment:
+        return True
+    return READ_ONLY_POST_SHAPE.fullmatch(split.path.strip("/")) is None
 
 
 # `/acls` and `/me` take no account context -- they answer "who is this
