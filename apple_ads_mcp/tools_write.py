@@ -161,8 +161,11 @@ def register(mcp, state) -> Engine:
         shows the value it asked for) or 'failed' (Apple still shows the old one).
         Writes NOTHING to Apple -- only the local ledger. Refuses a creation
         (Apple's id never came back) and a value that is neither before nor
-        after. Use this to settle an unknown row; use revert_change only when
-        you actually want the change undone.
+        after. 'applied' can be recorded at once; 'failed' only once the write
+        is 5 minutes old (Apple's read can lag -- the refusal says when to try
+        again), and never when a later ledger row changed the same field. Use
+        this to settle an unknown row; use revert_change only when you
+        actually want the change undone.
         """
         return engine.settle(entry_id)
 

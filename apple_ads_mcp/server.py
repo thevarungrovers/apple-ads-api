@@ -96,7 +96,9 @@ WHAT YOU CAN CHANGE (preview_<name> / apply_<name>):
 revert_change undoes one entry (or a batch, by its id); list_my_changes shows
 what you have done. An entry recorded 'unknown' (the request timed out) may
 have landed: settle it with resolve_unknown_change, which reads Apple and writes
-only the ledger -- do not call revert_change just to find out.
+only the ledger -- do not call revert_change just to find out. It records
+'failed' only once the entry is 5 minutes old ("too early to tell" says when to
+try again) and never after a later change to the same field.
 
 NOTHING IS EVER DELETED. Created things start PAUSED, and pausing is the undo:
 reverting a creation pauses it.
@@ -127,11 +129,12 @@ interactive terminal and a typed confirmation, and it is denied to agents.
 NAMING. Give create_campaign, create_ad_group, create_creative and create_ad
 the BASE name only: the server adds this checkout's prefix from .env
 (<OWNER>-<agent>-, e.g. AB-max-spring_promo; one part if only one is set, none
-if neither is) and the preview shows the exact final name. Another agent's
-prefix is refused, ours is never doubled, and a name over 200 characters is
-refused, not truncated. Renames through low_risk_change keep the prefix and
-reach only your own entities (your prefix, or the ledger shows you created
-it); hand-made and other agents' entities are refused. The list_* tools take
+if neither is) and the preview shows the exact final name. A name that reads
+as anyone else's prefix is always refused, even with no identity configured;
+ours twice is refused; a name over 200 characters is refused, not truncated.
+Renames through low_risk_change keep the prefix and reach only your own
+entities (your whole prefix, or the ledger shows you created it); hand-made and
+other agents' entities are refused. The list_* tools take
 origin / agent_name / owner / mine to find what you made; get_guardrails shows
 the identity.
 

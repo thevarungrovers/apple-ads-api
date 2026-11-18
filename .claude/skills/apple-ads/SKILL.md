@@ -182,16 +182,22 @@ Pass the BASE name to `create_campaign`, `create_ad_group`, `create_creative`
 and `create_ad`. The server adds `<OWNER>-<agent>-` from this checkout's `.env`
 (`AB-max-spring_promo`; one part if only one is set; nothing if neither is) and
 the preview's `naming` block shows the exact final name -- show that to the
-human. Never type a prefix yourself: ours is not doubled, another agent's is
-refused, and over 200 characters (prefix included) is refused, not truncated.
+human. Never type a prefix yourself: ours twice is refused, and a name that
+reads as anyone else's prefix (`CD-bot-...`, `AB-cli-...`) is ALWAYS refused --
+even when no identity is configured -- because it would impersonate them. Over
+200 characters (prefix included) is refused, not truncated, and so is any
+invisible character (control, zero-width, bidi mark, line separator).
 A house-style name, if the team has one, is the base: the prefix goes first.
 A duplicate campaign name, or ad group name in its campaign, fails
-`name_is_free`.
+`name_is_free` -- on a create or a rename -- and so does a scope too big to
+scan in full ("could not verify the name is free").
 
 Renames (`low_risk_change`, field `name`) reach only YOUR entities -- the name
-carries your prefix or the ledger shows this server created it. Hand-made and
-other agents' entities are refused; tell the human to rename those in the Apple
-Ads UI. The prefix is kept: pass the new base.
+carries your WHOLE prefix or the ledger shows this server created it. With only
+initials `AB` set, `AB-bot-x` (agent `bot`'s) and `AB-cli-x` (a person's) are
+not yours, and neither counts for `mine=True`. Hand-made and other agents'
+entities are refused; tell the human to rename those in the Apple Ads UI. The
+prefix is kept: pass the new base.
 
 Find your work with `list_campaigns` / `list_ad_groups` / `list_ads` /
 `list_creatives` and `mine=True`, or filter by `origin` (`agent`, `cli`,
@@ -209,9 +215,13 @@ against the caps.
 
 An `unknown` entry (the request timed out) may have landed and counts as if it
 had. Settle it with `resolve_unknown_change(entry_id=...)` -- a batch id settles
-every unknown item -- rather than calling `revert_change` to find out. A
-`partial` targeting entry is live; `revert_change` restores only the dimension
-it asked for.
+every unknown item -- rather than calling `revert_change` to find out.
+`applied` is recorded at once. `failed` needs the entry to be 5 minutes old
+(Apple's read can lag; earlier you get "too early to tell; try again after
+<time>" -- wait and call it again), and is never given when a later ledger row
+touched the same field (it stays `unknown`; tell the human to check the Apple
+Ads UI). A `partial` targeting entry is live; `revert_change` restores only the
+dimension it asked for.
 
 ## When something goes wrong
 

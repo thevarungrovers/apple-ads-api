@@ -271,11 +271,20 @@ Either can be left empty -- that part is simply skipped, never an error:
   key to fix.
 - **`.env` is the only source.** No tool takes an owner or agent argument, and
   the process environment (a client's `env` block) is ignored -- the server warns
-  at startup if one disagrees with `.env`. **One identity per checkout**: a
-  second agent needs its own checkout with its own `.env`.
+  at startup if one disagrees with `.env`. A `config.env` beside it is read too;
+  a non-empty `.env` value wins, and an empty one leaves `config.env`'s in place.
+  **One identity per checkout**: a second agent needs its own checkout with its
+  own `.env`.
 - **The prefix goes first**, before any house naming style you use: the
   house-style name is the base. The agent passes the base; the prefix is added
-  for it, never twice, and another agent's prefix (`CD-bot-...`) is refused.
+  for it, never twice (`AB-max-AB-max-x` is refused, not kept).
+- **A name that reads as someone else's prefix is always refused** -- another
+  agent's (`CD-bot-...`), the escape hatch's (`AB-cli-...`), or one this
+  checkout's initials-only prefix would turn into another agent's -- **even
+  when no identity is configured**: taken as given, it would impersonate them.
+- **Invisible characters are refused**: control characters (tab, newline,
+  NUL), zero-width and bidi marks, the byte-order mark, and line or paragraph
+  separators.
 - **The preview shows the exact name** that will be sent (`entity_name`, `path`
   and a `naming` block with the requested name, the final one, the prefix and
   the length), and warns when it differs from what was asked.
@@ -285,8 +294,10 @@ Either can be left empty -- that part is simply skipped, never an error:
   groups, ads and creatives -- a conservative figure until Apple's current limit
   is confirmed.
 - **A campaign name already used** in the account, or an ad group name already
-  used in its campaign, fails the preview (`name_is_free`). A duplicate ad or
-  creative name is a warning.
+  used in its campaign, fails the preview (`name_is_free`) -- for a creation and
+  for a rename alike. So does a scope with more entities than the scan reads
+  ("could not verify the name is free"). A duplicate ad or creative name is a
+  warning.
 
 **What gets a prefix:** campaigns, ad groups, ads and creatives. Keywords and
 negative keywords have no name field (only their text), so nothing is added to
@@ -294,7 +305,11 @@ them.
 
 **Renames:** the agent may rename only **its own** entities -- the name carries
 this checkout's prefix, or the change log shows this server created it. A
-hand-made entity, or another agent's, is refused, with no override. The prefix
+hand-made entity, or another agent's, is refused, with no override.
+"Carries this checkout's prefix" means the whole prefix: with only the initials
+`AB` set, `AB-launch` is ours but `AB-bot-launch` (agent `bot`'s) and
+`AB-cli-launch` (a person's, through the escape hatch) are not. The same rule
+decides `mine=True` and the `reconcile_ledger` naming section. The prefix
 is kept (the agent changes only the base), and an entity created here whose
 prefix was removed in the website gets it back. Undoing a rename restores the
 old name exactly.
@@ -302,6 +317,9 @@ old name exactly.
 **The escape hatch** names its creations and renames `<OWNER>-cli-<base>` when
 the initials are set (`AB-cli-launch`), and leaves the name as given when they
 are not: `cli` only separates a person from an agent under the same initials.
+It refuses a create or update path carrying `?` or `#` (`campaigns?`), which
+would otherwise slip past the stamp, and takes no abbreviated flags: `--appl`
+is not `--apply`.
 
 **Finding them:** the list tools filter by `origin` (`agent`, `cli` or `manual`,
 read from the name), `agent_name`, `owner`, or `mine=True` (this checkout's
@@ -493,7 +511,12 @@ A change whose request timed out is recorded as `unknown`: it may have landed,
 so it counts against the limits as if it had. `resolve_unknown_change(entry_id=
 "...")` reads the thing back and records it as applied or failed, without
 changing anything at Apple. Use it to find out; use `revert_change` only when
-you want the change undone.
+you want the change undone. "Applied" is recorded as soon as Apple shows the new
+value. "Failed" stops it counting, so it needs more: the change must be at
+least 5 minutes old (Apple's read can lag its write -- earlier, it says "too
+early to tell" and when to try again), and no later change in the log may have
+touched the same field (then the old value proves nothing, and it stays
+`unknown`).
 
 A targeting change whose own dimension landed while Apple's read-back shows
 another dimension different (normalised or dropped) is recorded as `partial`:
