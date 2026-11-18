@@ -92,7 +92,14 @@ class Engine:
             )
 
     def refuse_if_over_caps(self, ctx, projected: Decimal, cost: int) -> None:
-        reason = ctx.counters.would_exceed(projected, cost)
+        """Session first (this process), then the day (every process).
+
+        Both are enforced HERE, at apply time, not only in the preview: another
+        process may use up the day between a preview and its approval.
+        """
+        reason = ctx.counters.would_exceed(projected, cost) or ctx.daily.would_exceed(
+            projected, cost
+        )
         if reason:
             raise ToolError(reason)
 
@@ -110,6 +117,7 @@ class Engine:
     def preview_checks(self, ctx, kind: ChangeKind, proposal: Proposal) -> list[Check]:
         checks = list(proposal.checks)
         checks.append(check_projected_delta(ctx.limits, proposal.projected))
+        checks.append(ctx.daily.check(proposal.projected))
         return checks
 
     # -- preview -----------------------------------------------------------------
@@ -174,7 +182,20 @@ class Engine:
         )
 
     def extra_warnings(self, ctx, kind: ChangeKind, proposal: Proposal) -> list[str]:
-        return []
+        """The session and daily caps, as warnings on the preview.
+
+        Warnings rather than FAIL lines for the APPLY counts: they are enforced
+        at apply time, where the refusal names the cap, while a blocked token
+        could only say "failed a guardrail".
+        """
+        warnings = []
+        for reason in (
+            ctx.counters.would_exceed(proposal.projected, kind.cost),
+            ctx.daily.would_exceed(proposal.projected, kind.cost),
+        ):
+            if reason:
+                warnings.append(f"the apply will be REFUSED: {reason}")
+        return warnings
 
     # -- apply -------------------------------------------------------------------
 
@@ -373,7 +394,7 @@ class Engine:
         )
 
     def daily_snapshot(self, ctx) -> dict[str, str]:
-        return {}
+        return ctx.daily.snapshot()
 
     # -- revert ------------------------------------------------------------------
 

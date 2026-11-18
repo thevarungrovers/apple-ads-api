@@ -10,9 +10,13 @@ Three layers, in increasing order of how much they actually protect you:
    after it started, whereas `touch .audit/DISABLE_WRITES` from another terminal
    halts every apply_* within one tool call.
 
-3. Per-session counters. These are the ones that matter. A per-call limit is no
-   defence at all against a loop making 400 individually-legal changes, and that
-   is the failure mode an agent has and a human does not.
+3. Per-session counters, and a per-DAY total read back from the ledger. These
+   are the ones that matter. A per-call limit is no defence at all against a
+   loop making 400 individually-legal changes, and that is the failure mode an
+   agent has and a human does not. The session counter alone was not enough
+   either: it lives in memory, so every restart -- and every second MCP process,
+   one per Claude session -- started with a full budget. The daily total is
+   computed from the `changes` table, so every process on this machine shares it.
 
 Defaults live here as code constants and are overridden by guardrails.toml,
 which is committed, so changing a limit shows up as a diff rather than as an
@@ -21,11 +25,12 @@ export someone did once.
 
 from __future__ import annotations
 
+import datetime as dt
 import os
 import threading
 import tomllib
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from apple_ads_mcp.config import REPO_ROOT, load_config
@@ -44,6 +49,8 @@ _DEFAULTS: dict[str, object] = {
     "max_projected_delta_per_day": "50.00",
     "max_applies_per_session": 20,
     "max_projected_session_delta": "150.00",
+    "max_applies_per_day": 40,
+    "max_projected_delta_per_day_total": "200.00",
 }
 _SCOPE_DEFAULTS: dict[str, object] = {
     "allowed_campaign_ids": [],
@@ -65,6 +72,8 @@ class Limits:
     max_projected_delta_per_day: Decimal
     max_applies_per_session: int
     max_projected_session_delta: Decimal
+    max_applies_per_day: int = 40
+    max_projected_delta_per_day_total: Decimal = Decimal("200.00")
     allowed_campaign_ids: frozenset[int] = field(default_factory=frozenset)
     allowed_currencies: frozenset[str] = field(default_factory=frozenset)
     source: str = "defaults"
@@ -76,11 +85,12 @@ def _coerce(key: str, value: object) -> object:
         "max_daily_budget",
         "max_projected_delta_per_day",
         "max_projected_session_delta",
+        "max_projected_delta_per_day_total",
     ):
         return Decimal(str(value))
     if key in ("max_bid_increase_pct", "max_budget_change_pct"):
         return float(value)
-    if key in ("max_entities_per_call", "max_applies_per_session"):
+    if key in ("max_entities_per_call", "max_applies_per_session", "max_applies_per_day"):
         return int(value)
     return value
 
@@ -258,6 +268,110 @@ class SessionCounters:
             }
 
 
+# --- the daily total ----------------------------------------------------------
+
+
+def local_midnight_utc(now: dt.datetime | None = None) -> dt.datetime:
+    """Today's LOCAL midnight, as an aware UTC datetime.
+
+    "Today" is the operator's calendar day, not UTC's: in the evening in North
+    America the UTC date has already rolled over, and a cap counted in UTC would
+    reset in the middle of their working day. The ledger's `ts` column is UTC
+    ISO (`logdb._now()`), so the boundary is computed in local time and then
+    converted. `.astimezone()` applies the local zone's rules for that instant,
+    so a DST change between midnight and now is accounted for.
+    """
+    local_now = (now or dt.datetime.now()).astimezone()
+    midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight.astimezone(dt.timezone.utc)
+
+
+class DailyUsage:
+    """Today's applies and projected spend, read back from the ledger.
+
+    No table of its own and no in-memory state: every answer comes from the
+    `changes` rows since local midnight, so two server processes -- or one
+    restarted ten times today -- see the same numbers. Only rows whose outcome
+    is applied or partial count; a write Apple refused spent nothing.
+
+    A batch counts once (its rows share a batch_id) and costs what its kind
+    costs (3 for a creation). The projected spend is the sum of each row's own
+    positive delta: a reduction refunds nothing, exactly as in SessionCounters.
+    """
+
+    def __init__(self, limits: Limits, now: dt.datetime | None = None) -> None:
+        self._limits = limits
+        self._now = now
+
+    def usage(self) -> tuple[int, Decimal]:
+        from apple_ads_mcp import logdb
+
+        groups: dict[str, int] = {}
+        delta = Decimal("0")
+        for row in logdb.successful_changes_since(local_midnight_utc(self._now)):
+            key = str(row.get("batch_id") or row["entry_id"])
+            try:
+                groups[key] = int(row.get("cost") or 1)
+            except (TypeError, ValueError):
+                groups[key] = 1
+            try:
+                value = Decimal(str(row.get("projected_daily_spend_delta") or "0"))
+            except (InvalidOperation, ValueError):
+                value = Decimal("0")
+            delta += max(value, Decimal("0"))
+        return sum(groups.values()), delta
+
+    def check(self, projected: Decimal, used: Decimal | None = None) -> Check:
+        """The daily-total line for a preview. Names both figures, always.
+
+        "Over the ceiling" alone does not tell a human whether the change is too
+        big or the day is already spent.
+        """
+        if used is None:
+            used = self.usage()[1]
+        total = self._limits.max_projected_delta_per_day_total
+        remaining = max(Decimal("0"), total - used)
+        wanted = max(projected, Decimal("0"))
+        passed = wanted <= remaining
+        return Check(
+            "projected_daily_total",
+            passed,
+            f"uses {wanted} of today's remaining {remaining} "
+            f"({used} already used of max_projected_delta_per_day_total {total})"
+            + ("" if passed else " -- too much for today"),
+        )
+
+    def would_exceed(self, projected: Decimal, cost: int = 1) -> str | None:
+        applies, used = self.usage()
+        if applies + cost > self._limits.max_applies_per_day:
+            return (
+                f"daily apply limit reached: {applies} applies already made today "
+                f"(local time, across every server process and the CLI), "
+                f"max_applies_per_day is {self._limits.max_applies_per_day}. It resets "
+                f"at local midnight. Stop and tell the human; the cap is set in "
+                f"guardrails.toml."
+            )
+        check = self.check(projected, used)
+        if not check.passed:
+            return (
+                f"daily spend limit reached: this change {check.detail}. It resets at "
+                f"local midnight."
+            )
+        return None
+
+    def snapshot(self) -> dict[str, str]:
+        applies, used = self.usage()
+        return {
+            "day_started_at_utc": local_midnight_utc(self._now).isoformat(timespec="seconds"),
+            "applies_today": str(applies),
+            "max_applies_per_day": str(self._limits.max_applies_per_day),
+            "projected_delta_today": str(used),
+            "max_projected_delta_per_day_total": str(
+                self._limits.max_projected_delta_per_day_total
+            ),
+        }
+
+
 # --- per-change checks -------------------------------------------------------
 
 
@@ -266,9 +380,13 @@ class Check:
     name: str
     passed: bool
     detail: str
+    #: A check that does not apply to this change, shown so the reader can see
+    #: it was considered rather than forgotten. Never blocks.
+    skipped: bool = False
 
     def render(self) -> str:
-        return f"{'OK  ' if self.passed else 'FAIL'} {self.name}: {self.detail}"
+        label = "SKIP" if self.skipped else ("OK  " if self.passed else "FAIL")
+        return f"{label} {self.name}: {self.detail}"
 
 
 def check_campaign_in_scope(limits: Limits, campaign_id: int | None) -> Check:

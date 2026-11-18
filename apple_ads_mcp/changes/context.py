@@ -55,6 +55,13 @@ class ChangeContext:
     def previews(self):
         return self.state.previews
 
+    @property
+    def daily(self):
+        """Today's usage, read from the ledger on every use -- never cached."""
+        from apple_ads_mcp.guardrails import DailyUsage
+
+        return DailyUsage(self.limits)
+
     # -- calls -------------------------------------------------------------------
 
     def call(self, method: str, /, **kwargs: Any) -> Any:

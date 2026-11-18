@@ -32,7 +32,7 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from apple_ads_mcp import client, ledger
-from apple_ads_mcp.guardrails import read_only_mode, writes_disabled
+from apple_ads_mcp.guardrails import DailyUsage, read_only_mode, writes_disabled
 from apple_ads_mcp.client import (
     REPORT_TIMEOUT,
     context_header,
@@ -262,6 +262,11 @@ class GuardrailReport(BaseModel):
     allowed_campaign_ids: list[str]
     allowed_currencies: list[str]
     session: dict[str, str]
+    daily: dict[str, str] = Field(
+        default_factory=dict,
+        description="Today's applies and projected spend, across every server "
+        "process on this machine; resets at local midnight",
+    )
     pending_previews: int
     note: str
 
@@ -1169,14 +1174,23 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
                 "max_budget_change_pct": str(limits.max_budget_change_pct),
                 "max_entities_per_call": str(limits.max_entities_per_call),
                 "max_projected_delta_per_day": str(limits.max_projected_delta_per_day),
+                "max_applies_per_session": str(limits.max_applies_per_session),
+                "max_projected_session_delta": str(limits.max_projected_session_delta),
+                "max_applies_per_day": str(limits.max_applies_per_day),
+                "max_projected_delta_per_day_total": str(
+                    limits.max_projected_delta_per_day_total
+                ),
             },
             allowed_campaign_ids=sorted(str(c) for c in limits.allowed_campaign_ids),
             allowed_currencies=sorted(limits.allowed_currencies),
             session={k: str(v) for k, v in state.counters.snapshot().items()},
+            daily=DailyUsage(limits).snapshot(),
             pending_previews=state.previews.pending_count(),
             note=(
                 "An empty allowed_campaign_ids means every campaign is in scope. "
-                "Session counters reset only when the server restarts."
+                "Session counters reset only when the server restarts; the daily "
+                "counters come from the ledger, are shared by every process, and "
+                "reset at local midnight."
                 + (
                     " THIS SERVER IS READ-ONLY: it published no apply_* tools and no "
                     "revert_change, so nothing here can change the account. Previews "

@@ -26,6 +26,18 @@ max_projected_delta_per_day = "50.00"  # upper-bound extra spend from one change
 max_applies_per_session          = 20
 max_projected_session_delta      = "150.00"
 
+# --- per-day bounds ------------------------------------------------------------
+# Counted from the `changes` table in logs/apple-ads.db, so they survive a restart
+# and are SHARED by every MCP process and the CLI on this machine. The day starts
+# at LOCAL midnight. A batch counts once; a creation counts 3.
+#
+# max_projected_delta_per_day_total must be at least the largest campaign daily
+# budget: re-enabling a campaign projects its whole budget against this total
+# (and is exempt from the per-change limit above), so a smaller total would mean
+# that campaign could never be re-enabled from here.
+max_applies_per_day               = 40
+max_projected_delta_per_day_total = "200.00"
+
 [scope]
 # Campaign ids the server may touch. An EMPTY list means every campaign in the ad
 # account -- pin this to one pilot campaign for the first week, then widen.

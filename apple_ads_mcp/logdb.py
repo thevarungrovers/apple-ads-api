@@ -605,6 +605,43 @@ def entries(since: dt.datetime | None = None) -> list[dict[str, Any]]:
     return [_row_to_entry(row) for row in connect().execute(sql, params)]
 
 
+def _parse_ts(raw: Any) -> dt.datetime | None:
+    """A stored timestamp as an aware datetime, whatever ISO spelling it has.
+
+    Rows this module writes are `+00:00` UTC. Rows imported from the retired
+    JSONL carry whatever that wrote, which may be `Z`, fractional seconds or a
+    local offset -- a plain string comparison would misorder those.
+    """
+    try:
+        stamp = dt.datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=dt.timezone.utc)
+    return stamp
+
+
+def successful_changes_since(since: dt.datetime) -> list[dict[str, Any]]:
+    """Changes that landed (applied or partial) at or after `since`.
+
+    The daily cap's whole input. SQL narrows by date prefix -- a string compare
+    the ts index serves -- with two days of slack, and the exact boundary is then
+    applied to parsed datetimes, so a legacy row in another ISO spelling is
+    neither miscounted nor dropped.
+    """
+    lower = (since - dt.timedelta(days=2)).strftime("%Y-%m-%d")
+    rows = connect().execute(
+        "SELECT * FROM changes WHERE ts >= ? AND outcome IN (?, ?) ORDER BY ts, rowid",
+        (lower, APPLIED, PARTIAL),
+    )
+    keep = []
+    for row in rows:
+        stamp = _parse_ts(row["ts"])
+        if stamp is not None and stamp >= since:
+            keep.append(_row_to_entry(row))
+    return keep
+
+
 def batch_entries(batch_id: str) -> list[dict[str, Any]]:
     """Every row of one batch, in the order they were written.
 
