@@ -1,0 +1,505 @@
+"""Reads, warnings and building blocks several change kinds share."""
+
+from __future__ import annotations
+
+from decimal import Decimal
+from typing import Any
+
+from apple_ads_platform import BidStrategyGoal, BidStrategyType, BidStrategyUpdate
+from mcp.server.mcpserver.exceptions import ToolError
+
+from apple_ads_mcp import client
+from apple_ads_mcp.changes.base import ChangeKind, Outcome, item as make_item
+from apple_ads_mcp.client import (
+    context_header,
+    enum_value,
+    eq_filter,
+    format_money,
+    landed,
+    money_amount,
+    money_currency,
+    query,
+    to_money,
+    unwrap,
+)
+from apple_ads_mcp.previews import ChangePreview, Metrics7d
+
+SETTABLE_STATUSES = {"ENABLED", "PAUSED"}
+
+
+def parse_choice(raw: str, allowed: set[str], field: str = "status") -> str:
+    value = str(raw).strip().upper()
+    if value not in allowed:
+        raise ToolError(f"{field}={raw!r} must be one of {', '.join(sorted(allowed))}")
+    return value
+
+
+# --- warnings -------------------------------------------------------------------
+
+
+def serving_warning(entity_status: str | None, kind: str) -> list[str]:
+    """Warn from the ENTITY's serving status, not its campaign's.
+
+    A keyword under a paused ad group reads AD_GROUP_ON_HOLD while its campaign
+    reads RUNNING. Warning off the campaign would shout about live traffic that
+    this entity cannot receive -- and a warning that cries wolf is one people
+    learn to scroll past.
+    """
+    if entity_status == "RUNNING":
+        return [f"This {kind} IS SERVING TODAY -- the change takes effect on live traffic."]
+    if entity_status in (None, "unknown_default_open_api"):
+        return [f"Could not determine whether this {kind} is serving. Treat it as live."]
+    return [
+        f"This {kind} is {entity_status}, so it is not spending right now. The "
+        f"change takes effect whenever it next serves."
+    ]
+
+
+def metrics_warning(metrics_error: str | None) -> list[str]:
+    """A projection built on a failed report is a confident 0.00. Say so."""
+    if not metrics_error:
+        return []
+    return [
+        "Could not read the last 7 days for this entity, so the 7d figures and "
+        f"projected_daily_spend_delta are 0 by default, NOT by measurement: "
+        f"{metrics_error[:200]}"
+    ]
+
+
+def metrics_block(spend: Decimal, taps: int, impressions: int, installs: int) -> Metrics7d:
+    return Metrics7d(spend=str(spend), taps=taps, impressions=impressions, installs=installs, days=7)
+
+
+def campaign_budget(campaign: Any) -> Any:
+    """The campaign's daily budget `Money`, or None."""
+    budget = getattr(campaign, "daily_budget", None) if campaign is not None else None
+    return getattr(budget, "value", None) if budget is not None else None
+
+
+def campaign_currency(campaign: Any) -> str | None:
+    """The campaign's budget currency, for something that has no money of its own."""
+    return money_currency(campaign_budget(campaign))
+
+
+def child_preview(
+    *,
+    tool: str,
+    entity_type: str,
+    entity_id: Any,
+    entity_name: str | None,
+    path: str,
+    field: str,
+    before: str,
+    after: str,
+    campaign: Any,
+    entity_serving: str | None,
+    projected: Decimal,
+    checks: list[str] | None = None,
+    blocked: bool = False,
+    warnings: list[str] | None = None,
+    metrics: Metrics7d | None = None,
+    pct: str | None = None,
+) -> ChangePreview:
+    """One item of a batch, shown under the batch token."""
+    budget = campaign_budget(campaign)
+    return ChangePreview(
+        preview_token="(covered by the batch token)",
+        tool=tool,
+        entity_type=entity_type,
+        entity_id=str(entity_id),
+        entity_name=entity_name or "(unnamed)",
+        path=path,
+        field=field,
+        before=before,
+        after=after,
+        pct_change=pct,
+        campaign_id=str(campaign.id) if campaign is not None and campaign.id else None,
+        campaign_name=getattr(campaign, "name", None),
+        campaign_daily_budget=format_money(budget) if budget else None,
+        campaign_serving_status=enum_value(getattr(campaign, "display_status", None)),
+        entity_serving_status=entity_serving,
+        last_7d=metrics,
+        projected_daily_spend_delta=str(projected),
+        guardrail_checks=checks or [],
+        blocked=blocked,
+        warnings=warnings or [],
+    )
+
+
+# --- bid strategy -----------------------------------------------------------------
+
+
+def bid_strategy_type(ad_group: Any) -> str | None:
+    """MANUAL_CPT / MAX_CONVERSIONS / ... off an ad group, or None if unreadable."""
+    strategy = getattr(ad_group, "bid_strategy", None)
+    if strategy is None:
+        return None
+    return enum_value(getattr(strategy, "bid_strategy_type", None))
+
+
+def bid_strategy_goal(ad_group: Any) -> str | None:
+    """TAP / INSTALL / ... off an ad group, or None if unreadable."""
+    strategy = getattr(ad_group, "bid_strategy", None)
+    if strategy is None:
+        return None
+    return enum_value(getattr(strategy, "bid_strategy_goal", None))
+
+
+def ad_group_bid(ad_group: Any) -> Any:
+    """The `Money` at `bidStrategy.bid`, or None.
+
+    There is no `defaultBid` field on an ad group or on AdGroupUpdate; the bid
+    lives inside the nested bidStrategy object. Verified against the live API
+    2026-10-09, and `tools_read._ad_group_row` reads it from the same place.
+    """
+    strategy = getattr(ad_group, "bid_strategy", None)
+    if strategy is None:
+        return None
+    return getattr(strategy, "bid", None)
+
+
+def refuse_if_moved(current: str, recorded: str, what: str) -> None:
+    """Staleness for a value a write ECHOES BACK rather than changes.
+
+    A kind's ``current`` returns the one value its ``before`` describes, and
+    the engine refuses when that moved. But a write that sends other fields
+    back unchanged (the bid strategy alongside a default bid, the default bid
+    alongside a strategy) would silently revert a change made to THOSE since
+    the preview. Call this from ``current`` for each such field.
+    """
+    from apple_ads_mcp.changes.engine import Engine
+
+    Engine.confirm_unchanged(current, recorded, what)
+
+
+def bid_strategy_update(
+    amount: str | None,
+    currency: str | None,
+    strategy_type: str | None,
+    strategy_goal: str | None,
+) -> BidStrategyUpdate:
+    """The new bid, with the ad group's existing strategy echoed back unchanged.
+
+    `bidStrategy` is a NESTED object, and Apple's PUT merges at the top level.
+    Sending `{"bidStrategy": {"bid": ...}}` alone therefore risks replacing the
+    whole object and dropping bidStrategyType with it -- which would move the ad
+    group onto a different bidding model, a far larger change than the one in the
+    preview. Echoing both fields back makes the write a no-op for everything
+    except the number a human approved.
+    """
+    kwargs: dict[str, Any] = {}
+    if amount is not None:
+        kwargs["bid"] = to_money(amount, currency)
+    if strategy_type:
+        kwargs["bid_strategy_type"] = BidStrategyType(strategy_type)
+    if strategy_goal:
+        kwargs["bid_strategy_goal"] = BidStrategyGoal(strategy_goal)
+    return BidStrategyUpdate(**kwargs)
+
+
+def default_bid_blast_radius(ad_group_id: int) -> list[str]:
+    """How many keywords this default bid actually governs.
+
+    A keyword carrying a bid of its own ignores the ad group default, so "this
+    reprices 40 keywords" would be false where 38 are explicitly bid. Degrades to
+    a warning that says so rather than failing the preview: the rest of the
+    preview is still worth reading if this one query fails.
+    """
+    try:
+        rows, truncated = client.query_all(
+            "keywords_query_post", [eq_filter("adGroupId", ad_group_id)], cap=5000
+        )
+        rows = [k for k in rows if not k.deleted]
+    except ToolError as exc:
+        return [
+            "Could not list this ad group's keywords, so this preview cannot say how "
+            f"many of them the default bid governs: {str(exc)[:160]}"
+        ]
+    if not rows:
+        return [
+            "This ad group has NO keywords, so the default bid is the only bid it "
+            "has -- every impression it wins is priced off this one number. That is "
+            "normal for a Search Tab or Search Match ad group."
+        ]
+    own = sum(1 for k in rows if money_amount(getattr(k, "bid", None)) is not None)
+    return [
+        f"This ad group has {len(rows)}{'+' if truncated else ''} keyword(s): "
+        f"{len(rows) - own} fall back to the default bid and are repriced by this "
+        f"change; {own} carry their own bid and are NOT affected."
+    ]
+
+
+def existing_negatives(
+    campaign_id: int | None, ad_group_id: int | None
+) -> tuple[set[tuple[str, str]], str | None]:
+    """((lowercased text, match type) already present, why it could not be checked).
+
+    Apple REQUIRES an adGroupId condition on a negative keyword query; a
+    campaignId filter alone is rejected with `adGroupId condition is required`.
+    The old version sent exactly that for a campaign-level add, swallowed the
+    rejection and returned an empty set -- so the duplicate warning silently
+    never fired. Now the second element says the check did not happen, and the
+    preview prints it.
+    """
+    if ad_group_id is None:
+        return set(), (
+            "duplicates could not be checked: Apple's negative keyword query "
+            "requires an adGroupId, so campaign-level negatives cannot be listed "
+            "from here. Check the Apple Ads UI before approving."
+        )
+    try:
+        rows, _truncated = client.query_all(
+            "negative_keywords_query_post", [eq_filter("adGroupId", ad_group_id)], cap=5000
+        )
+    except ToolError as exc:
+        return set(), f"duplicates could not be checked: {str(exc)[:160]}"
+    return (
+        {
+            ((row.text or "").lower(), enum_value(row.match_type) or "")
+            for row in rows
+            if not row.deleted
+        },
+        None,
+    )
+
+
+# --- how much an enable can spend ---------------------------------------------------
+
+
+def campaign_headroom(ctx, campaign: Any) -> tuple[Decimal | None, str]:
+    """How much MORE the campaign could spend per day than it does now.
+
+    The honest upper bound for anything that widens delivery INSIDE a campaign
+    -- enabling a keyword, ad group or ad, pausing a negative: none of them can
+    take the campaign past its daily budget, and the last 7 days say how much of
+    that budget it already uses. Zero, with a reason, when the campaign is not
+    enabled: then nothing under it spends until the campaign itself is enabled,
+    and THAT change projects the whole budget.
+
+    None means it cannot be bounded at all (no daily budget of its own), which
+    the caller turns into a FAIL rather than a confident zero.
+    """
+    if campaign is None:
+        return None, "the campaign could not be read, so the added spend cannot be bounded"
+    status = enum_value(getattr(campaign, "status", None))
+    if status != "ENABLED":
+        return Decimal("0"), (
+            f"the campaign is {status}, so this adds no spend until the campaign is enabled"
+        )
+    budget = money_amount(campaign_budget(campaign))
+    if budget is None:
+        return None, (
+            "the campaign has no daily budget of its own (a shared budget?), so the "
+            "added spend cannot be bounded"
+        )
+    spend, _taps, _impressions, _installs, error = ctx.metrics_7d(
+        "apps_campaign_reports", "campaignId", campaign.id
+    )
+    if error:
+        return budget, (
+            f"upper bound: the whole daily budget {budget}, because the last 7 days "
+            f"could not be read ({error[:120]})"
+        )
+    average = (spend / Decimal(7)).quantize(Decimal("0.01"))
+    headroom = max(budget - average, Decimal("0")).quantize(Decimal("0.01"))
+    return headroom, (
+        f"upper bound: the campaign's unused daily budget ({budget} budget - "
+        f"{average}/day average over the last 7 days)"
+    )
+
+
+def campaign_enable_bound(campaign: Any) -> tuple[Decimal | None, str]:
+    """Enabling a whole campaign can spend its whole daily budget, from today."""
+    budget = money_amount(campaign_budget(campaign))
+    if budget is None:
+        return None, (
+            "the campaign has no daily budget of its own (a shared budget?), so the "
+            "spend it resumes cannot be bounded"
+        )
+    return budget, f"upper bound: the campaign's whole daily budget ({budget})"
+
+
+def bound_check(projected: Decimal | None, reason: str) -> tuple[Decimal, list]:
+    """(projection to use, [FAIL check] when it could not be bounded)."""
+    from apple_ads_mcp.guardrails import Check
+
+    if projected is None:
+        return Decimal("0"), [Check("spend_is_bounded", False, reason)]
+    return projected, [Check("spend_is_bounded", True, reason)]
+
+
+# --- a status flip, shared by every entity that has one ---------------------------
+
+
+class StatusKind(ChangeKind):
+    """ENABLED <-> PAUSED on one entity. Subclasses say which entity and how.
+
+    Pausing and un-pausing are one call each, so the inverse is the opposite
+    status and revert_change can always undo one.
+    """
+
+    entity_type = ""
+    label = ""
+    #: Re-enabling is bounded by the CAMPAIGN (enable_bound), so a batch revert
+    #: of several in one campaign counts that bound once.
+    revert_bound_per_campaign = True
+    get_method = ""
+    put_method = ""
+    update_arg = ""
+
+    def update_body(self, status: str) -> Any:  # pragma: no cover - abstract
+        raise NotImplementedError
+
+    def fetch(self, entity_id: Any) -> Any:
+        response = client.call(self.get_method, id=str(entity_id), x_ap_context=context_header())
+        entity = unwrap(response, self.label)
+        if entity is None:
+            raise ToolError(f"no {self.label} {entity_id} in this ad account")
+        return entity
+
+    def current(self, ctx, item: dict[str, Any]) -> str | None:
+        return enum_value(self.fetch(item["entity_id"]).status) or "unknown"
+
+    def request(self, ctx, items):
+        item = items[0]
+        return self.put_method, {
+            "id": str(item["entity_id"]),
+            "x_ap_context": context_header(),
+            self.update_arg: self.update_body(item["after"]),
+        }
+
+    def observe(self, ctx, response, items):
+        updated = unwrap(response, f"{self.label} update")
+        observed = enum_value(getattr(updated, "status", None)) if updated else None
+        return [Outcome(landed(observed, items[0]["after"]), observed)]
+
+    def ledger_keys_for(self) -> tuple[tuple[str, str], ...]:
+        return ((self.entity_type, "status"),)
+
+    def enable_bound(self, ctx, campaign_id: Any) -> tuple[Decimal | None, str]:
+        """What enabling one of these can add per day: the campaign's headroom."""
+        return campaign_headroom(ctx, ctx.campaign(campaign_id))
+
+    def revert_projection(self, ctx, entry, item):
+        if item["after"] != "ENABLED":
+            return Decimal("0"), False
+        bound, reason = self.enable_bound(ctx, item.get("campaign_id"))
+        if bound is None:
+            raise ValueError(f"cannot revert: {reason}. Re-enable it with its preview instead.")
+        return bound, True
+
+    def inverse(self, ctx, entry):
+        return self, make_item(
+            entity_type=self.entity_type,
+            entity_id=entry["entity_id"],
+            entity_name=entry.get("entity_name"),
+            path=str(entry.get("path")),
+            field="status",
+            before=str(entry["after"]),
+            after=str(entry["before"]),
+            campaign_id=entry.get("campaign_id"),
+        )
+
+    def undo_creation(self, entry: dict[str, Any]):
+        """A creation's inverse: PAUSE what was made. Nothing is ever deleted.
+
+        Reads the entity's status now. Already PAUSED -- created paused and never
+        enabled, or paused since -- means there is nothing to undo, which a batch
+        revert skips and a single revert reports.
+        """
+        from apple_ads_mcp.changes.base import NothingToUndo
+
+        if not entry.get("entity_id") or entry.get("entity_id") in ("(new)", "None"):
+            raise ValueError(
+                f"entry {entry.get('entry_id')} has no created id recorded, so it cannot "
+                f"be traced to the {self.label} it made."
+            )
+        current = enum_value(self.fetch(entry["entity_id"]).status) or "unknown"
+        if current == "PAUSED":
+            raise NothingToUndo(
+                f"{self.label} {entry['entity_id']} is already PAUSED, so undoing its "
+                f"creation changes nothing. Nothing is ever deleted from here."
+            )
+        return self, self.pause_item(
+            entry["entity_id"], entry.get("entity_name"), str(entry.get("path")),
+            entry.get("campaign_id"), before=current,
+        )
+
+    def pause_item(self, entity_id: Any, entity_name: str | None, path: str, campaign_id: Any, before: str):
+        """The item that pauses one entity -- a creation's inverse."""
+        return make_item(
+            entity_type=self.entity_type,
+            entity_id=entity_id,
+            entity_name=entity_name,
+            path=path,
+            field="status",
+            before=before,
+            after="PAUSED",
+            campaign_id=campaign_id,
+        )
+
+
+# --- naming ---------------------------------------------------------------------
+
+#: entity_type -> (query method, the parent filter field or None for the account)
+_NAME_SCOPES = {
+    "campaign": ("campaigns_query_post", None),
+    "ad_group": ("adgroups_query_post", "campaignId"),
+    "ad": ("ads_query_post", "adGroupId"),
+    "creative": ("creatives_query_post", None),
+}
+
+
+def name_taken(
+    entity_type: str, final: str, parent_id: Any = None, exclude_id: Any = None,
+) -> tuple[bool | None, str]:
+    """(taken, where) for ``final`` among live entities of that type in its scope.
+
+    A campaign is compared within the ad account, an ad group within its
+    campaign, an ad within its ad group, a creative within the account; deleted
+    rows are ignored, and case is ignored too (two names that differ only in
+    case read as one in a report). ``exclude_id`` is the entity being renamed,
+    which may keep its own name in another case. ``taken`` is None when the
+    read failed or stopped at the sweep cap: a clash may sit past it.
+    """
+    method, parent_field = _NAME_SCOPES[entity_type]
+    filters = [client.eq_filter(parent_field, parent_id)] if parent_field and parent_id else None
+    scope = f"{parent_field[:-2].replace('adGroup', 'ad group')} {parent_id}" if filters else "the ad account"
+    try:
+        rows, truncated = client.query_all(method, filters)
+    except ToolError as exc:
+        return None, f"could not read existing names in {scope}: {str(exc)[:160]}"
+    wanted = final.casefold()
+    clash = [r for r in rows if not getattr(r, "deleted", False)
+             and (exclude_id is None or str(getattr(r, "id", "")) != str(exclude_id))
+             and str(getattr(r, "name", "") or "").casefold() == wanted]
+    if clash:
+        return True, f"{entity_type.replace('_', ' ')} {clash[0].id} in {scope} is already named {clash[0].name!r}"
+    if truncated:
+        return None, (
+            f"could not verify the name is free: {scope} has more "
+            f"{entity_type.replace('_', ' ')}s than the scan reads ({len(rows)}), and none "
+            f"of those is named {final!r}"
+        )
+    return False, f"no other {entity_type.replace('_', ' ')} in {scope} is named {final!r}"
+
+
+def name_is_free(entity_type: str, final: str, parent_id: Any = None, exclude_id: Any = None):
+    """A FAIL `name_is_free` check for a campaign or ad group whose final name
+    is already in use (or cannot be shown not to be): Apple models no
+    uniqueness error and has no validate-only mode, and two identically named
+    campaigns make every report unreadable."""
+    from apple_ads_mcp.guardrails import Check
+
+    taken, detail = name_taken(entity_type, final, parent_id, exclude_id)
+    return Check("name_is_free", taken is False, detail)
+
+
+def name_clash_warning(entity_type: str, final: str, parent_id: Any = None) -> list[str]:
+    """A WARN (not a FAIL) for an ad or creative whose name is already in use."""
+    taken, detail = name_taken(entity_type, final, parent_id)
+    if taken:
+        return [f"a duplicate name: {detail}. Allowed, but the two will be hard to tell apart."]
+    if taken is None:
+        return [detail]
+    return []

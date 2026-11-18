@@ -12,6 +12,7 @@ changes that will be refused.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import json
 from decimal import Decimal, InvalidOperation
@@ -25,17 +26,18 @@ from apple_ads_platform import (
     Filter,
     Pagination,
     RecommendationQueryRequest,
+    RequestPagination,
+    Sorting,
     TimeRange,
 )
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from apple_ads_mcp import client, ledger
-from apple_ads_mcp.guardrails import read_only_mode, writes_disabled
+from apple_ads_mcp import client, ledger, naming
+from apple_ads_mcp.guardrails import DailyUsage, read_only_mode, writes_disabled
 from apple_ads_mcp.client import (
     REPORT_TIMEOUT,
-    call,
     context_header,
     enum_value,
     eq_filter,
@@ -91,6 +93,11 @@ class WhoAmI(BaseModel):
     org_id_from_me: str | None
     user_id: str | None
     accounts: list[AdAccountInfo]
+    identity: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Who this checkout names its creations after, from .env: "
+        "owner_initials, agent_name, the prefix they make, and any problem",
+    )
     note: str
 
 
@@ -105,12 +112,27 @@ class CampaignRow(BaseModel):
     )
     countries_or_regions: list[str] | None = None
     deleted: bool | None = None
+    origin: str | None = Field(
+        default=None,
+        description="agent | cli | manual, read from the NAME's prefix -- a convention, "
+        "not proof; ledger_created is the proof",
+    )
+    owner: str | None = None
+    agent: str | None = None
+    base: str | None = Field(default=None, description="The name without its prefix")
+    ledger_created: bool | None = Field(
+        default=None, description="True when this checkout's ledger shows it created this"
+    )
 
 
 class CampaignList(BaseModel):
-    total: int | None
+    total: int | None = Field(description="Apple's count, deleted rows included")
     returned: int
     campaigns: list[CampaignRow]
+    next_offset: int | None = Field(
+        default=None, description="Pass as offset for the next page; null on the last"
+    )
+    truncated: bool = Field(default=False, description="True when more rows exist")
 
 
 class AdGroupRow(BaseModel):
@@ -124,12 +146,71 @@ class AdGroupRow(BaseModel):
     )
     automated_keywords_opt_in: bool | None = None
     deleted: bool | None = None
+    origin: str | None = Field(
+        default=None,
+        description="agent | cli | manual, read from the NAME's prefix -- a convention, "
+        "not proof; ledger_created is the proof",
+    )
+    owner: str | None = None
+    agent: str | None = None
+    base: str | None = Field(default=None, description="The name without its prefix")
+    ledger_created: bool | None = Field(
+        default=None, description="True when this checkout's ledger shows it created this"
+    )
+
+
+class CampaignDetail(CampaignRow):
+    """Everything about one campaign a decision about it needs."""
+
+    billing_event: str | None = None
+    promoted_app_id: str | None = Field(default=None, description="adamId of the app")
+    start_time: str | None = None
+    end_time: str | None = None
+    supply_sources: list[str] | None = None
+    bid_strategy: dict[str, Any] | None = None
+    system_status: str | None = None
+    system_status_reasons: list[str] = Field(default_factory=list)
+    limiting_reasons: list[str] = Field(
+        default_factory=list, description="Why delivery is limited, when Apple says"
+    )
+    shared_budget_ids: list[str] = Field(default_factory=list)
+    app_limited_reasons: Any = Field(
+        default=None, description="Apple's legacy app-limited status detail, when there is any"
+    )
+    last_7d: ReportRow | None = None
+    last_30d: ReportRow | None = None
+    fields: dict[str, Any] = Field(default_factory=dict, description="Apple's whole record")
 
 
 class AdGroupList(BaseModel):
-    total: int | None
+    total: int | None = Field(description="Apple's count, deleted rows included")
     returned: int
     ad_groups: list[AdGroupRow]
+    next_offset: int | None = Field(
+        default=None, description="Pass as offset for the next page; null on the last"
+    )
+    truncated: bool = Field(default=False, description="True when more rows exist")
+
+
+class AdGroupDetail(AdGroupRow):
+    """Everything about one ad group: bidding, Search Match and full targeting."""
+
+    pricing_model: str | None = None
+    bid_strategy_type: str | None = None
+    bid_strategy_goal: str | None = None
+    cpa_goal: str | None = Field(default=None, description="cpaCap, when set")
+    start_time: str | None = None
+    end_time: str | None = None
+    targeting: dict[str, Any] = Field(
+        default_factory=dict,
+        description="age, gender, device class, daypart, country/admin area/locality/"
+        "postal code/radius, location group, app downloaders, travel intent",
+    )
+    keyword_count: int | None = None
+    ad_count: int | None = None
+    system_status_reasons: list[str] = Field(default_factory=list)
+    last_7d: ReportRow | None = None
+    fields: dict[str, Any] = Field(default_factory=dict, description="Apple's whole record")
 
 
 class KeywordRow(BaseModel):
@@ -145,9 +226,13 @@ class KeywordRow(BaseModel):
 
 
 class KeywordList(BaseModel):
-    total: int | None
+    total: int | None = Field(description="Apple's count, deleted rows included")
     returned: int
     keywords: list[KeywordRow]
+    next_offset: int | None = Field(
+        default=None, description="Pass as offset for the next page; null on the last"
+    )
+    truncated: bool = Field(default=False, description="True when more rows exist")
 
 
 class NegativeKeywordRow(BaseModel):
@@ -161,22 +246,13 @@ class NegativeKeywordRow(BaseModel):
 
 
 class NegativeKeywordList(BaseModel):
-    total: int | None
+    total: int | None = Field(description="Apple's count, deleted rows included")
     returned: int
     negative_keywords: list[NegativeKeywordRow]
-
-
-class SharedBudgetRow(BaseModel):
-    id: str
-    name: str | None
-    amount: str | None
-    status: str | None
-
-
-class SharedBudgetList(BaseModel):
-    returned: int
-    shared_budgets: list[SharedBudgetRow]
-    note: str
+    next_offset: int | None = Field(
+        default=None, description="Pass as offset for the next page; null on the last"
+    )
+    truncated: bool = Field(default=False, description="True when more rows exist")
 
 
 class ReportRow(BaseModel):
@@ -200,19 +276,23 @@ class Report(BaseModel):
     granularity: str
     rows: list[ReportRow]
     grand_total: ReportRow | None
+    returned: int = 0
+    offset: int = 0
+    next_offset: int | None = Field(
+        default=None, description="Pass as offset for the next page; null when this is the last"
+    )
+    total_rows_available: int | None = Field(
+        default=None, description="Rows Apple has for this request across every page"
+    )
+    truncated: bool = Field(
+        default=False, description="True when more rows exist than were returned"
+    )
+    time_zone: str | None = Field(
+        default=None,
+        description="The ad account's timezone, which start/end are dates in. Null "
+        "when the account could not be read and the machine's date was used",
+    )
     note: str
-
-
-class SuggestionRow(BaseModel):
-    text: str | None
-    match_type: str | None
-    bid: str | None
-    extra: dict[str, str] = Field(default_factory=dict)
-
-
-class SuggestionList(BaseModel):
-    returned: int
-    suggestions: list[SuggestionRow]
 
 
 class BudgetRecommendationRow(BaseModel):
@@ -248,6 +328,11 @@ class AuditRow(BaseModel):
 class AuditList(BaseModel):
     returned: int
     changes: list[AuditRow]
+    truncated: bool = Field(
+        default=False,
+        description="True when at least one entity type filled its page, so older "
+        "changes in the window may be missing",
+    )
     note: str
 
 
@@ -263,7 +348,17 @@ class GuardrailReport(BaseModel):
     allowed_campaign_ids: list[str]
     allowed_currencies: list[str]
     session: dict[str, str]
+    daily: dict[str, str] = Field(
+        default_factory=dict,
+        description="Today's applies and projected spend, across every server "
+        "process on this machine; resets at local midnight",
+    )
     pending_previews: int
+    identity: dict[str, Any] = Field(
+        default_factory=dict,
+        description="The naming identity from .env: which parts are set, the prefix "
+        "every creation gets, and any malformed value (named by its .env key)",
+    )
     note: str
 
 
@@ -279,8 +374,9 @@ class LedgerEntry(BaseModel):
     before: str | None
     after: str | None
     outcome: str | None = Field(
-        description="applied | failed | partial | refused, or null when the write "
-        "started and nothing recorded how it ended"
+        description="applied | failed | partial | refused | unknown (the request "
+        "timed out and may have landed), or null when the write started and "
+        "nothing recorded how it ended"
     )
     outcome_detail: str | None = None
     reverts_entry_id: str | None = None
@@ -290,8 +386,8 @@ class LedgerList(BaseModel):
     returned: int
     entries: list[LedgerEntry]
     unfinished: int = Field(
-        description="Entries with an intent and no outcome -- a write that may have "
-        "landed at Apple with nothing local to say so"
+        description="Entries with an intent and no outcome, or an 'unknown' one -- "
+        "a write that may have landed at Apple with nothing local to say so"
     )
     note: str
 
@@ -300,8 +396,29 @@ class ReconcileReport(BaseModel):
     since: str
     local_entries: int
     apple_changes: int
+    apple_truncated: list[str] = Field(
+        default_factory=list,
+        description="Entity types whose audit page came back full -- some of "
+        "Apple's changes are missing, so apple_without_local is incomplete",
+    )
     local_without_apple: list[LedgerEntry]
     apple_without_local: list[AuditRow]
+    unknown_outcome: list[LedgerEntry] = Field(
+        default_factory=list,
+        description="Writes whose request timed out (outcome 'unknown'): they may "
+        "have landed. Counted against the caps until settled",
+    )
+    unknown_seen_by_apple: list[str] = Field(
+        default_factory=list,
+        description="entry_ids from unknown_outcome whose entity DOES appear in "
+        "Apple's audit trail in this window -- most likely landed",
+    )
+    naming: dict[str, Any] | None = Field(
+        default=None,
+        description="Only when a naming prefix is configured: prefix_lost (created "
+        "here, live name no longer carries the prefix), prefix_without_ledger (carries "
+        "our prefix, no creation in this ledger), and other prefixes counted",
+    )
     note: str
 
 
@@ -309,9 +426,20 @@ class ReconcileReport(BaseModel):
 
 
 def _window(days: int) -> tuple[dt.date, dt.date]:
+    """`days` ending TODAY in the ad account's timezone (see client.account)."""
     days = max(1, min(days, MAX_REPORT_DAYS))
-    end = dt.date.today()
+    end, _zone = client.account_today()
     return end - dt.timedelta(days=days - 1), end
+
+
+def complete_days_window(days: int = 7) -> tuple[dt.date, dt.date]:
+    """`days` COMPLETE days ending yesterday, in the account's timezone.
+
+    What a projection divides by 7. A window ending today includes a partial
+    day, which understates the daily rate by up to a seventh.
+    """
+    today, _zone = client.account_today()
+    return today - dt.timedelta(days=days), today - dt.timedelta(days=1)
 
 
 def _json_money(value: Any) -> str:
@@ -343,6 +471,25 @@ def _metrics_row(
     )
 
 
+#: Report columns a `sort_by` may name, as Apple spells them in totalMetrics.
+REPORT_SORT_FIELDS = ("localSpend", "impressions", "taps", "totalInstalls")
+#: Rows per page when an internal sweep reads a whole report.
+REPORT_PAGE = 1000
+#: Pages a sweep will read before saying it stopped.
+REPORT_MAX_PAGES = 20
+
+
+@dataclasses.dataclass
+class ReportPage:
+    rows: list[dict]
+    grand_total: dict | None
+    start: dt.date
+    end: dt.date
+    #: Apple's count of rows across every page, when it says.
+    total: int | None
+    truncated: bool = False
+
+
 def run_report(
     method: str,
     entity: str,
@@ -352,25 +499,44 @@ def run_report(
     group_by: list[str] | None = None,
     grand_total: bool = True,
 ) -> tuple[list[dict], dict | None, dt.date, dt.date]:
-    """One `apps_*_reports` call, parsed from RAW JSON rather than the SDK's models.
+    """Every row of one report (all pages), as (rows, grand_total, start, end)."""
+    page = run_report_all(method, entity, days, filters, granularity, group_by, grand_total)
+    return page.rows, page.grand_total, page.start, page.end
 
-    Not a style choice. apple-ads-platform 1.109.0 generates
-    `ReportingKeyword.status` with the enum ('ACTIVE', 'PAUSED', 'DELETED') while
-    the live API returns 'ENABLED', and the generated validator RAISES on an
-    unrecognised value instead of falling back to its own
-    `unknown_default_open_api` placeholder. The whole keyword report therefore
-    fails to deserialize -- a client-side bug, with the response sitting there
-    intact. Other reporting models are likely to have the same mismatch.
 
-    Reports are read-only and get flattened into ReportRow regardless, so nothing
-    is lost by reading the JSON directly, and the server stops being hostage to
-    one wrong enum in a generated model.
+def run_report_page(
+    method: str,
+    entity: str,
+    days: int,
+    filters: list[Filter] | None = None,
+    granularity: str = "DAILY",
+    group_by: list[str] | None = None,
+    grand_total: bool = True,
+    offset: int = 0,
+    page_size: int | None = None,
+    sort_by: str | None = None,
+    window: tuple[dt.date, dt.date] | None = None,
+) -> ReportPage:
+    """One page of one `apps_*_reports` call, parsed from RAW JSON.
 
-    `_request_timeout` is lifted to 60s: a report is the one read in this API that
-    routinely outruns the client's 30s default.
+    RAW JSON rather than the SDK's models is not a style choice.
+    apple-ads-platform 1.109.0 generates `ReportingKeyword.status` with the enum
+    ('ACTIVE', 'PAUSED', 'DELETED') while the live API returns 'ENABLED', and the
+    generated validator RAISES on an unrecognised value instead of falling back
+    to its own `unknown_default_open_api` placeholder. The whole keyword report
+    therefore fails to deserialize -- a client-side bug, with the response
+    sitting there intact. Reports are flattened into ReportRow regardless, so
+    nothing is lost by reading the JSON directly.
+
+    PAGINATION. A request with no `pagination` gets Apple's default page and
+    nothing says so, so a large report used to be silently cut. Every request
+    now says which page it wants, and the caller is told when more exist.
+
+    `_request_timeout` is lifted to 60s: a report is the one read in this API
+    that routinely outruns the client's 30s default.
     """
-    start, end = _window(days)
-    response = call(
+    start, end = window or _window(days)
+    response = client.call(
         f"{method}_without_preload_content",
         x_ap_context=context_header(),
         apps_reporting_request=AppsReportingRequest(
@@ -378,19 +544,128 @@ def run_report(
             filters=filters or None,
             group_by=group_by or None,
             options=AppsOptions(include_rows=["GRAND_TOTAL"]) if grand_total else None,
+            pagination=RequestPagination(offset=max(0, offset), page_size=page_size or REPORT_PAGE),
+            sorting=[Sorting(var_field=sort_by, order="DESC")] if sort_by else None,
         ),
         _request_timeout=REPORT_TIMEOUT,
     )
     try:
         payload = json.loads(response.data.decode("utf-8"))
     except (ValueError, AttributeError, UnicodeDecodeError) as exc:
-        raise ToolError(f"could not parse the {entity} report response: {exc}") from exc
+        raise ToolError(f"INTERNAL: could not parse the {entity} report response: {exc}") from exc
 
     if payload.get("error"):
-        raise ToolError(f"Apple rejected the {entity} report request: {payload['error']}")
+        raise ToolError(f"INVALID: Apple rejected the {entity} report request: {payload['error']}")
 
     result = payload.get("result") or {}
-    return result.get("rows") or [], (result.get("summary") or {}).get("grandTotal"), start, end
+    rows = result.get("rows") or []
+    pagination = payload.get("pagination") or result.get("pagination") or {}
+    total = pagination.get("totalResults", pagination.get("totalCount"))
+    try:
+        total = int(total) if total is not None else None
+    except (TypeError, ValueError):
+        total = None
+    return ReportPage(
+        rows=rows,
+        grand_total=(result.get("summary") or {}).get("grandTotal"),
+        start=start,
+        end=end,
+        total=total,
+    )
+
+
+def run_report_all(
+    method: str,
+    entity: str,
+    days: int,
+    filters: list[Filter] | None = None,
+    granularity: str = "DAILY",
+    group_by: list[str] | None = None,
+    grand_total: bool = True,
+    window: tuple[dt.date, dt.date] | None = None,
+) -> ReportPage:
+    """Every page of a report, up to REPORT_MAX_PAGES, for an internal sweep.
+
+    A projection that looks one keyword up in a campaign report must see the
+    whole report: a keyword on page two would otherwise read as "no delivery",
+    a confident zero.
+    """
+    first = run_report_page(
+        method, entity, days, filters, granularity, group_by, grand_total, window=window
+    )
+    rows = list(first.rows)
+    page_rows = len(first.rows)
+    pages = 1
+    while page_rows >= REPORT_PAGE and pages < REPORT_MAX_PAGES:
+        if first.total is not None and len(rows) >= first.total:
+            break
+        nxt = run_report_page(
+            method, entity, days, filters, granularity, group_by, False,
+            offset=len(rows), window=(first.start, first.end),
+        )
+        rows.extend(nxt.rows)
+        page_rows = len(nxt.rows)
+        pages += 1
+    truncated = page_rows >= REPORT_PAGE and pages >= REPORT_MAX_PAGES
+    return ReportPage(rows, first.grand_total, first.start, first.end, first.total, truncated)
+
+
+def _spend_of(row: dict, field: str = "localSpend") -> Decimal:
+    metrics = row.get("totalMetrics") or {}
+    value = metrics.get(field)
+    if isinstance(value, dict):
+        value = value.get("amount")
+    try:
+        return Decimal(str(value)) if value not in (None, "") else Decimal("0")
+    except InvalidOperation:
+        return Decimal("0")
+
+
+def report_rows(
+    method: str,
+    entity: str,
+    days: int,
+    filters: list[Filter] | None,
+    *,
+    narrow,
+    limit: int,
+    offset: int,
+    sort_by: str,
+    min_impressions: int,
+    grand_total: bool = True,
+    group_by: list[str] | None = None,
+    granularity: str = "DAILY",
+) -> tuple[ReportPage, list[dict], int | None, bool]:
+    """(page, rows to show, next_offset, truncated) for a report TOOL.
+
+    Without client-side narrowing, one server-side page sorted by Apple. With it
+    (an ad group or keyword id, which Apple's report filters reject), the whole
+    report is swept, narrowed, sorted here and sliced -- otherwise the entity
+    asked for could sit on a page that was never read.
+    """
+    if sort_by not in REPORT_SORT_FIELDS:
+        raise ToolError(
+            f"INVALID_REQUEST: sort_by={sort_by!r} must be one of {', '.join(REPORT_SORT_FIELDS)}"
+        )
+    if narrow is None:
+        page = run_report_page(
+            method, entity, days, filters, granularity, group_by, grand_total,
+            offset=offset, page_size=limit, sort_by=sort_by,
+        )
+        rows = [r for r in page.rows if (r.get("totalMetrics") or {}).get("impressions", 0) >= min_impressions]
+        seen = offset + len(page.rows)
+        more = (page.total is not None and seen < page.total) or (
+            page.total is None and len(page.rows) >= limit
+        )
+        return page, rows, (seen if more else None), more
+    page = run_report_all(method, entity, days, filters, granularity, group_by, grand_total)
+    rows = [r for r in page.rows if narrow(r)]
+    rows = [r for r in rows if (r.get("totalMetrics") or {}).get("impressions", 0) >= min_impressions]
+    rows.sort(key=lambda r: _spend_of(r, sort_by), reverse=True)
+    sliced = rows[offset: offset + limit]
+    more = offset + limit < len(rows) or page.truncated
+    page.total = len(rows)
+    return page, sliced, (offset + limit if offset + limit < len(rows) else None), more
 
 
 def report_filter(field: str, values: list[Any]) -> Filter:
@@ -425,27 +700,55 @@ def entity_metrics_7d(
     confidence. The reason comes back as the fifth element so the preview can
     say so out loud.
     """
+    rows, error = report_rows_7d(method, id_key, campaign_id)
+    if error:
+        return Decimal("0"), 0, 0, 0, error
+    return pick_metrics(rows, entity_id, id_key)
+
+
+def report_rows_7d(
+    method: str, id_key: str, campaign_id: int | None
+) -> tuple[list[dict], str | None]:
+    """The raw 7-day report rows one entity's figures are picked out of.
+
+    Split out so a preview touching several entities in one campaign fetches
+    the campaign's report ONCE (see changes.context) rather than once per entity.
+    """
     # The CAMPAIGN report takes no filter at all -- even campaignId is rejected --
     # so it is fetched whole and the row is picked out. The keyword and ad-group
     # reports take campaignId and nothing else.
     if id_key == "campaignId":
         filters = None
     elif campaign_id is None:
-        return Decimal("0"), 0, 0, 0, "no campaign id for this entity, so its report cannot be scoped"
+        return [], "no campaign id for this entity, so its report cannot be scoped"
     else:
         filters = [report_filter("campaignId", [campaign_id])]
 
     try:
-        rows, _grand_total, _start, _end = run_report(method, id_key, days=7, filters=filters)
+        page = run_report_all(
+            method, id_key, days=7, filters=filters, window=complete_days_window(7)
+        )
     except ToolError as exc:
-        return Decimal("0"), 0, 0, 0, str(exc)
+        return [], str(exc)
+    return page.rows, None
+
+
+def pick_metrics(
+    rows: list[dict], entity_id: Any, id_key: str | None = None
+) -> tuple[Decimal, int, int, int, str | None]:
+    """(spend, taps, impressions, installs, None) for one entity's row.
+
+    Matched on the row's own `id_key` (adId on an ad report) when it carries
+    one, else on `id` -- which is what the campaign, ad group and keyword
+    reports were verified to use.
+    """
+
+    def row_id(row: dict) -> Any:
+        meta = row.get("metadata") or {}
+        return meta[id_key] if id_key and id_key in meta else meta.get("id")
 
     metrics = next(
-        (
-            row.get("totalMetrics")
-            for row in rows
-            if str((row.get("metadata") or {}).get("id")) == str(entity_id)
-        ),
+        (row.get("totalMetrics") for row in rows if str(row_id(row)) == str(entity_id)),
         None,
     )
     if not metrics:
@@ -592,16 +895,29 @@ def _audit_row(summary: Any) -> AuditRow:
 # type per call, so "what changed recently" is four calls, not one. Verified
 # against the live API 2026-10-08: anything else is a bare HTTP 400 with no
 # detail, or `VALIDATION_ERROR: EntityType required`.
-AUDIT_ENTITY_TYPES = ("Campaign", "AdGroup", "Keyword", "NegativeKeyword")
+AUDIT_ENTITY_TYPES = ("Campaign", "AdGroup", "Keyword", "NegativeKeyword", "Ad", "Creative")
 
 
 def query_audit(
     since: dt.datetime,
     limit: int = 200,
     until: dt.datetime | None = None,
-    entity_types: tuple[str, ...] = AUDIT_ENTITY_TYPES,
+    entity_types: tuple[str, ...] | None = None,
 ) -> list[Any]:
-    """`query_audit_summary` over a time window, across every entity type.
+    """`query_audit_summary` rows over a time window, across every entity type."""
+    return query_audit_page(since, limit, until, entity_types)[0]
+
+
+def query_audit_page(
+    since: dt.datetime,
+    limit: int = 200,
+    until: dt.datetime | None = None,
+    entity_types: tuple[str, ...] | None = None,
+) -> tuple[list[Any], list[str]]:
+    """(rows, entity types whose page came back FULL, so more may exist).
+
+    One page per entity type. A full page used to be silently all there was;
+    now the caller is told which types were cut off.
 
     eventTime takes BETWEEN with a start and an end. GREATER_THAN_OR_EQUAL_TO is
     documented as supported for time fields but answers a bare 400 in practice,
@@ -609,8 +925,10 @@ def query_audit(
     """
     until = until or dt.datetime.now(dt.timezone.utc)
     rows: list[Any] = []
-    for entity_type in entity_types:
-        response = call(
+    truncated: list[str] = []
+    page_size = min(max(1, limit), 1000)
+    for entity_type in entity_types or AUDIT_ENTITY_TYPES:
+        response = client.call(
             "query_audit_summary",
             x_ap_context=context_header(),
             audit_query=AuditQuery(
@@ -625,15 +943,144 @@ def query_audit(
                     ),
                     AuditFilter(field="entityType", operator="EQUALS", value=entity_type),
                 ],
-                pagination=Pagination(offset=0, page_size=min(max(1, limit), 1000)),
+                pagination=Pagination(offset=0, page_size=page_size),
             ),
         )
-        rows.extend(unwrap(response, f"{entity_type} audit summary") or [])
+        page = unwrap(response, f"{entity_type} audit summary") or []
+        if len(page) >= page_size:
+            truncated.append(entity_type)
+        rows.extend(page)
     rows.sort(key=lambda r: r.event_time or dt.datetime.min.replace(tzinfo=dt.timezone.utc), reverse=True)
-    return rows
+    return rows, truncated
+
+
+# --- report arguments, shared by every report tool -------------------------------
+# Module level: the tool modules use `from __future__ import annotations`, so an
+# annotation is resolved against these globals, never against register()'s locals.
+
+Days = Annotated[int, Field(description="Window ending today", ge=1, le=90)]
+Limit = Annotated[int, Field(description="Max rows to return", ge=1, le=1000)]
+Offset = Annotated[int, Field(description="Rows to skip; pass next_offset to page", ge=0)]
+SortBy = Annotated[
+    str,
+    Field(description="Sort descending by: localSpend, impressions, taps or totalInstalls"),
+]
+GROUP_BY_FIELDS = ("countryOrRegion", "deviceClass", "ageRange", "gender")
+GroupBy = Annotated[
+    list[str] | None,
+    Field(
+        description="Split each row by countryOrRegion, deviceClass, ageRange and/or "
+        "gender -- how age, gender, device and country targeting decisions get made"
+    ),
+]
+SegmentByDate = Annotated[
+    bool, Field(description="One row per entity per day instead of window totals")
+]
+MinImpressions = Annotated[
+    int, Field(description="Drop rows with fewer impressions than this", ge=0)
+]
 
 
 # --- registration -------------------------------------------------------------
+
+
+# --- naming filters (apple_ads_mcp/naming.py) -------------------------------------
+
+OriginFilter = Annotated[
+    str,
+    Field(description="any | agent | cli | manual -- read from each name's prefix"),
+]
+AgentNameFilter = Annotated[
+    str | None, Field(description="Only names carrying this agent part, e.g. max")
+]
+OwnerFilter = Annotated[
+    str | None, Field(description="Only names carrying these owner initials, e.g. AB")
+]
+MineFilter = Annotated[
+    bool, Field(description="Only names carrying THIS checkout's prefix")
+]
+
+
+def state_identity(state) -> naming.Identity:
+    identity = getattr(state, "identity", None)
+    return identity if identity is not None else naming.Identity()
+
+
+def name_filter(state, origin, agent_name, owner, mine):
+    """naming.name_filter for a list tool, with its refusal as a ToolError."""
+    try:
+        return naming.name_filter(state_identity(state), origin, agent_name, owner, mine)
+    except naming.NameRefused as exc:
+        raise ToolError(str(exc)) from exc
+
+
+def attributed(row: Any, name: str | None, state, created: set[str]) -> Any:
+    """``row`` (a model or a dict) with origin/owner/agent/base/ledger_created."""
+    fields = naming.attribution(
+        name, state_identity(state), ledger_created=str(_row_id(row)) in created
+    )
+    if isinstance(row, dict):
+        return {**row, **fields}
+    return row.model_copy(update=fields)
+
+
+def _row_id(row: Any) -> Any:
+    return row.get("id") if isinstance(row, dict) else getattr(row, "id", None)
+
+
+#: entity_type -> the account-wide query that lists them, for reconcile's sweep.
+_NAMED_SWEEPS = {
+    "campaign": "campaigns_query_post",
+    "ad_group": "adgroups_query_post",
+    "ad": "ads_query_post",
+    "creative": "creatives_query_post",
+}
+
+
+def naming_reconcile(identity: naming.Identity) -> dict[str, Any] | None:
+    """reconcile_ledger's naming section, or None when no prefix is configured.
+
+    prefix_lost: created here, but the live name no longer carries our prefix
+    (renamed in the UI; a rename through low_risk_change restores it).
+    prefix_without_ledger: the live name carries our prefix and this ledger
+    has no creation of it (another checkout, a copied name, or the CLI).
+    Other agents' prefixes are only counted: their ledgers live elsewhere.
+    Information only; nothing is changed.
+    """
+    if not identity.prefix:
+        return None
+    lost, unledgered, others, problems = [], [], {}, []
+    for entity_type, method in _NAMED_SWEEPS.items():
+        created = ledger.created_ids(entity_type)
+        try:
+            rows, truncated = client.query_all(method)
+        except ToolError as exc:
+            problems.append(f"{entity_type}: could not list ({str(exc)[:120]})")
+            continue
+        if truncated:
+            problems.append(f"{entity_type}: more than the sweep cap exist; the lists are partial")
+        for row in rows:
+            if getattr(row, "deleted", False):
+                continue
+            entity_id, name = str(getattr(row, "id", "")), str(getattr(row, "name", "") or "")
+            entry = {"entity_type": entity_type, "entity_id": entity_id, "name": name}
+            ours = identity.owns(name)
+            if entity_id in created and not ours:
+                lost.append(entry)
+            elif ours and entity_id not in created:
+                unledgered.append(entry)
+            elif not ours:
+                parsed = naming.parse(name)
+                if parsed is not None:
+                    key = f"{parsed.owner}-{parsed.agent}"
+                    others[key] = others.get(key, 0) + 1
+    return {
+        "prefix": identity.prefix,
+        "prefix_lost": lost[:50],
+        "prefix_without_ledger": unledgered[:50],
+        "other_prefixes": others,
+        "problems": problems,
+    }
 
 
 def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitions
@@ -648,8 +1095,8 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         when the configured adAccountId is wrong -- which makes it the right
         first thing to run when anything else returns 401/403.
         """
-        me = unwrap(call("get_me"), "me")
-        acls = unwrap(call("get_user_acls"), "ACLs")
+        me = unwrap(client.call("get_me"), "me")
+        acls = unwrap(client.call("get_user_acls"), "ACLs")
         in_use = client.ad_account()
         accounts = [
             AdAccountInfo(
@@ -667,9 +1114,11 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             org_id_from_me=str(me.org_id) if me and me.org_id else None,
             user_id=str(me.user_id) if me and me.user_id else None,
             accounts=accounts,
+            identity=state_identity(state).describe(),
             note=(
                 "adAccountId is NOT the org id -- one org can own several ad "
-                "accounts. Every other tool addresses ad_account_id_in_use."
+                "accounts. Every other tool addresses ad_account_id_in_use. "
+                "identity is what this checkout's creations are named after."
             ),
         )
 
@@ -679,25 +1128,77 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             bool, Field(description="Include campaigns Apple has marked deleted")
         ] = False,
         limit: Annotated[int, Field(description="Max campaigns to return", ge=1, le=1000)] = 100,
+        offset: Annotated[int, Field(description="Rows to skip; pass next_offset to page", ge=0)] = 0,
+        origin: OriginFilter = "any",
+        agent_name: AgentNameFilter = None,
+        owner: OwnerFilter = None,
+        mine: MineFilter = False,
     ) -> CampaignList:
-        """Every campaign, with status, serving status and daily budget."""
-        response = call(
-            "campaigns_query_post",
-            x_ap_context=context_header(),
-            query_request=query(page_size=limit),
-        )
-        rows = unwrap(response, "campaigns") or []
+        """Every campaign, with status, serving status and daily budget, and
+        who its name says made it (origin / owner / agent / base).
+
+        Deleted campaigns, and rows the name filters exclude, are dropped AFTER
+        the page is read, so `returned` can be under `limit` while next_offset
+        still says more exist.
+        """
+        keep = name_filter(state, origin, agent_name, owner, mine)
+        rows, total, next_offset = client.query_page("campaigns_query_post", limit=limit, offset=offset)
         if not include_deleted:
             rows = [c for c in rows if not c.deleted]
-        total = getattr(getattr(response, "pagination", None), "total_count", None)
+        if keep is not None:
+            rows = [c for c in rows if keep(c.name)]
+        created = ledger.created_ids("campaign")
         return CampaignList(
-            total=total, returned=len(rows), campaigns=[_campaign_row(c) for c in rows]
+            total=total, returned=len(rows),
+            campaigns=[attributed(_campaign_row(c), c.name, state, created) for c in rows],
+            next_offset=next_offset, truncated=next_offset is not None,
         )
 
     @mcp.tool(title="Get one campaign by id", annotations=READ_ONLY)
-    def get_campaign(campaign_id: Annotated[int, Field(description="Apple campaign id")]) -> CampaignRow:
-        """Full detail for a single campaign."""
-        return _campaign_row(client.get_campaign(campaign_id))
+    def get_campaign(campaign_id: Annotated[int, Field(description="Apple campaign id")]) -> CampaignDetail:
+        """Full detail for a single campaign: bid strategy, billing event, app,
+        schedule, supply sources and placements, countries, system status and
+        limiting reasons, shared budget, and its last 7 and 30 days."""
+        from apple_ads_mcp.tools_lookup import dump
+
+        campaign = client.get_campaign(campaign_id)
+        row = _campaign_row(campaign)
+        targeting = getattr(campaign, "targeting", None)
+        try:
+            limited = dump(unwrap(client.call(
+                "campaigns_id_legacy_app_limited_status_reason_details_get",
+                id=str(campaign_id), x_ap_context=context_header(),
+            ), "app limited status")) or None
+        except ToolError:
+            limited = None
+
+        def window(days: int) -> ReportRow | None:
+            try:
+                page = run_report_all("apps_campaign_reports", "campaign", days)
+            except ToolError:
+                return None
+            for r in page.rows:
+                if str((r.get("metadata") or {}).get("id")) == str(campaign_id):
+                    return _metrics_row(r.get("totalMetrics"), id_=campaign_id, name=campaign.name)
+            return None
+
+        return CampaignDetail(
+            **row.model_dump(),
+            billing_event=enum_value(getattr(campaign, "billing_event", None)),
+            promoted_app_id=getattr(campaign, "promoted_object_id", None),
+            start_time=campaign.start_time.isoformat() if getattr(campaign, "start_time", None) else None,
+            end_time=campaign.end_time.isoformat() if getattr(campaign, "end_time", None) else None,
+            supply_sources=_included(getattr(targeting, "supply_source", None)),
+            bid_strategy=dump(getattr(campaign, "bid_strategy", None)) or None,
+            system_status=enum_value(getattr(campaign, "system_status", None)),
+            system_status_reasons=[str(enum_value(r)) for r in (campaign.system_status_reasons or [])],
+            limiting_reasons=[str(enum_value(r)) for r in (campaign.system_status_limiting_reasons or [])],
+            shared_budget_ids=[str(a.budget_id) for a in (campaign.shared_budgets or [])],
+            app_limited_reasons=limited,
+            last_7d=window(7),
+            last_30d=window(30),
+            fields=dump(campaign),
+        )
 
     @mcp.tool(title="List ad groups", annotations=READ_ONLY)
     def list_ad_groups(
@@ -706,26 +1207,76 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         ] = None,
         include_deleted: Annotated[bool, Field(description="Include deleted ad groups")] = False,
         limit: Annotated[int, Field(description="Max ad groups to return", ge=1, le=1000)] = 200,
+        offset: Annotated[int, Field(description="Rows to skip; pass next_offset to page", ge=0)] = 0,
+        origin: OriginFilter = "any",
+        agent_name: AgentNameFilter = None,
+        owner: OwnerFilter = None,
+        mine: MineFilter = False,
     ) -> AdGroupList:
-        """Ad groups, with status, serving status and default bid."""
+        """Ad groups, with status, serving status and default bid, and who
+        their name says made them. Name filters apply to the page read."""
+        keep = name_filter(state, origin, agent_name, owner, mine)
         filters = [eq_filter("campaignId", campaign_id)] if campaign_id else None
-        response = call(
-            "adgroups_query_post",
-            x_ap_context=context_header(),
-            query_request=query(page_size=limit, filters=filters),
+        rows, total, next_offset = client.query_page(
+            "adgroups_query_post", filters, limit=limit, offset=offset
         )
-        rows = unwrap(response, "ad groups") or []
         if not include_deleted:
             rows = [g for g in rows if not g.deleted]
-        total = getattr(getattr(response, "pagination", None), "total_count", None)
+        if keep is not None:
+            rows = [g for g in rows if keep(g.name)]
+        created = ledger.created_ids("ad_group")
         return AdGroupList(
-            total=total, returned=len(rows), ad_groups=[_ad_group_row(g) for g in rows]
+            total=total, returned=len(rows),
+            ad_groups=[attributed(_ad_group_row(g), g.name, state, created) for g in rows],
+            next_offset=next_offset, truncated=next_offset is not None,
         )
 
     @mcp.tool(title="Get one ad group by id", annotations=READ_ONLY)
-    def get_ad_group(ad_group_id: Annotated[int, Field(description="Apple ad group id")]) -> AdGroupRow:
-        """Full detail for a single ad group."""
-        return _ad_group_row(client.get_ad_group(ad_group_id))
+    def get_ad_group(ad_group_id: Annotated[int, Field(description="Apple ad group id")]) -> AdGroupDetail:
+        """Full detail for a single ad group: pricing model, bid strategy and
+        goal, CPA goal, Search Match, the whole targeting block, how many
+        keywords and ads it has, and its last 7 days."""
+        from apple_ads_mcp.tools_lookup import dump
+
+        ad_group = client.get_ad_group(ad_group_id)
+        row = _ad_group_row(ad_group)
+        strategy = getattr(ad_group, "bid_strategy", None)
+        cpa = getattr(getattr(ad_group, "cpa_cap", None), "value", None)
+
+        def count(method: str) -> int | None:
+            try:
+                rows, _cut = client.query_all(method, [eq_filter("adGroupId", ad_group_id)], cap=5000)
+            except ToolError:
+                return None
+            return sum(1 for r in rows if not getattr(r, "deleted", False))
+
+        last_7d = None
+        try:
+            page = run_report_all(
+                "apps_ad_group_reports", "ad group", 7,
+                [report_filter("campaignId", [ad_group.campaign_id])],
+            )
+            for r in page.rows:
+                if str((r.get("metadata") or {}).get("id")) == str(ad_group_id):
+                    last_7d = _metrics_row(r.get("totalMetrics"), id_=ad_group_id, name=ad_group.name)
+        except ToolError:
+            pass
+
+        return AdGroupDetail(
+            **row.model_dump(),
+            pricing_model=enum_value(getattr(ad_group, "pricing_model", None)),
+            bid_strategy_type=enum_value(getattr(strategy, "bid_strategy_type", None)),
+            bid_strategy_goal=enum_value(getattr(strategy, "bid_strategy_goal", None)),
+            cpa_goal=format_money(cpa) if cpa else None,
+            start_time=ad_group.start_time.isoformat() if getattr(ad_group, "start_time", None) else None,
+            end_time=ad_group.end_time.isoformat() if getattr(ad_group, "end_time", None) else None,
+            targeting=dump(getattr(ad_group, "targeting", None)),
+            keyword_count=count("keywords_query_post"),
+            ad_count=count("ads_query_post"),
+            system_status_reasons=[str(enum_value(r)) for r in (ad_group.system_status_reasons or [])],
+            last_7d=last_7d,
+            fields=dump(ad_group),
+        )
 
     @mcp.tool(title="List targeting keywords", annotations=READ_ONLY)
     def list_keywords(
@@ -733,6 +1284,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         campaign_id: Annotated[int | None, Field(description="Limit to one campaign")] = None,
         include_deleted: Annotated[bool, Field(description="Include deleted keywords")] = False,
         limit: Annotated[int, Field(description="Max keywords to return", ge=1, le=1000)] = 200,
+        offset: Annotated[int, Field(description="Rows to skip; pass next_offset to page", ge=0)] = 0,
     ) -> KeywordList:
         """Keywords with their bids, match types and serving status.
 
@@ -745,16 +1297,15 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             filters.append(eq_filter("adGroupId", ad_group_id))
         if campaign_id:
             filters.append(eq_filter("campaignId", campaign_id))
-        response = call(
-            "keywords_query_post",
-            x_ap_context=context_header(),
-            query_request=query(page_size=limit, filters=filters or None),
+        rows, total, next_offset = client.query_page(
+            "keywords_query_post", filters or None, limit=limit, offset=offset
         )
-        rows = unwrap(response, "keywords") or []
         if not include_deleted:
             rows = [k for k in rows if not k.deleted]
-        total = getattr(getattr(response, "pagination", None), "total_count", None)
-        return KeywordList(total=total, returned=len(rows), keywords=[_keyword_row(k) for k in rows])
+        return KeywordList(
+            total=total, returned=len(rows), keywords=[_keyword_row(k) for k in rows],
+            next_offset=next_offset, truncated=next_offset is not None,
+        )
 
     @mcp.tool(title="Get one keyword by id", annotations=READ_ONLY)
     def get_keyword(keyword_id: Annotated[int, Field(description="Apple keyword id")]) -> KeywordRow:
@@ -770,6 +1321,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         ] = None,
         include_deleted: Annotated[bool, Field(description="Include deleted negatives")] = False,
         limit: Annotated[int, Field(description="Max to return", ge=1, le=1000)] = 200,
+        offset: Annotated[int, Field(description="Rows to skip; pass next_offset to page", ge=0)] = 0,
     ) -> NegativeKeywordList:
         """Negative keywords for an ad group, or for every ad group in a campaign.
 
@@ -792,80 +1344,115 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         if ad_group_id is not None:
             ad_group_ids = [ad_group_id]
         else:
-            groups = unwrap(
-                call(
-                    "adgroups_query_post",
-                    x_ap_context=context_header(),
-                    query_request=query(page_size=1000, filters=[eq_filter("campaignId", campaign_id)]),
-                ),
-                "ad groups",
-            ) or []
+            groups, _cut = client.query_all(
+                "adgroups_query_post", [eq_filter("campaignId", campaign_id)], cap=5000
+            )
             ad_group_ids = [g.id for g in groups if not g.deleted]
 
+        # Every negative of every ad group, then filtered and sliced: `total` is
+        # the real count, not the length of what fits under `limit`.
         rows: list[Any] = []
+        swept_all = True
         for group_id in ad_group_ids:
-            if len(rows) >= limit:
-                break
-            response = call(
-                "negative_keywords_query_post",
-                x_ap_context=context_header(),
-                query_request=query(
-                    page_size=limit, filters=[eq_filter("adGroupId", group_id)]
-                ),
+            found, cut = client.query_all(
+                "negative_keywords_query_post", [eq_filter("adGroupId", group_id)], cap=5000
             )
-            rows.extend(unwrap(response, "negative keywords") or [])
+            rows.extend(found)
+            swept_all = swept_all and not cut
 
         if not include_deleted:
             rows = [n for n in rows if not n.deleted]
-        rows = rows[:limit]
+        total = len(rows)
+        page = rows[offset: offset + limit]
+        next_offset = offset + limit if offset + limit < total else None
         return NegativeKeywordList(
-            total=len(rows),
-            returned=len(rows),
-            negative_keywords=[_negative_row(n) for n in rows],
-        )
-
-    @mcp.tool(title="List shared budgets", annotations=READ_ONLY)
-    def list_shared_budgets(
-        limit: Annotated[int, Field(description="Max to return", ge=1, le=1000)] = 100,
-    ) -> SharedBudgetList:
-        """Shared budgets in this account. Read only -- there is no write tool.
-
-        `shared_budgets_id_put` in the SDK accepts no `x_ap_context` argument at
-        all, so there is no way to say which account an update applies to. Until
-        that is resolved, editing a shared budget is a job for the Apple Ads UI.
-        """
-        response = call(
-            "shared_budgets_query_post",
-            x_ap_context=context_header(),
-            query_request=query(page_size=limit),
-        )
-        rows = unwrap(response, "shared budgets") or []
-        out = []
-        for budget in rows:
-            amount = getattr(budget, "amount", None) or getattr(budget, "budget", None)
-            out.append(
-                SharedBudgetRow(
-                    id=str(getattr(budget, "id", "")),
-                    name=getattr(budget, "name", None),
-                    amount=format_money(amount) if amount else None,
-                    status=enum_value(getattr(budget, "status", None)),
-                )
-            )
-        return SharedBudgetList(
-            returned=len(out),
-            shared_budgets=out,
-            note=(
-                "Read only. shared_budgets_id_put takes no account context in this "
-                "SDK version, so no write tool is exposed for it."
-            ),
+            total=total,
+            returned=len(page),
+            negative_keywords=[_negative_row(n) for n in page],
+            next_offset=next_offset,
+            truncated=next_offset is not None or not swept_all,
         )
 
     # --- reports --------------------------------------------------------------
+    #
+    # Every report takes the same paging and ordering arguments and says how
+    # many rows exist and whether it showed them all. campaignId is the ONLY
+    # filter Apple accepts on these reports (an adGroupId or keywordId filter is
+    # rejected with INVALID_FIELD_ATTRIBUTE), so ad group and keyword ids narrow
+    # the rows here -- after sweeping every page, never just the first.
+
+    def build_report(
+        entity: str,
+        method: str,
+        days: int,
+        filters,
+        *,
+        narrow,
+        limit: int,
+        offset: int,
+        sort_by: str,
+        min_impressions: int,
+        row: Any,
+        grand_total: bool = True,
+        group_by: list[str] | None = None,
+        segment_by_date: bool = False,
+        note: str = "Totals are for the whole window, not per day.",
+    ) -> Report:
+        dims = list(group_by or [])
+        unknown = [d for d in dims if d not in GROUP_BY_FIELDS]
+        if unknown:
+            raise ToolError(
+                f"INVALID_REQUEST: group_by {unknown} -- allowed: {', '.join(GROUP_BY_FIELDS)}"
+            )
+        page, rows, next_offset, truncated = report_rows(
+            method, entity, days, filters, narrow=narrow, limit=limit, offset=offset,
+            sort_by=sort_by, min_impressions=min_impressions, grand_total=grand_total,
+            group_by=dims or None,
+        )
+        total = page.grand_total if (grand_total and narrow is None and not dims) else None
+        shown: list[ReportRow] = []
+        for raw in rows:
+            base = row(raw)
+            for dim in dims:
+                value = meta(raw).get(dim)
+                if value is not None:
+                    base.extra[dim] = str(value)
+            if not segment_by_date:
+                shown.append(base)
+                continue
+            for day in raw.get("granularity") or []:
+                daily = _metrics_row(day, id_=base.id, name=base.name, extra=dict(base.extra))
+                daily.extra["date"] = str(day.get("date"))
+                shown.append(daily)
+        return Report(
+            entity=entity.replace(" ", "_"),
+            start=page.start.isoformat(),
+            end=page.end.isoformat(),
+            granularity="DAILY" if segment_by_date else "TOTAL",
+            rows=shown,
+            grand_total=_metrics_row(total, name="GRAND TOTAL") if total else None,
+            returned=len(rows),
+            offset=offset,
+            next_offset=next_offset,
+            total_rows_available=page.total,
+            truncated=truncated,
+            time_zone=client.account_timezone(),
+            note=note,
+        )
+
+    def meta(r: dict) -> dict:
+        return r.get("metadata") or {}
 
     @mcp.tool(title="Campaign performance report", annotations=READ_ONLY)
     def campaign_report(
-        days: Annotated[int, Field(description="Window ending today", ge=1, le=90)] = 7,
+        days: Days = 7,
         campaign_id: Annotated[int | None, Field(description="Limit to one campaign")] = None,
+        limit: Limit = 200,
+        offset: Offset = 0,
+        sort_by: SortBy = "localSpend",
+        min_impressions: MinImpressions = 0,
+        group_by: GroupBy = None,
+        segment_by_date: SegmentByDate = False,
     ) -> Report:
         """Spend, impressions, taps and installs per campaign.
 
@@ -873,64 +1460,45 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         totalNewDownloads / totalRedownloads, and the bare `installs` key v3 used
         does not exist.
         """
-        rows, grand_total, start, end = run_report("apps_campaign_reports", "campaign", days)
-        if campaign_id:
-            rows = [r for r in rows if str((r.get("metadata") or {}).get("id")) == str(campaign_id)]
-            grand_total = None  # Apple's total covers every campaign, not the one asked for
-        return Report(
-            entity="campaign",
-            start=start.isoformat(),
-            end=end.isoformat(),
-            granularity="DAILY",
-            rows=[
-                _metrics_row(
-                    row.get("totalMetrics"),
-                    id_=(row.get("metadata") or {}).get("id"),
-                    name=(row.get("metadata") or {}).get("name"),
-                )
-                for row in rows
-            ],
-            grand_total=_metrics_row(grand_total, name="GRAND TOTAL") if grand_total else None,
-            note="Totals are for the whole window, not per day.",
+        # The CAMPAIGN report takes no filter at all, so one campaign is picked
+        # out of the full report.
+        narrow = (lambda r: str(meta(r).get("id")) == str(campaign_id)) if campaign_id else None
+        return build_report(
+            "campaign", "apps_campaign_reports", days, None, narrow=narrow, limit=limit,
+            offset=offset, sort_by=sort_by, min_impressions=min_impressions,
+            group_by=group_by, segment_by_date=segment_by_date,
+            row=lambda r: _metrics_row(r.get("totalMetrics"), id_=meta(r).get("id"),
+                                       name=meta(r).get("name")),
         )
 
     @mcp.tool(title="Ad group performance report", annotations=READ_ONLY)
     def ad_group_report(
-        days: Annotated[int, Field(description="Window ending today", ge=1, le=90)] = 7,
+        days: Days = 7,
         campaign_id: Annotated[int | None, Field(description="Limit to one campaign")] = None,
         ad_group_id: Annotated[int | None, Field(description="Limit to one ad group")] = None,
+        limit: Limit = 200,
+        offset: Offset = 0,
+        sort_by: SortBy = "localSpend",
+        min_impressions: MinImpressions = 0,
+        group_by: GroupBy = None,
+        segment_by_date: SegmentByDate = False,
     ) -> Report:
         """Spend, impressions, taps and installs per ad group."""
-        # campaignId is the ONLY filter Apple accepts on these reports; an
-        # adGroupId filter is rejected outright. Everything else narrows here.
         filters = [report_filter("campaignId", [campaign_id])] if campaign_id else None
-        rows, grand_total, start, end = run_report(
-            "apps_ad_group_reports", "ad group", days, filters
-        )
-        if ad_group_id:
-            rows = [r for r in rows if str((r.get("metadata") or {}).get("id")) == str(ad_group_id)]
-            grand_total = None
-        return Report(
-            entity="ad_group",
-            start=start.isoformat(),
-            end=end.isoformat(),
-            granularity="DAILY",
-            rows=[
-                _metrics_row(
-                    row.get("totalMetrics"),
-                    id_=(row.get("metadata") or {}).get("id"),
-                    name=(row.get("metadata") or {}).get("name"),
-                    extra={"campaign_id": (row.get("metadata") or {}).get("campaignId")},
-                )
-                for row in rows
-            ],
-            grand_total=_metrics_row(grand_total, name="GRAND TOTAL") if grand_total else None,
-            note="Totals are for the whole window, not per day.",
+        narrow = (lambda r: str(meta(r).get("id")) == str(ad_group_id)) if ad_group_id else None
+        return build_report(
+            "ad group", "apps_ad_group_reports", days, filters, narrow=narrow, limit=limit,
+            offset=offset, sort_by=sort_by, min_impressions=min_impressions,
+            group_by=group_by, segment_by_date=segment_by_date,
+            row=lambda r: _metrics_row(
+                r.get("totalMetrics"), id_=meta(r).get("id"), name=meta(r).get("name"),
+                extra={"campaign_id": meta(r).get("campaignId")},
+            ),
         )
 
     @mcp.tool(title="Keyword performance report", annotations=READ_ONLY)
     def keyword_report(
-        days: Annotated[int, Field(description="Window ending today", ge=1, le=90)] = 7,
+        days: Days = 7,
         campaign_id: Annotated[int | None, Field(description="Limit to one campaign")] = None,
         ad_group_id: Annotated[
             int | None, Field(description="Narrow to one ad group (filtered after fetching)")
@@ -938,57 +1506,56 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         keyword_id: Annotated[
             int | None, Field(description="Narrow to one keyword (filtered after fetching)")
         ] = None,
+        limit: Limit = 200,
+        offset: Offset = 0,
+        sort_by: SortBy = "localSpend",
+        min_impressions: MinImpressions = 0,
+        group_by: GroupBy = None,
+        segment_by_date: SegmentByDate = False,
     ) -> Report:
         """Spend and conversions per keyword -- the input to any bid decision.
 
         Apple only filters these reports by campaignId, so ad_group_id and
-        keyword_id narrow the rows after they arrive. Give campaign_id too when
-        you can; without it this pulls every campaign.
+        keyword_id narrow the rows after every page has been read. Give
+        campaign_id too when you can; without it this pulls every campaign.
         """
-        # campaignId is the ONLY filter Apple accepts here. A keywordId or
-        # adGroupId filter is rejected with INVALID_FIELD_ATTRIBUTE, so those two
-        # narrow the returned rows instead.
         filters = [report_filter("campaignId", [campaign_id])] if campaign_id else None
-        rows, grand_total, start, end = run_report("apps_keyword_reports", "keyword", days, filters)
-        if ad_group_id:
-            rows = [
-                r for r in rows
-                if str((r.get("metadata") or {}).get("adGroupId")) == str(ad_group_id)
-            ]
-        if keyword_id:
-            rows = [r for r in rows if str((r.get("metadata") or {}).get("id")) == str(keyword_id)]
+        narrow = None
         if ad_group_id or keyword_id:
-            grand_total = None  # Apple's total covers the campaign, not the subset
-        return Report(
-            entity="keyword",
-            start=start.isoformat(),
-            end=end.isoformat(),
-            granularity="DAILY",
-            rows=[
-                _metrics_row(
-                    row.get("totalMetrics"),
-                    id_=(row.get("metadata") or {}).get("id"),
-                    name=(row.get("metadata") or {}).get("text"),
-                    extra={
-                        "match_type": (row.get("metadata") or {}).get("matchType"),
-                        "ad_group_id": (row.get("metadata") or {}).get("adGroupId"),
-                        "ad_group": ((row.get("metadata") or {}).get("adGroup") or {}).get("name"),
-                        "status": (row.get("metadata") or {}).get("status"),
-                        "serving_status": (row.get("metadata") or {}).get("displayStatus"),
-                        "bid": _json_money((row.get("metadata") or {}).get("bid")),
-                    },
+            def narrow(r: dict) -> bool:
+                return (not ad_group_id or str(meta(r).get("adGroupId")) == str(ad_group_id)) and (
+                    not keyword_id or str(meta(r).get("id")) == str(keyword_id)
                 )
-                for row in rows
-            ],
-            grand_total=_metrics_row(grand_total, name="GRAND TOTAL") if grand_total else None,
-            note="Totals are for the whole window, not per day.",
+        return build_report(
+            "keyword", "apps_keyword_reports", days, filters, narrow=narrow, limit=limit,
+            offset=offset, sort_by=sort_by, min_impressions=min_impressions,
+            group_by=group_by, segment_by_date=segment_by_date,
+            row=lambda r: _metrics_row(
+                r.get("totalMetrics"),
+                id_=meta(r).get("id"),
+                name=meta(r).get("text"),
+                extra={
+                    "match_type": meta(r).get("matchType"),
+                    "ad_group_id": meta(r).get("adGroupId"),
+                    "ad_group": (meta(r).get("adGroup") or {}).get("name"),
+                    "status": meta(r).get("status"),
+                    "serving_status": meta(r).get("displayStatus"),
+                    "bid": _json_money(meta(r).get("bid")),
+                },
+            ),
         )
 
     @mcp.tool(title="Search term report", annotations=READ_ONLY)
     def search_term_report(
-        days: Annotated[int, Field(description="Window ending today", ge=1, le=90)] = 7,
+        days: Days = 7,
         campaign_id: Annotated[int | None, Field(description="Limit to one campaign")] = None,
         ad_group_id: Annotated[int | None, Field(description="Limit to one ad group")] = None,
+        limit: Limit = 200,
+        offset: Offset = 0,
+        sort_by: SortBy = "localSpend",
+        min_impressions: MinImpressions = 0,
+        group_by: GroupBy = None,
+        segment_by_date: SegmentByDate = False,
     ) -> Report:
         """What people actually typed -- where negative keywords come from.
 
@@ -996,40 +1563,28 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         keywords.
         """
         filters = [report_filter("campaignId", [campaign_id])] if campaign_id else None
+        narrow = (
+            (lambda r: str(meta(r).get("adGroupId")) == str(ad_group_id)) if ad_group_id else None
+        )
         # SEARCHTERM reports accept GRAND_TOTAL *or* granular data, never both:
         # "SEARCHTERM level reports supports only GRAND_TOTAL or granularity data,
         # not both." The per-term rows are the whole point of this report, so the
         # grand total is what gives way.
-        rows, grand_total, start, end = run_report(
-            "apps_search_term_reports", "search term", days, filters, grand_total=False
-        )
-        if ad_group_id:
-            rows = [
-                r for r in rows
-                if str((r.get("metadata") or {}).get("adGroupId")) == str(ad_group_id)
-            ]
-        return Report(
-            entity="search_term",
-            start=start.isoformat(),
-            end=end.isoformat(),
-            granularity="DAILY",
-            rows=[
-                _metrics_row(
-                    row.get("totalMetrics"),
-                    id_=(row.get("metadata") or {}).get("keywordId"),
-                    name=(row.get("metadata") or {}).get("searchTermText")
-                    or (row.get("metadata") or {}).get("searchTerm"),
-                    extra={
-                        "matched_keyword": (row.get("metadata") or {}).get("keyword")
-                        or (row.get("metadata") or {}).get("text"),
-                        "match_type": (row.get("metadata") or {}).get("matchType")
-                        or (row.get("metadata") or {}).get("searchTermSource"),
-                        "ad_group_id": (row.get("metadata") or {}).get("adGroupId"),
-                    },
-                )
-                for row in rows
-            ],
-            grand_total=None,
+        return build_report(
+            "search term", "apps_search_term_reports", days, filters, narrow=narrow,
+            limit=limit, offset=offset, sort_by=sort_by, min_impressions=min_impressions,
+            group_by=group_by, segment_by_date=segment_by_date,
+            grand_total=False,
+            row=lambda r: _metrics_row(
+                r.get("totalMetrics"),
+                id_=meta(r).get("keywordId"),
+                name=meta(r).get("searchTermText") or meta(r).get("searchTerm"),
+                extra={
+                    "matched_keyword": meta(r).get("keyword") or meta(r).get("text"),
+                    "match_type": meta(r).get("matchType") or meta(r).get("searchTermSource"),
+                    "ad_group_id": meta(r).get("adGroupId"),
+                },
+            ),
             note=(
                 "A row with no keyword id was served by Search Match, not by a "
                 "keyword you set. No grand total: Apple refuses GRAND_TOTAL and "
@@ -1037,35 +1592,49 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             ),
         )
 
-    # --- recommendations ------------------------------------------------------
-
-    @mcp.tool(title="Apple's keyword suggestions", annotations=READ_ONLY)
-    def keyword_suggestions(
-        limit: Annotated[int, Field(description="Max suggestions", ge=1, le=200)] = 50,
-    ) -> SuggestionList:
-        """Keywords Apple suggests for this account. Suggestions only -- nothing is added."""
-        response = call(
-            "query_keyword_suggestions",
-            x_ap_context=context_header(),
-            recommendation_query_request=RecommendationQueryRequest(),
-        )
-        rows = (unwrap(response, "keyword suggestions") or [])[:limit]
-        return SuggestionList(
-            returned=len(rows),
-            suggestions=[
-                SuggestionRow(
-                    text=getattr(row, "text", None) or getattr(row, "keyword", None),
-                    match_type=enum_value(getattr(row, "match_type", None)),
-                    bid=format_money(getattr(row, "bid", None)),
-                    extra={
-                        k: str(v)
-                        for k, v in (row.model_dump(exclude_none=True) or {}).items()
-                        if k not in {"text", "keyword", "matchType", "bid", "additional_properties"}
-                    },
+    @mcp.tool(title="Ad performance report", annotations=READ_ONLY)
+    def ad_report(
+        days: Days = 7,
+        campaign_id: Annotated[int | None, Field(description="Limit to one campaign")] = None,
+        ad_group_id: Annotated[
+            int | None, Field(description="Narrow to one ad group (filtered after fetching)")
+        ] = None,
+        ad_id: Annotated[int | None, Field(description="Narrow to one ad (filtered after fetching)")] = None,
+        limit: Limit = 200,
+        offset: Offset = 0,
+        sort_by: SortBy = "localSpend",
+        min_impressions: MinImpressions = 0,
+        group_by: GroupBy = None,
+        segment_by_date: SegmentByDate = False,
+    ) -> Report:
+        """Spend, taps and installs per ad -- how a custom product page creative
+        performs against the default page in the same ad group."""
+        filters = [report_filter("campaignId", [campaign_id])] if campaign_id else None
+        narrow = None
+        if ad_group_id or ad_id:
+            def narrow(r: dict) -> bool:
+                m = meta(r)
+                return (not ad_group_id or str(m.get("adGroupId")) == str(ad_group_id)) and (
+                    not ad_id or str(m.get("adId") or m.get("id")) == str(ad_id)
                 )
-                for row in rows
-            ],
+        return build_report(
+            "ad", "apps_ad_reports", days, filters, narrow=narrow, limit=limit,
+            offset=offset, sort_by=sort_by, min_impressions=min_impressions,
+            group_by=group_by, segment_by_date=segment_by_date,
+            row=lambda r: _metrics_row(
+                r.get("totalMetrics"),
+                id_=meta(r).get("adId") or meta(r).get("id"),
+                name=meta(r).get("adName") or meta(r).get("name"),
+                extra={
+                    "ad_group_id": meta(r).get("adGroupId"),
+                    "creative_id": meta(r).get("creativeId"),
+                    "creative_type": meta(r).get("creativeType"),
+                    "status": meta(r).get("status"),
+                },
+            ),
         )
+
+    # --- recommendations ------------------------------------------------------
 
     @mcp.tool(title="Apple's daily budget recommendations", annotations=READ_ONLY)
     def budget_recommendations(
@@ -1077,7 +1646,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         not exposed: a one-call "apply Apple's advice" would move real money with
         no preview, no bound and no ledger line.
         """
-        response = call(
+        response = client.call(
             "query_daily_budget_recommendations",
             x_ap_context=context_header(),
             recommendation_query_request=RecommendationQueryRequest(),
@@ -1090,9 +1659,12 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             out.append(
                 BudgetRecommendationRow(
                     campaign_id=str(data.get("campaignId")) if data.get("campaignId") else None,
-                    current_daily_budget=format_money(getattr(row, "current_daily_budget", None)),
+                    # DailyCapRecommendation's fields are dailyBudget and
+                    # suggestedDailyBudgetAmount; the names read here before
+                    # do not exist on it, so both columns always printed "-".
+                    current_daily_budget=format_money(getattr(row, "daily_budget", None)),
                     recommended_daily_budget=format_money(
-                        getattr(row, "recommended_daily_budget", None)
+                        getattr(row, "suggested_daily_budget_amount", None)
                     ),
                     extra={k: str(v) for k, v in data.items()},
                 )
@@ -1101,8 +1673,8 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             returned=len(out),
             recommendations=out,
             note=(
-                "Suggestions only. To act on one, run preview_campaign_daily_budget "
-                "and have a human approve it."
+                "Suggestions only. To act on one, run preview_budget_recommendation "
+                "(the normal budget bounds apply) and have a human approve it."
             ),
         )
 
@@ -1115,10 +1687,13 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
     ) -> AuditList:
         """Apple's own audit trail -- every change, by anyone, not just this server."""
         since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)
-        rows = query_audit(since, limit)[:limit]
+        rows, truncated = query_audit_page(since, limit)
+        cut = len(rows) > limit
+        rows = rows[:limit]
         return AuditList(
             returned=len(rows),
             changes=[_audit_row(row) for row in rows],
+            truncated=bool(truncated) or cut,
             note=(
                 "This is Apple's record of ALL changes, including ones made in the "
                 "Apple Ads UI by a person. Compare it with list_my_changes using "
@@ -1150,14 +1725,26 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
                 "max_budget_change_pct": str(limits.max_budget_change_pct),
                 "max_entities_per_call": str(limits.max_entities_per_call),
                 "max_projected_delta_per_day": str(limits.max_projected_delta_per_day),
+                "max_applies_per_session": str(limits.max_applies_per_session),
+                "max_projected_session_delta": str(limits.max_projected_session_delta),
+                "max_cpa_goal": str(limits.max_cpa_goal),
+                "max_cpa_goal_change_pct": str(limits.max_cpa_goal_change_pct),
+                "max_applies_per_day": str(limits.max_applies_per_day),
+                "max_projected_delta_per_day_total": str(
+                    limits.max_projected_delta_per_day_total
+                ),
             },
             allowed_campaign_ids=sorted(str(c) for c in limits.allowed_campaign_ids),
             allowed_currencies=sorted(limits.allowed_currencies),
             session={k: str(v) for k, v in state.counters.snapshot().items()},
+            daily=DailyUsage(limits).snapshot(),
             pending_previews=state.previews.pending_count(),
+            identity=state_identity(state).describe(),
             note=(
                 "An empty allowed_campaign_ids means every campaign is in scope. "
-                "Session counters reset only when the server restarts."
+                "Session counters reset only when the server restarts; the daily "
+                "counters come from the ledger, are shared by every process, and "
+                "reset at local midnight."
                 + (
                     " THIS SERVER IS READ-ONLY: it published no apply_* tools and no "
                     "revert_change, so nothing here can change the account. Previews "
@@ -1183,14 +1770,16 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         """
         since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)
         rows = ledger.entries(since=since)[:limit]
-        unfinished = sum(1 for row in rows if row.get("outcome") is None)
+        unfinished = sum(1 for row in rows if row.get("outcome") in (None, ledger.UNKNOWN))
         return LedgerList(
             returned=len(rows),
             entries=[_ledger_entry(row) for row in rows],
             unfinished=unfinished,
             note=(
                 "entry_id is what revert_change takes. A null outcome means the "
-                "write was started and never recorded as finished."
+                "write was started and never recorded as finished; 'unknown' means "
+                "its request timed out and it may have landed. Run reconcile_ledger "
+                "for either before retrying."
             ),
         )
 
@@ -1216,7 +1805,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         """
         since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)
         local = [e for e in ledger.entries(since=since) if e.get("outcome") != ledger.REFUSED]
-        apple = query_audit(since, limit=1000)
+        apple, apple_truncated = query_audit_page(since, limit=1000)
         apple_rows = [_audit_row(row) for row in apple]
 
         # Join on entity id, which Apple exposes in each summary's `metas`. The
@@ -1227,23 +1816,27 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         for row in apple_rows:
             apple_ids.update(row.entity_ids)
 
+        # A creation's row carries the id Apple assigned (filled in from the
+        # response), so it joins like any other. Legacy rows -- a bulk change as
+        # one comma-joined row, a negative add as "(new)" -- are split or
+        # skipped as before.
+        def ids_of(entry: dict[str, Any]) -> set[str]:
+            return {
+                part.strip()
+                for part in str(entry.get("entity_id") or "").split(",")
+                if part.strip() and part.strip() not in ("(new)", "None")
+            }
+
         local_ids: set[str] = set()
         for entry in local:
-            for part in str(entry.get("entity_id", "")).split(","):
-                part = part.strip()
-                if part and part != "(new)":
-                    local_ids.add(part)
+            local_ids |= ids_of(entry)
 
+        unknown = [entry for entry in local if entry.get("outcome") == ledger.UNKNOWN]
         local_without_apple = [
             entry
             for entry in local
-            if entry.get("outcome") in (ledger.FAILED, None)
-            or not {
-                part.strip()
-                for part in str(entry.get("entity_id", "")).split(",")
-                if part.strip() and part.strip() != "(new)"
-            }
-            & apple_ids
+            if entry.get("outcome") != ledger.UNKNOWN
+            and (entry.get("outcome") in (ledger.FAILED, None) or not ids_of(entry) & apple_ids)
         ]
         apple_without_local = [
             row for row in apple_rows if not (set(row.entity_ids) & local_ids)
@@ -1253,10 +1846,26 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             since=since.isoformat(timespec="seconds"),
             local_entries=len(local),
             apple_changes=len(apple_rows),
+            apple_truncated=apple_truncated,
             local_without_apple=[_ledger_entry(e) for e in local_without_apple[:50]],
             apple_without_local=apple_without_local[:50],
+            unknown_outcome=[_ledger_entry(e) for e in unknown[:50]],
+            unknown_seen_by_apple=[
+                str(e.get("entry_id")) for e in unknown if ids_of(e) & apple_ids
+            ],
+            naming=naming_reconcile(state_identity(state)),
             note=(
-                "apple_without_local is the line that matters: it means something "
+                (
+                    f"unknown_outcome has {len(unknown)} write(s) whose request timed "
+                    f"out: each MAY have landed and is counted against the caps as if "
+                    f"it had. Settle each with resolve_unknown_change, which reads "
+                    f"the entity back and records applied or failed without writing "
+                    f"to Apple, before retrying anything. A creation in it may "
+                    f"already exist -- look before re-running it. "
+                    if unknown
+                    else ""
+                )
+                + "apple_without_local is the line that matters: it means something "
                 "other than this server changed the account -- most often a person "
                 "in the Apple Ads UI (userType CUSTOMER rather than CUSTOMER_API). "
                 "The join is on entity id, so a change to an entity this server "

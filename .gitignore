@@ -3,6 +3,8 @@
 .env
 .env.*
 !.env.example
+# Optional second env file; it can carry the naming identity, which is real.
+config.env
 
 # Python
 venv/

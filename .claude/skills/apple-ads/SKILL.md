@@ -1,22 +1,23 @@
 ---
 name: apple-ads
-description: Use the `apple-ads` MCP server to read an Apple Ads (Apple Search Ads) account and change it safely. Covers the preview/apply approval loop, keyword and ad group bids, pausing and enabling, daily budgets, negative keywords, reports, guardrails, the change ledger and undo. Use whenever the task involves Apple Ads, Apple Search Ads, App Store ads, keyword bids, ad group default bids, campaign budgets, negative keywords, search terms, or the apply_*/preview_* tools on that server.
+description: Use the `apple-ads` MCP server to read an Apple Ads (Apple Search Ads) account and change it safely. Covers the preview/apply approval loop, keyword and ad group bids, pausing and enabling, daily budgets, keywords and negative keywords, bid strategies and CPA goals, targeting (Search Match, age, gender, devices, daypart, locations, countries), creating campaigns, ad groups, creatives (custom product pages) and ads, Apple's recommendations, renames, reports, guardrails and the daily cap, the change ledger and undo. Use whenever the task involves Apple Ads, Apple Search Ads, App Store ads, keyword bids, campaign budgets, negative keywords, search terms, custom product pages, or the apply_*/preview_* tools on that server.
 ---
 
 # Apple Ads
 
 The `apple-ads` MCP server talks to **one real, live advertising account**.
 
-There is no sandbox. Apple does not run one for campaign management. Every write
-lands on campaigns that are serving and spending today, so a mistake costs money
-now, not at the next deploy.
+There is no sandbox. Apple does not run one for campaign management, and there is
+no validate-only mode either: a preview checks the server's own bounds, not
+whether Apple will accept the change. Every write lands on campaigns that are
+serving and spending today, so a mistake costs money now.
 
 ## The one rule
 
 **Read → preview → show the human → apply.** Never skip a step.
 
 ```
-1. READ     get_guardrails, then list_/get_/..._report
+1. READ     get_account, get_guardrails, then list_/get_/..._report
 2. PREVIEW  preview_<thing>  ->  returns a preview_token
 3. SHOW     put the preview in front of the human, in your own words
 4. APPLY    apply_<thing>(preview_token="pv_...")
@@ -28,175 +29,224 @@ what it does.
 
 ## DO
 
-- **DO call `get_guardrails` first**, before proposing any change. It tells you
-  the bounds and how much of this session's change budget is left, so you propose
-  something that can be approved instead of something that will be refused.
-- **DO read the current value before you change it.** `get_keyword`,
-  `get_ad_group`, `get_campaign`, and the matching `*_report` for what it has
-  actually been doing.
-- **DO re-read anything older than a few minutes.** `list_recent_changes` shows
-  every change on the account including ones a person made in the Apple Ads UI.
-  Numbers on screen go stale.
+- **DO call `get_account` once per session**: the timezone decides what "today"
+  means in every report, the currency is what every amount is in, and a
+  read-only role blocks every preview.
+- **DO call `get_guardrails` before proposing a change.** It shows the bounds,
+  this session's budget, and **today's** budget, which is shared with every other
+  session and survives restarts.
+- **DO read the current value before you change it** (`get_*`, `list_*`, the
+  matching `*_report`).
 - **DO write money as a decimal string in major units.** `"1.20"` is one dollar
   twenty.
-- **DO read the whole preview before you summarise it**, especially
-  `entity_serving_status`, `projected_daily_spend_delta`, `warnings` and
-  `guardrail_checks`.
-- **DO check the `applied` field on the result.** It is the only thing that says
-  the change actually happened.
-- **DO tell the human the `entry_id`.** It is what `revert_change` takes.
-- **DO use `apply_keyword_bids_bulk` for many keywords at once** rather than a
-  loop of single applies — one approval, one ledger entry, one session slot.
+- **DO read the whole preview**, especially `entity_serving_status`,
+  `projected_daily_spend_delta`, `warnings` and `guardrail_checks`.
+- **DO check `applied` on the result.** It is the only thing that says the
+  change happened.
+- **DO tell the human the `entry_id`** (or the batch id). It is what
+  `revert_change` takes.
+- **DO page.** Every list and report returns `truncated` and `next_offset`; when
+  `truncated` is true you have not seen everything.
 
 ## DON'T
 
-- **DON'T call an `apply_*` without showing the preview first.** The approval
-  prompt is meaningless if nobody saw what it approves.
+- **DON'T call an `apply_*` without showing the preview first.**
 - **DON'T pass money as cents.** `"120"` where `"1.20"` was meant is a
-  hundredfold error, and the number is rendered verbatim in the prompt a human
-  approves.
-- **DON'T treat `applied: true` as the default.** A write can return success and
-  change nothing — see *Silent no-ops* below.
-- **DON'T re-use a `preview_token`.** It is single use, expires in 10 minutes,
-  and belongs to exactly one `apply_*` tool.
-- **DON'T retry an `apply_*` that failed by calling it again with the same
-  token.** Run the preview again; the account may have moved.
-- **DON'T guess ids.** Look them up with `list_campaigns`, `list_ad_groups`,
-  `list_keywords`.
-- **DON'T try to delete anything.** No delete tool exists. Pause instead.
-- **DON'T run the break-glass CLI yourself.** Hand the command to the human.
+  hundredfold error, rendered verbatim in the prompt a human approves.
+- **DON'T treat "no error" as success.** See *Silent no-ops*.
+- **DON'T re-use a `preview_token`.** Single use, 10 minutes, one tool.
+- **DON'T try to delete anything.** No delete tool exists. Pausing is the undo.
+- **DON'T run the break-glass CLI.** `apple_ads_cli.py ... --apply` needs an
+  interactive terminal and a typed confirmation, and Claude Code denies it to
+  you. If something is not in the tables below, tell the human and hand them the
+  command to run themselves.
 
 ## The tools
 
-19 read, 9 `preview_*`/`apply_*` pairs, plus `revert_change`. 38 in total.
+40 read, 31 `preview_*`/`apply_*` pairs, plus `revert_change` and
+`resolve_unknown_change`. 104 in total.
 
 ### Read — safe, call freely
 
 | Tool | Gives you |
 |---|---|
-| `whoami` | Which account this server writes to. Run it first when anything returns 401/403 |
-| `get_guardrails` | The bounds, and this session's remaining budget |
-| `list_campaigns` / `get_campaign` | Campaigns, status, daily budget |
-| `list_ad_groups` / `get_ad_group` | Ad groups, status, default bid, bid strategy |
-| `list_keywords` / `get_keyword` | Keywords, bids, match types |
-| `list_negative_keywords` | Negatives on an ad group, or across a campaign's ad groups |
-| `list_shared_budgets` | Shared budgets (read only — they cannot be changed here) |
-| `campaign_report` / `ad_group_report` / `keyword_report` / `search_term_report` | Spend, impressions, taps, installs, CPT, CPI |
-| `keyword_suggestions` | Apple's keyword ideas |
-| `budget_recommendations` | Apple's budget advice (acting on it goes through the normal preview/apply path) |
-| `list_recent_changes` | Apple's own audit trail — **everyone's** changes, not just yours |
-| `list_my_changes` | What this server has done (the local ledger) |
-| `reconcile_ledger` | Writes that silently failed, and changes somebody else made |
+| `whoami`, `get_account` | The credential, the ad account, its timezone, currency and your role |
+| `get_guardrails` | Bounds, and what is left this session and today |
+| `list_campaigns` / `get_campaign` | Campaigns; the detail adds strategy, schedule, placements, limiting reasons, 7d/30d |
+| `list_ad_groups` / `get_ad_group` | Ad groups; the detail adds bid strategy, CPA goal, Search Match, full targeting, counts |
+| `list_keywords` / `get_keyword`, `list_negative_keywords` | Keywords, bids, match types; negatives |
+| `list_ads` / `get_ad`, `list_creatives`, `creative_rejection_reasons` | Ads and creatives |
+| `list_product_pages` / `get_product_page` | Custom product pages (made in App Store Connect) |
+| `campaign_report` / `ad_group_report` / `keyword_report` / `ad_report` / `search_term_report` | Spend, taps, installs. `group_by` countryOrRegion/deviceClass/ageRange/gender, `segment_by_date`, `sort_by`, paging |
+| `impression_share_report`, `search_term_popularity` | Share of voice; demand for a term |
+| `keyword_suggestions`, `phrase_suggestions`, `category_suggestions` | Apple's ideas, by app, campaign, country |
+| `budget_recommendations`, `target_cpa_recommendations`, `target_cpa_suggestion` | Apple's advice |
+| `search_geos` / `get_geos`, `list_location_groups` | Location ids for targeting |
+| `search_apps`, `app_eligibility`, `supported_languages` | What a new campaign can promote |
+| `list_shared_budgets` | Shared budgets and the campaigns they feed (read only) |
+| `list_recent_changes`, `get_change_details` | Apple's audit trail — **everyone's** changes, field by field |
+| `list_my_changes`, `reconcile_ledger` | This server's ledger, and what does not match Apple's |
 
 ### Change — preview first, always
 
-| Pair | Changes |
+Each is `preview_<name>` / `apply_<name>`.
+
+| `<name>` | Changes |
 |---|---|
-| `preview_keyword_bid` / `apply_keyword_bid` | One keyword's bid |
-| `preview_keyword_bids_bulk` / `apply_keyword_bids_bulk` | Several keyword bids at once |
-| `preview_keyword_status` / `apply_keyword_status` | Pause or enable a keyword |
-| `preview_ad_group_status` / `apply_ad_group_status` | Pause or enable an ad group (**every keyword in it**) |
-| `preview_ad_group_default_bid` / `apply_ad_group_default_bid` | The ad group's default bid |
-| `preview_campaign_status` / `apply_campaign_status` | Pause or enable a **whole campaign** |
-| `preview_campaign_daily_budget` / `apply_campaign_daily_budget` | A campaign's daily budget |
-| `preview_negative_keywords_add` / `apply_negative_keywords_add` | Add negative keywords |
-| `preview_negative_keyword_pause` / `apply_negative_keyword_pause` | Pause or enable a negative keyword |
-| `revert_change` | Undo one ledger entry by its `entry_id` |
+| `keyword_bid`, `keyword_bids_bulk` | Keyword bids |
+| `keyword_status`, `ad_group_status`, `campaign_status`, `ad_status` | Pause or enable |
+| `ad_group_default_bid`, `campaign_daily_budget` | Default bid; daily budget |
+| `add_keywords` | New keywords, **created PAUSED** |
+| `keyword_match_type` | Adds a PAUSED copy with the new match type and pauses the old |
+| `negative_keywords_add`, `negative_keyword_pause`, `negative_keyword_status` | Negatives (created ENABLED — a paused negative does nothing) |
+| `ad_group_bid_strategy`, `campaign_bid_strategy`, `ad_group_cpa_goal`, `campaign_schedule` | Bidding model, CPA goal, start/end |
+| `ad_group_search_match`, `ad_group_demographics`, `ad_group_devices`, `ad_group_daypart`, `ad_group_locations`, `ad_group_app_downloaders`, `campaign_countries` | Targeting |
+| `create_campaign`, `create_ad_group`, `create_creative`, `create_ad` | Creation, **always PAUSED**; 3 applies each |
+| `budget_recommendation`, `target_cpa_recommendation` | Apple's advice, through the normal budget / CPA bounds |
+| `low_risk_change` | Rename a campaign, ad group, ad or creative; dismiss a recommendation |
+| `revert_change` | Undo an entry, or a whole batch by its id |
+| `resolve_unknown_change` | Settle an `unknown` (timed-out) entry by read-back: records applied or failed, writes only the ledger, undoes nothing |
 
 ### Not here, on purpose
 
-Creating or deleting campaigns, ad groups, ads, creatives and assets. Deleting
-negative keywords. Changing shared budgets. Applying Apple's budget advice in one
-call. There is **no generic request/passthrough tool**, so if an operation is not
-in the tables above it cannot be done from here.
+Deleting anything. Shared budget writes, billing and account settings, location
+group writes and Maps (brand) ads, asset uploads, one-call
+`apply_*_recommendations`. There is **no generic passthrough tool**.
 
-If the human needs one of those, tell them so and hand them the break-glass CLI
-line to run themselves:
+## The caps
 
-```
-./venv/bin/python apple_ads_cli.py <path> -X PUT -d '{...}' --apply --confirm-live
-```
+- **Per change:** `max_bid`, `max_bid_increase_pct`, `max_daily_budget`,
+  `max_budget_change_pct`, `max_cpa_goal`, `max_cpa_goal_change_pct`,
+  `max_entities_per_call`, `max_projected_delta_per_day`.
+- **Per session:** `max_applies_per_session`, `max_projected_session_delta`.
+  Reset by a restart.
+- **Per day:** `max_applies_per_day`, `max_projected_delta_per_day_total`. Read
+  from the ledger, shared by every session and the CLI, reset at **local**
+  midnight. A batch counts once; a creation counts 3.
+- **Enables are special.** Anything that resumes or widens delivery — enabling a
+  campaign, ad group, keyword or ad, pausing a negative, switching Search Match
+  on, loosening targeting, handing bids to Apple, undoing a pause — projects the
+  most it could add (a campaign's whole budget, or its unused budget), shows
+  `SKIP projected_daily_delta`, and is counted in full against the session and
+  daily totals. A FAIL `projected_daily_total` line names what it would use and
+  what is left today.
+
+## Errors
+
+Every failure starts with a stable prefix: `AUTH`, `FORBIDDEN_ROLE`,
+`NOT_FOUND`, `RATE_LIMITED`, `INVALID`, `TRANSIENT` (Apple), `CONFIG`, `LEDGER`,
+`INVALID_REQUEST`, `INTERNAL` (local). Reads are retried on `RATE_LIMITED` and
+`TRANSIENT`; writes never are. A `LEDGER` error before a write means nothing was
+sent; after one, run `reconcile_ledger`.
 
 ## Silent no-ops — the trap to know
 
-**HTTP 200 does not mean the change happened.** If an ad group is on an automated
-bid strategy (`MAX_CONVERSIONS` or `MAX_ENGAGEMENTS`), Apple sets the bids itself.
-A bid you write is accepted with a success response and then thrown away, with
-nothing in the reply saying so.
+**HTTP 200 does not mean the change happened.** Under an automated bid strategy
+(`MAX_CONVERSIONS` / `MAX_ENGAGEMENTS`) Apple accepts a written bid and throws it
+away. The preview FAILs `bid_is_settable`; every apply also compares Apple's echo
+with what was asked and reports `applied: false` when they differ. Read `applied`.
 
-- The preview catches this up front with a `FAIL bid_is_settable` check, and the
-  apply is then refused.
-- Every apply also compares the value Apple echoed back against the one asked
-  for, and reports `applied: false` when they differ.
-- **So read `applied`, not the absence of an error.**
+## Recipes
 
-Only `MANUAL_CPT` and `MANUAL_CPM` make a bid mean anything. Check with
-`get_ad_group`. Switching the strategy is a campaign decision a person makes in
-the Apple Ads UI — this server will not do it.
+**A daily check.** `get_account` → `get_guardrails` → `campaign_report(days=1)`
+and `campaign_report(days=7)` → `list_recent_changes(days=1)` →
+`reconcile_ledger(days=1)`. Report spend against budget, anything not serving
+(`get_campaign` limiting reasons), and any change somebody else made.
 
-## Reading the preview
+**A search-term harvest.** `search_term_report(campaign_id=..., days=14,
+min_impressions=...)` → for converting terms, `preview_add_keywords` (they arrive
+PAUSED) → for wasted spend, `preview_negative_keywords_add` → show both → apply
+→ later, enable the new keywords with `preview_keyword_status`.
 
-Four fields turn an approval into a judgement. Put them in your summary.
+**A custom product page test.** `list_product_pages(adam_id)` →
+`preview_create_creative(name="<base>", product_page_id=...)` →
+`preview_create_ad(ad_group_id, creative_id, name="<base>")` (PAUSED; both names
+get your prefix) → when ready, `preview_ad_status(status="ENABLED")` →
+compare with `ad_report(ad_group_id=...)`.
 
-| Field | Why it matters |
-|---|---|
-| `entity_name` | `'competitor brand term'` reads differently from `keyword 1234567890` |
-| `path` | `Campaign 'X' > AdGroup 'Y' > Keyword 'z'` |
-| `entity_serving_status` | `RUNNING` means **this** entity can spend today. A keyword under a paused ad group reads `AD_GROUP_ON_HOLD` even when the campaign reads `RUNNING` |
-| `projected_daily_spend_delta` | Upper bound on extra spend per day |
+**A new campaign.** `search_apps` → `app_eligibility` → `preview_create_campaign`
+with the base name only (state the `regulation_responses` explicitly; the human
+is answering for them; read the final name off the `naming` block) →
+`preview_create_ad_group` (base name again) → `preview_add_keywords` → negatives → review it all →
+`preview_campaign_status(status="ENABLED")`, which projects the whole budget.
 
-`projected_daily_spend_delta` is for catching a 100× typo, **not** a forecast. It
-assumes tap volume does not change, which is precisely what a bid change is meant
-to do. A budget change is the exception: that number is exact, because the cap
-itself is what moved.
+**Acting on a recommendation.** `budget_recommendations` or
+`target_cpa_recommendations` → `preview_budget_recommendation(campaign_id)` or
+`preview_target_cpa_recommendation(ad_group_id)` → the normal bounds decide →
+apply. To set one aside, `preview_low_risk_change(entity_type=
+"daily_budget_recommendation", entity_id=..., field="dismiss")` (no undo).
 
-If `blocked: true`, a guardrail failed. The `FAIL` line in `guardrail_checks`
-says which. The apply will refuse the token, so fix the proposal rather than
-trying the apply.
+## Naming
+
+Pass the BASE name to `create_campaign`, `create_ad_group`, `create_creative`
+and `create_ad`. The server adds `<OWNER>-<agent>-` from this checkout's `.env`
+(`AB-max-spring_promo`; one part if only one is set; nothing if neither is) and
+the preview's `naming` block shows the exact final name -- show that to the
+human. Never type a prefix yourself: ours twice is refused, and a name that
+reads as anyone else's prefix (`CD-bot-...`, `AB-cli-...`) is ALWAYS refused --
+even when no identity is configured -- because it would impersonate them. Over
+200 characters (prefix included) is refused, not truncated, and so is any
+invisible character (control, zero-width, bidi mark, line separator).
+A house-style name, if the team has one, is the base: the prefix goes first.
+A duplicate campaign name, or ad group name in its campaign, fails
+`name_is_free` -- on a create or a rename -- and so does a scope too big to
+scan in full ("could not verify the name is free").
+
+Renames (`low_risk_change`, field `name`) reach only YOUR entities -- the name
+carries your WHOLE prefix or the ledger shows this server created it. With only
+initials `AB` set, `AB-bot-x` (agent `bot`'s) and `AB-cli-x` (a person's) are
+not yours, and neither counts for `mine=True`. Hand-made and other agents'
+entities are refused; tell the human to rename those in the Apple Ads UI. The
+prefix is kept: pass the new base.
+
+Find your work with `list_campaigns` / `list_ad_groups` / `list_ads` /
+`list_creatives` and `mine=True`, or filter by `origin` (`agent`, `cli`,
+`manual`), `agent_name`, `owner`. `get_guardrails` and `whoami` show the
+identity; `reconcile_ledger` lists `prefix_lost` / `prefix_without_ledger`.
 
 ## Undo
 
-```
-revert_change(entry_id="...")
-```
+`revert_change(entry_id=...)` refuses unless the entry is `applied`, refuses one
+already reverted, re-checks the campaign scope, and re-reads the entity — if it
+is no longer what the entry left, somebody else moved it. A creation is undone by
+**pausing** it; one already paused has nothing to undo. A batch id undoes every
+item of the batch that landed. Undoing a pause or a cut restores spend and counts
+against the caps.
 
-It refuses unless the entry is recorded as `applied`, refuses one already
-reverted, and re-reads the entity first — if the current value is not what the
-entry left behind, somebody else moved it and reverting would overwrite **their**
-change.
-
-It **cannot** undo `apply_negative_keywords_add`, because that created rows and
-deletion is not exposed. Pause them instead.
+An `unknown` entry (the request timed out) may have landed and counts as if it
+had. Settle it with `resolve_unknown_change(entry_id=...)` -- a batch id settles
+every unknown item -- rather than calling `revert_change` to find out.
+`applied` is recorded at once. `failed` needs the entry to be 5 minutes old
+(Apple's read can lag; earlier you get "too early to tell; try again after
+<time>" -- wait and call it again), and is never given when a later ledger row
+touched the same field (it stays `unknown`; tell the human to check the Apple
+Ads UI). A `partial` targeting entry is live; `revert_change` restores only the
+dimension it asked for.
 
 ## When something goes wrong
 
-| Message | What it means | What to do |
-|---|---|---|
-| `preview_token ... is unknown or already used` | Single use, 10-minute life | Re-run the preview |
-| `... is now X, but the preview recorded Y` | Somebody changed it in between | Re-run the preview, look at the new numbers, decide again |
-| `that preview was blocked by a guardrail` | A bound was breached | Read `guardrail_checks`, propose something inside the bounds |
-| `writes are disabled: ...` | The kill switch file exists | A human removes `.audit/DISABLE_WRITES`. Do not work around it |
-| `session limit reached: N applies already made` | Per-session cap | Show `list_my_changes`, let the human decide; the server must restart to reset |
-| `applied: false` + "returned success and left the value alone" | Silent no-op | Almost always an automated bid strategy. Nothing changed |
-| `projected_daily_spend_delta: 0` + a warning about "0 by default, NOT by measurement" | The 7-day report failed | Treat the zero as unknown, not as "spends nothing" |
-| 401/403 on everything but `whoami` | Wrong account context | Run `whoami` and tell the human what it says |
+| Message | What to do |
+|---|---|
+| `preview_token ... is unknown or already used` | Re-run the preview |
+| `... is now X, but the preview recorded Y` | Somebody changed it; re-run the preview and decide again |
+| `that preview was blocked by a guardrail` | Read the FAIL line; propose something inside the bounds |
+| `writes are disabled: ...` | A human removes `.audit/DISABLE_WRITES`. Do not work around it |
+| `session limit reached` / `daily ... limit reached` | Stop. Show `list_my_changes`; the human decides |
+| `applied: false` | Nothing changed — usually an automated bid strategy |
+| `0 by default, NOT by measurement` | The 7-day report failed; treat the zero as unknown |
+| `FORBIDDEN_ROLE` / 401/403 everywhere | Run `whoami` and `get_account`; tell the human |
 
 ## A worked example
 
-> "Raise the bid on 'organic grocery delivery' to $2.50."
+> "Raise the bid on 'example term' to $2.50."
 
 ```
-1. get_guardrails()                      -> max_bid 5.00, 3 of 20 applies used
-2. list_keywords(ad_group_id=...)        -> find the id, read the current bid
-3. get_ad_group(ad_group_id=...)         -> bidStrategy is MANUAL_CPT, so a bid will stick
-4. keyword_report(...)                   -> what it has been doing
+1. get_guardrails()                      -> max_bid 5.00, applies left today
+2. list_keywords(ad_group_id=...)        -> the id and current bid
+3. get_ad_group(ad_group_id=...)         -> MANUAL_CPT, so a bid will stick
+4. keyword_report(campaign_id=..., keyword_id=...)
 5. preview_keyword_bid(keyword_id=..., new_bid="2.50")
-6. Summarise for the human: current bid, new bid, the path, whether it is serving
-   today, the projected daily delta, and any warnings.
+6. Summarise: current and new bid, the path, serving today?, projected delta, warnings.
 7. apply_keyword_bid(preview_token="pv_...")
-8. Report `applied`, `observed_after`, and the `entry_id` for undo.
+8. Report `applied`, `observed_after` and the `entry_id`.
 ```
-
-If step 3 had shown `MAX_CONVERSIONS`, stop at step 5: the preview will block,
-and the honest answer is "Apple sets the bids on this ad group, so this change
-cannot take effect — the bid strategy has to change first, in the Apple Ads UI."

@@ -81,6 +81,10 @@ APPLIED = "applied"
 FAILED = "failed"
 PARTIAL = "partial"
 REFUSED = "refused"
+#: The request left the process and no answer came back (a timeout, a reset, a
+#: 5xx): the write may or may not have landed. Counted against the caps as if it
+#: had, until a read-back (resolve_unknown_change, or revert_change) settles it.
+UNKNOWN = "unknown"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -391,7 +395,7 @@ def _finish_api_call(
 class InstrumentedServer:
     """An `MCPServer` whose `@tool()` decorator also logs the call.
 
-    Wrapping the registrar rather than the 38 tool bodies: one place to change,
+    Wrapping the registrar rather than every tool body: one place to change,
     nothing for a new tool to forget, and no decorator to leave off by accident.
     Every other attribute passes straight through to the real server.
 
@@ -420,6 +424,21 @@ class InstrumentedServer:
 #: test asserts it, because the fallback below is silent by design and a silent
 #: gap in the log is exactly the thing worth failing a build over.
 UNINSTRUMENTED: list[str] = []
+
+
+def _reaches_the_caller(exc: Exception) -> Exception:
+    """The exception to re-raise: a ToolError, so the agent sees why.
+
+    Only a ToolError's message survives the MCP SDK; anything else becomes a
+    bare "Error executing tool X". See apple_ads_mcp.errors for the prefixes.
+    The tool_calls row records the converted message.
+    """
+    from apple_ads_mcp.errors import to_tool_error
+
+    try:
+        return to_tool_error(exc)
+    except Exception:  # noqa: BLE001 - never lose the original to a mapper bug
+        return exc
 
 
 def instrument_tool(fn: Any) -> Any:
@@ -468,14 +487,26 @@ def instrument_tool(fn: Any) -> Any:
         @functools.wraps(fn)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
             with record_tool_call(fn.__name__, bind(args, kwargs)):
-                return await fn(*args, **kwargs)
+                try:
+                    return await fn(*args, **kwargs)
+                except Exception as exc:
+                    mapped = _reaches_the_caller(exc)
+                    if mapped is exc:
+                        raise
+                    raise mapped from exc
 
         return finish(async_wrapper)
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         with record_tool_call(fn.__name__, bind(args, kwargs)):
-            return fn(*args, **kwargs)
+            try:
+                return fn(*args, **kwargs)
+            except Exception as exc:
+                mapped = _reaches_the_caller(exc)
+                if mapped is exc:
+                    raise
+                raise mapped from exc
 
     return finish(wrapper)
 
@@ -537,19 +568,64 @@ def complete_change(
     detail: str = "",
     observed_after: Any = None,
     failures: list[dict[str, Any]] | None = None,
+    entity_id: Any = None,
+    projected_daily_spend_delta: str | None = None,
 ) -> None:
-    """Record how it went. A plain UPDATE, never an upsert -- see the docstring."""
+    """Record how it went. A plain UPDATE, never an upsert -- see the docstring.
+
+    `entity_id` is for a creation: the intent is written before Apple has
+    assigned an id, so the outcome fills it in. COALESCE keeps the intent's
+    value whenever no new one is given.
+    """
     connect().execute(
         "UPDATE changes SET outcome=?, outcome_ts=?, outcome_detail=?, observed_after=?, "
-        "failures_json=? WHERE entry_id=?",
+        "failures_json=?, entity_id=COALESCE(?, entity_id), "
+        "projected_daily_spend_delta=COALESCE(?, projected_daily_spend_delta) "
+        "WHERE entry_id=?",
         (
             outcome,
             _now(),
             detail,
             None if observed_after is None else str(observed_after),
             _dumps(failures or []),
+            None if entity_id is None else str(entity_id),
+            projected_daily_spend_delta,
             entry_id,
         ),
+    )
+
+
+def created_by_us(entity_type: str, entity_id: Any) -> bool:
+    """True when this checkout's ledger shows a creation of that entity landed."""
+    if entity_id in (None, ""):
+        return False
+    row = connect().execute(
+        "SELECT 1 FROM changes WHERE entity_type=? AND field='created' AND entity_id=? "
+        "AND outcome IN (?, ?) LIMIT 1",
+        (entity_type, str(entity_id), APPLIED, PARTIAL),
+    ).fetchone()
+    return row is not None
+
+
+def created_ids(entity_type: str) -> set[str]:
+    """Ids of every entity of that type this checkout's ledger shows it created."""
+    rows = connect().execute(
+        "SELECT DISTINCT entity_id FROM changes WHERE entity_type=? AND field='created' "
+        "AND outcome IN (?, ?) AND entity_id IS NOT NULL",
+        (entity_type, APPLIED, PARTIAL),
+    )
+    return {str(row[0]) for row in rows}
+
+
+def set_projected_delta(entry_id: str, projected_daily_spend_delta: str) -> None:
+    """Re-attribute one finished row's projected spend, leaving its outcome alone.
+
+    For a batch settled row by row after a timeout: a per-campaign bound has to
+    sit on a row that still counts, or the daily cap stops seeing it.
+    """
+    connect().execute(
+        "UPDATE changes SET projected_daily_spend_delta=? WHERE entry_id=?",
+        (projected_daily_spend_delta, entry_id),
     )
 
 
@@ -598,9 +674,80 @@ def entries(since: dt.datetime | None = None) -> list[dict[str, Any]]:
     return [_row_to_entry(row) for row in connect().execute(sql, params)]
 
 
+def _parse_ts(raw: Any) -> dt.datetime | None:
+    """A stored timestamp as an aware datetime, whatever ISO spelling it has.
+
+    Rows this module writes are `+00:00` UTC. Rows imported from the retired
+    JSONL carry whatever that wrote, which may be `Z`, fractional seconds or a
+    local offset -- a plain string comparison would misorder those.
+    """
+    try:
+        stamp = dt.datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=dt.timezone.utc)
+    return stamp
+
+
+def successful_changes_since(since: dt.datetime) -> list[dict[str, Any]]:
+    """Changes that landed (applied or partial), or may have (unknown), at or
+    after `since`.
+
+    The daily cap's whole input. SQL narrows by date prefix -- a string compare
+    the ts index serves -- with two days of slack, and the exact boundary is then
+    applied to parsed datetimes, so a legacy row in another ISO spelling is
+    neither miscounted nor dropped.
+    """
+    lower = (since - dt.timedelta(days=2)).strftime("%Y-%m-%d")
+    rows = connect().execute(
+        "SELECT * FROM changes WHERE ts >= ? AND outcome IN (?, ?, ?) ORDER BY ts, rowid",
+        (lower, APPLIED, PARTIAL, UNKNOWN),
+    )
+    keep = []
+    for row in rows:
+        stamp = _parse_ts(row["ts"])
+        if stamp is not None and stamp >= since:
+            keep.append(_row_to_entry(row))
+    return keep
+
+
+def batch_entries(batch_id: str) -> list[dict[str, Any]]:
+    """Every row of one batch, in the order they were written.
+
+    A batch writes one row per entity, sharing `batch_id` in extra_json, so one
+    item can be reverted on its own and the whole batch by this id.
+    """
+    rows = connect().execute(
+        "SELECT * FROM changes WHERE json_extract(extra_json, '$.batch_id') = ? "
+        "ORDER BY ts, rowid",
+        (batch_id,),
+    )
+    return [_row_to_entry(row) for row in rows]
+
+
 def find_entry(entry_id: str) -> dict[str, Any] | None:
     row = connect().execute("SELECT * FROM changes WHERE entry_id=?", (entry_id,)).fetchone()
     return None if row is None else _row_to_entry(row)
+
+
+def later_changes(entry_id: str) -> list[dict[str, Any]]:
+    """Rows written after ``entry_id`` that touch the same entity and field.
+
+    Any outcome counts: a later write, even one recorded failed, means the
+    value Apple shows now may not be the one this entry left behind.
+    """
+    row = connect().execute(
+        "SELECT rowid, entity_type, entity_id, field FROM changes WHERE entry_id=?", (entry_id,)
+    ).fetchone()
+    if row is None:
+        return []
+    rows = connect().execute(
+        "SELECT * FROM changes WHERE rowid > ? AND entity_type=? AND entity_id=? AND field=? "
+        "ORDER BY rowid",
+        (row["rowid"], row["entity_type"], row["entity_id"], row["field"]),
+    )
+    return [_row_to_entry(r) for r in rows]
 
 
 def reverted_entry_ids() -> set[str]:

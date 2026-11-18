@@ -59,11 +59,18 @@ APPLIED = logdb.APPLIED
 FAILED = logdb.FAILED
 PARTIAL = logdb.PARTIAL
 REFUSED = logdb.REFUSED
+UNKNOWN = logdb.UNKNOWN
 
 new_entry_id = logdb.new_entry_id
 entries = logdb.entries
 find_entry = logdb.find_entry
+batch_entries = logdb.batch_entries
 reverted_entry_ids = logdb.reverted_entry_ids
+later_changes = logdb.later_changes
+parse_ts = logdb._parse_ts
+write_projected = logdb.set_projected_delta
+created_by_us = logdb.created_by_us
+created_ids = logdb.created_ids
 
 
 def write_intent(
@@ -107,14 +114,24 @@ def write_outcome(
     detail: str = "",
     observed_after: Any = None,
     failures: list[dict[str, Any]] | None = None,
+    entity_id: Any = None,
+    projected_daily_spend_delta: str | None = None,
 ) -> None:
-    """Record how it went. `outcome` is one of applied/failed/partial/refused."""
+    """Record how it went. `outcome` is one of applied/failed/partial/refused/unknown.
+
+    `entity_id` fills in the id Apple assigned to something just created.
+    `projected_daily_spend_delta` re-attributes the row's projected spend once
+    the batch's outcomes are known (a per-campaign bound moving to the item
+    that landed); None keeps the intent's value.
+    """
     logdb.complete_change(
         entry_id,
         outcome=outcome,
         detail=detail,
         observed_after=observed_after,
         failures=failures,
+        entity_id=entity_id,
+        projected_daily_spend_delta=projected_daily_spend_delta,
     )
 
 

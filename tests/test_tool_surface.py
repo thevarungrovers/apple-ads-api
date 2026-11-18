@@ -57,6 +57,27 @@ READ_TOOLS = frozenset(
         "get_guardrails",
         "list_my_changes",
         "reconcile_ledger",
+        "get_account",
+        "list_ads",
+        "get_ad",
+        "list_creatives",
+        "creative_rejection_reasons",
+        "list_product_pages",
+        "get_product_page",
+        "impression_share_report",
+        "search_term_popularity",
+        "phrase_suggestions",
+        "category_suggestions",
+        "target_cpa_recommendations",
+        "target_cpa_suggestion",
+        "search_geos",
+        "get_geos",
+        "list_location_groups",
+        "search_apps",
+        "app_eligibility",
+        "supported_languages",
+        "get_change_details",
+        "ad_report",
     }
 )
 
@@ -71,6 +92,28 @@ PREVIEW_TOOLS = frozenset(
         "preview_campaign_daily_budget",
         "preview_negative_keywords_add",
         "preview_negative_keyword_pause",
+        "preview_add_keywords",
+        "preview_keyword_match_type",
+        "preview_negative_keyword_status",
+        "preview_ad_group_bid_strategy",
+        "preview_ad_group_cpa_goal",
+        "preview_campaign_bid_strategy",
+        "preview_campaign_schedule",
+        "preview_ad_group_search_match",
+        "preview_ad_group_demographics",
+        "preview_ad_group_devices",
+        "preview_ad_group_daypart",
+        "preview_ad_group_locations",
+        "preview_ad_group_app_downloaders",
+        "preview_campaign_countries",
+        "preview_create_creative",
+        "preview_create_ad",
+        "preview_ad_status",
+        "preview_create_campaign",
+        "preview_create_ad_group",
+        "preview_budget_recommendation",
+        "preview_target_cpa_recommendation",
+        "preview_low_risk_change",
     }
 )
 
@@ -86,15 +129,55 @@ APPLY_TOOLS = frozenset(
         "apply_negative_keywords_add",
         "apply_negative_keyword_pause",
         "revert_change",
+        "apply_add_keywords",
+        "apply_keyword_match_type",
+        "apply_negative_keyword_status",
+        "apply_ad_group_bid_strategy",
+        "apply_ad_group_cpa_goal",
+        "apply_campaign_bid_strategy",
+        "apply_campaign_schedule",
+        "apply_campaign_countries",
+        "apply_ad_group_search_match",
+        "apply_ad_group_demographics",
+        "apply_ad_group_devices",
+        "apply_ad_group_daypart",
+        "apply_ad_group_locations",
+        "apply_ad_group_app_downloaders",
+        "apply_create_creative",
+        "apply_create_ad",
+        "apply_ad_status",
+        "apply_create_campaign",
+        "apply_create_ad_group",
+        "apply_budget_recommendation",
+        "apply_target_cpa_recommendation",
+        "apply_low_risk_change",
     }
 )
 
-EXPECTED_TOOLS = READ_TOOLS | PREVIEW_TOOLS | APPLY_TOOLS
+# Reads Apple and writes ONLY the local ledger. Not read-only (the ledger
+# decides what the caps count), never destructive, idempotent; published with
+# the writes, so absent in read-only mode and never allowlisted.
+LEDGER_TOOLS = frozenset({"resolve_unknown_change"})
+
+EXPECTED_TOOLS = READ_TOOLS | PREVIEW_TOOLS | APPLY_TOOLS | LEDGER_TOOLS
 
 # Destructive only where the action moves money in a way that is not a one-call
 # undo. Pausing a keyword is reversible; marking it destructive would train you
 # to click through the loud prompts, which is how the loud prompts stop working.
-DESTRUCTIVE_TOOLS = frozenset({"apply_campaign_status", "apply_campaign_daily_budget"})
+DESTRUCTIVE_TOOLS = frozenset(
+    {
+        "apply_campaign_status",
+        "apply_campaign_daily_budget",
+        "apply_campaign_bid_strategy",
+        "apply_campaign_schedule",
+        "apply_campaign_countries",
+        "apply_create_creative",
+        "apply_create_ad",
+        "apply_create_campaign",
+        "apply_create_ad_group",
+        "apply_budget_recommendation",
+    }
+)
 
 # The only two tools that answer from this process without calling Apple, and so
 # the only two that carry open_world_hint=False.
@@ -102,15 +185,9 @@ LOCAL_ONLY_TOOLS = frozenset({"get_guardrails", "list_my_changes"})
 
 # In scope for the credential, deliberately unreachable from here.
 FORBIDDEN_METHODS = (
-    "campaigns_post",
     "campaigns_id_delete",
-    "adgroups_post",
     "adgroups_id_delete",
-    "ads_post",
-    "ads_id_put",
     "ads_id_delete",
-    "creatives_post",
-    "creatives_id_put",
     "creatives_id_delete",
     "keywords_post",
     "keywords_id_delete",
@@ -125,6 +202,11 @@ FORBIDDEN_METHODS = (
     "delete_asset",
     "ad_accounts_id_put",
     "ad_accounts_post",
+    # Location groups belong to a BUSINESS_BRAND (LocationGroupCreate requires a
+    # brandId): Maps local ads, out of scope for writes in this round.
+    "create_location_group",
+    "update_location_group",
+    "delete_location_group",
 )
 
 
@@ -216,6 +298,11 @@ def test_hints_match_what_the_handler_actually_does() -> None:
             f"{name} consumes a single-use preview_token, so a second identical "
             f"call is an error rather than a no-op"
         )
+    for name in LEDGER_TOOLS:
+        a = tools[name].annotations
+        assert a.read_only_hint is False, f"{name} writes the ledger, so it is not read-only"
+        assert a.destructive_hint is False, f"{name} writes nothing to Apple"
+        assert a.idempotent_hint is True, f"{name} settles a row once; a repeat changes nothing"
     # Only the two local tools answer without touching Apple.
     for name, tool in sorted(tools.items()):
         expected_open_world = name not in LOCAL_ONLY_TOOLS
@@ -284,10 +371,10 @@ def test_out_of_scope_api_methods_are_unreachable() -> None:
     """
     forbidden = frozenset(FORBIDDEN_METHODS)
     offenders = []
-    for path in sorted((REPO_ROOT / "apple_ads_mcp").glob("*.py")):
+    for path in sorted((REPO_ROOT / "apple_ads_mcp").rglob("*.py")):
         for text in _live_strings(path.read_text()):
             if text.strip() in forbidden:
-                offenders.append(f"{path.name}: {text.strip()}")
+                offenders.append(f"{path.relative_to(REPO_ROOT)}: {text.strip()}")
     assert not offenders, (
         f"out-of-scope API methods are named in live code: {offenders}. If that is "
         f"intentional, each needs a preview/apply pair, a ledger entry and a line "
@@ -310,11 +397,11 @@ def test_installer_tool_list_matches_the_server() -> None:
         "install.py's SAFE_TOOLS no longer matches the read and preview tools: "
         f"{sorted(frozenset(install.SAFE_TOOLS) ^ (READ_TOOLS | PREVIEW_TOOLS))}"
     )
-    assert frozenset(install.WRITE_TOOLS) == APPLY_TOOLS, (
-        "install.py's WRITE_TOOLS no longer matches the apply tools: "
-        f"{sorted(frozenset(install.WRITE_TOOLS) ^ APPLY_TOOLS)}"
+    assert frozenset(install.WRITE_TOOLS) == APPLY_TOOLS | LEDGER_TOOLS, (
+        "install.py's WRITE_TOOLS no longer matches the apply and ledger tools: "
+        f"{sorted(frozenset(install.WRITE_TOOLS) ^ (APPLY_TOOLS | LEDGER_TOOLS))}"
     )
-    assert not (frozenset(install.SAFE_TOOLS) & APPLY_TOOLS), (
+    assert not (frozenset(install.SAFE_TOOLS) & (APPLY_TOOLS | LEDGER_TOOLS)), (
         "install.py would allowlist a tool that changes the account"
     )
     # And both halves still describe the server that actually registers.
@@ -323,6 +410,27 @@ def test_installer_tool_list_matches_the_server() -> None:
         "install.py does not account for every registered tool: "
         f"{sorted(registered ^ (frozenset(install.SAFE_TOOLS) | frozenset(install.WRITE_TOOLS)))}"
     )
+
+
+def test_the_installer_never_puts_the_naming_identity_in_a_client_config() -> None:
+    """The identity is read from .env only; a client env block must not carry it."""
+    import install
+
+    for read_only in (True, False):
+        block = install.server_block(read_only)
+        assert not set(block.get("env", {})) & set(install.NAMING_KEYS), block
+        assert not any(key in install.codex_block(read_only) for key in install.NAMING_KEYS)
+    steps = "\n".join(install.next_steps("claude-code", False))
+    assert all(key in steps for key in install.NAMING_KEYS), steps
+
+
+def test_env_example_carries_empty_naming_keys() -> None:
+    """Key names with EMPTY values only: the real identity lives in .env."""
+    import install
+
+    lines = (REPO_ROOT / ".env.example").read_text().splitlines()
+    for key in install.NAMING_KEYS:
+        assert f"{key}=" in lines, f".env.example has no empty {key}="
 
 
 def test_installer_never_allowlists_a_write_tool() -> None:
@@ -339,7 +447,7 @@ def test_installer_never_allowlists_a_write_tool() -> None:
     for rule in rules:
         assert "*" not in rule, f"{rule} is a wildcard; support for those varies by version"
         tool = rule.rsplit("__", 1)[-1]
-        assert tool not in APPLY_TOOLS, f"{rule} would pre-approve a write"
+        assert tool not in APPLY_TOOLS | LEDGER_TOOLS, f"{rule} would pre-approve a write"
     assert f"mcp__{install.SERVER_NAME}" not in rules, (
         "a bare server rule would approve every tool including the writes"
     )
@@ -369,8 +477,8 @@ def test_read_only_mode_publishes_no_write_tool() -> None:
     )
     names = frozenset(json.loads(out.stdout))
 
-    assert not (names & APPLY_TOOLS), (
-        f"read-only mode still publishes write tools: {sorted(names & APPLY_TOOLS)}. "
+    assert not (names & (APPLY_TOOLS | LEDGER_TOOLS)), (
+        f"read-only mode still publishes write tools: {sorted(names & (APPLY_TOOLS | LEDGER_TOOLS))}. "
         f"A client with no per-tool allowlist would be able to call them."
     )
     assert names == READ_TOOLS | PREVIEW_TOOLS, (
@@ -401,6 +509,50 @@ def test_readme_quotes_the_guardrail_text_verbatim() -> None:
     )
 
 
+NAMED_ENTITY_TYPES = frozenset({"campaign", "ad_group", "ad", "creative"})
+
+
+def test_every_creating_kind_declares_what_it_names() -> None:
+    """A kind that creates a named entity must declare it, so the engine's
+    name_prefix backstop runs on it. A new create kind cannot ship unprefixed."""
+    from apple_ads_mcp.changes import all_kinds
+    from apple_ads_mcp.changes.base import CREATED
+
+    for kind in all_kinds():
+        creates = {etype for etype, field in kind.ledger_keys if field == CREATED} & NAMED_ENTITY_TYPES
+        assert set(kind.creates_named) == creates, (
+            f"{kind.name} creates {sorted(creates)} but declares creates_named="
+            f"{kind.creates_named!r}"
+        )
+
+
+def test_every_creating_kind_sends_the_prefixed_name() -> None:
+    """Run each creation end to end and read the name off the request SENT."""
+    sys.path.insert(0, str(REPO_ROOT / "tests"))
+    from decimal import Decimal
+
+    from kindkit import AD_GROUP, APP, CAMPAIGN, CREATIVE, rig
+
+    roomy = dict(max_projected_session_delta=Decimal("500"),
+                 max_projected_delta_per_day_total=Decimal("500"))
+    cases = {
+        "create_campaign": dict(name="Launch", adam_id=APP, countries=["US"], daily_budget="40.00",
+                                regulation_responses=[]),
+        "create_ad_group": dict(campaign_id=CAMPAIGN, name="Launch", default_bid="1.50"),
+        "create_creative": dict(name="Launch", adam_id=APP),
+        "create_ad": dict(ad_group_id=AD_GROUP, creative_id=CREATIVE, name="Launch"),
+    }
+    for name, args in cases.items():
+        tools, apple, _ = rig(**roomy)
+        preview = tools[f"preview_{name}"](**args)
+        assert preview.naming["final"] == "AB-max-Launch", (name, preview.naming)
+        tools[f"apply_{name}"](preview_token=preview.preview_token)
+        [(method, kwargs)] = [c for c in apple.calls if c[0].endswith("_post") and "query" not in c[0]
+                              and "eligibilit" not in c[0]]
+        body = next(v for k, v in kwargs.items() if k.endswith("_create"))
+        assert body.name == "AB-max-Launch", (name, method, body.name)
+
+
 def test_there_is_no_generic_passthrough() -> None:
     names = frozenset(_tools())
     for suspicious in ("request", "raw_request", "call_api", "http", "execute"):
@@ -423,7 +575,7 @@ def main() -> int:
     tools = _tools()
     print(
         f"\n{len(tools)} tools registered: {len(READ_TOOLS)} read, "
-        f"{len(PREVIEW_TOOLS)} preview, {len(APPLY_TOOLS)} apply."
+        f"{len(PREVIEW_TOOLS)} preview, {len(APPLY_TOOLS)} apply, {len(LEDGER_TOOLS)} ledger."
     )
     print("All checks passed." if not failures else f"{failures} failure(s).")
     return 1 if failures else 0

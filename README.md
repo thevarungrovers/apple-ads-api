@@ -59,7 +59,9 @@ cd apple-ads-api
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 
-# 2. Fill in your Apple credentials
+# 2. Fill in your Apple credentials (and, optionally, the two naming keys:
+#    APPLE_ADS_OWNER_INITIALS / APPLE_ADS_AGENT_NAME -- see "Naming what the
+#    agent creates" below)
 cp .env.example .env
 $EDITOR .env
 
@@ -79,8 +81,8 @@ touch. What that means depends on the agent:
 
 | Agent | Saying Y does this |
 |---|---|
-| Claude Code | The 28 safe tools stop asking permission. The 10 that change things still ask, every time |
-| Claude Desktop, Cursor, Codex | The 10 tools that change things are not even given to the agent. It cannot call them |
+| Claude Code | The 71 read and preview tools stop asking permission. The 32 that change things still ask, every time, and the agent may never run the break-glass CLI with `--apply` |
+| Claude Desktop, Cursor, Codex | The 32 tools that change things are not even given to the agent. It cannot call them |
 
 The difference is not a choice — Claude Code is the only one of the four that can
 be told "allow this tool, ask about that one". For the others the limit has to
@@ -171,42 +173,162 @@ decision a person makes in the Apple Ads website; this server will not do it.
 
 ## What the agent can do
 
-**38 tools: 19 that read, 9 preview/apply pairs, and undo.**
+**104 tools: 40 that read, 31 preview/apply pairs, undo, and settling a timed-out change.** Almost anything
+you would do by hand in the Apple Ads website -- except delete things.
 
 ### Can read (safe)
 
-Accounts, campaigns, ad groups, keywords, negative keywords, shared budgets.
-Performance reports by campaign, ad group, keyword and search term. Apple's
-keyword and budget suggestions. Everyone's recent changes to the account. Its own
-limits, its own change history, and a reconciliation of the two.
+The account (timezone, currency, your role), campaigns, ad groups (with their full
+targeting), keywords, negative keywords, ads, creatives, custom product pages and
+shared budgets. Performance by campaign, ad group, keyword, ad and search term,
+split by country, device, age or gender and by day. Impression share and search
+term popularity. Apple's keyword, phrase and category suggestions, and its budget
+and CPA recommendations. The ids the writes need: locations, apps, app
+eligibility, languages. Everyone's recent changes, field by field. Its own limits,
+its own change history, and a reconciliation of the two.
+
+Every list and report says how many rows exist and whether it showed them all.
+
+`list_campaigns`, `list_ad_groups`, `list_ads` and `list_creatives` say who each
+name says made it (`origin`, `owner`, `agent`, `base`, and `ledger_created` when
+this checkout created it) and filter on it: `origin` (`any` / `agent` / `cli` /
+`manual`), `agent_name`, `owner`, and `mine`. See
+[Naming what the agent creates](#naming-what-the-agent-creates).
 
 ### Can change (needs your yes)
 
-| What | Tools |
+Every change is a `preview_<name>` / `apply_<name>` pair.
+
+| What | `<name>` |
 |---|---|
-| A keyword's bid | `preview_keyword_bid` / `apply_keyword_bid` |
-| Many keyword bids at once | `preview_keyword_bids_bulk` / `apply_keyword_bids_bulk` |
-| Pause or enable a keyword | `preview_keyword_status` / `apply_keyword_status` |
-| Pause or enable an ad group | `preview_ad_group_status` / `apply_ad_group_status` |
-| An ad group's default bid | `preview_ad_group_default_bid` / `apply_ad_group_default_bid` |
-| Pause or enable a campaign | `preview_campaign_status` / `apply_campaign_status` |
-| A campaign's daily budget | `preview_campaign_daily_budget` / `apply_campaign_daily_budget` |
-| Add negative keywords | `preview_negative_keywords_add` / `apply_negative_keywords_add` |
-| Pause a negative keyword | `preview_negative_keyword_pause` / `apply_negative_keyword_pause` |
-| Undo one change | `revert_change` |
+| A keyword's bid, one or many | `keyword_bid`, `keyword_bids_bulk` |
+| Pause or enable a keyword, ad group, campaign or ad | `keyword_status`, `ad_group_status`, `campaign_status`, `ad_status` |
+| An ad group's default bid | `ad_group_default_bid` |
+| A campaign's daily budget | `campaign_daily_budget` |
+| Add keywords (**created paused**) | `add_keywords` |
+| Change a keyword's match type (adds a paused copy, pauses the old) | `keyword_match_type` |
+| Add negative keywords; pause or enable them | `negative_keywords_add`, `negative_keyword_pause`, `negative_keyword_status` |
+| Bid strategy and goal; CPA goal; campaign start and end | `ad_group_bid_strategy`, `campaign_bid_strategy`, `ad_group_cpa_goal`, `campaign_schedule` |
+| Targeting: Search Match, age and gender, devices, hours, locations, customer type, countries | `ad_group_search_match`, `ad_group_demographics`, `ad_group_devices`, `ad_group_daypart`, `ad_group_locations`, `ad_group_app_downloaders`, `campaign_countries` |
+| Create a campaign, ad group, creative or ad (**created paused**, **named with your prefix**) | `create_campaign`, `create_ad_group`, `create_creative`, `create_ad` |
+| Act on Apple's budget or CPA recommendation (normal limits apply) | `budget_recommendation`, `target_cpa_recommendation` |
+| Rename something the agent created (the prefix is kept), or dismiss a recommendation | `low_risk_change` |
+| Undo one change, or a whole batch | `revert_change` |
+| Settle a timed-out change: did it land? (reads Apple, writes only the ledger, undoes nothing) | `resolve_unknown_change` |
+
+**Created things start paused.** A new campaign, ad group, keyword or ad spends
+nothing until a separate, previewed enable -- and that enable is counted against
+the day's spend limit at its full budget. Negative keywords are the exception:
+they are created enabled, because a paused negative does nothing and a negative
+can only reduce traffic.
 
 ### Cannot do at all
 
-Creating or deleting campaigns, ad groups, ads or creatives. Deleting negative
-keywords (pause them instead — it has the same effect and can be undone).
-Changing shared budgets. Applying Apple's budget advice in one click.
+**Delete anything** -- campaigns, ad groups, ads, creatives, keywords, negative
+keywords. Pausing is the undo. Also: changing shared budgets, billing or account
+settings, location groups and Maps (brand) ads, uploading assets, and applying
+Apple's recommendations in one blind call.
 
 This is not a rule someone has to remember. **There is no general-purpose "call
 any endpoint" tool**, so anything without its own tool simply cannot be reached.
-A test pins the exact list of tools, so it cannot grow by accident.
+A test pins the exact list of tools, and another the list of API methods that
+must stay unreachable, so neither can grow by accident.
 
 If you genuinely need one of those, there is a command-line escape hatch further
-down — for a human to run, not an agent.
+down -- for a human to run. The agent is told to hand you the command, and it
+cannot run it itself.
+
+---
+
+## Naming what the agent creates
+
+A month after the agent created a campaign, nobody can tell it from one made by
+hand. So everything the agent creates is named after who made it:
+
+```
+<OWNER>-<agent>-<base name>
+AB-max-spring_promo_week_12          <- placeholder values
+```
+
+Put two keys in this checkout's `.env`:
+
+| Key | Format | Example |
+|---|---|---|
+| `APPLE_ADS_OWNER_INITIALS` | 2-4 uppercase letters | `AB` |
+| `APPLE_ADS_AGENT_NAME` | lowercase, 2-24 of `a-z 0-9 _`, starting with a letter, no `-`; `cli` and `manual` are reserved | `max` |
+
+Either can be left empty -- that part is simply skipped, never an error:
+
+| `.env` has | The agent asks for `spring_promo`; Apple gets |
+|---|---|
+| both | `AB-max-spring_promo` |
+| only the initials | `AB-spring_promo` |
+| only the agent name | `max-spring_promo` |
+| neither | `spring_promo`, exactly as given |
+
+- **A value that is set but malformed** (initials `a1`, an agent name with a
+  `-`) blocks every creation at the preview, and the message names the `.env`
+  key to fix.
+- **`.env` is the only source.** No tool takes an owner or agent argument, and
+  the process environment (a client's `env` block) is ignored -- the server warns
+  at startup if one disagrees with `.env`. A `config.env` beside it is read too;
+  a non-empty `.env` value wins, and an empty one leaves `config.env`'s in place.
+  **One identity per checkout**: a second agent needs its own checkout with its
+  own `.env`.
+- **The prefix goes first**, before any house naming style you use: the
+  house-style name is the base. The agent passes the base; the prefix is added
+  for it, never twice (`AB-max-AB-max-x` is refused, not kept).
+- **A name that reads as someone else's prefix is always refused** -- another
+  agent's (`CD-bot-...`), the escape hatch's (`AB-cli-...`), or one this
+  checkout's initials-only prefix would turn into another agent's -- **even
+  when no identity is configured**: taken as given, it would impersonate them.
+- **Invisible characters are refused**: control characters (tab, newline,
+  NUL), zero-width and bidi marks, the byte-order mark, and line or paragraph
+  separators.
+- **The preview shows the exact name** that will be sent (`entity_name`, `path`
+  and a `naming` block with the requested name, the final one, the prefix and
+  the length), and warns when it differs from what was asked.
+- **Too long is refused, never cut short.** Apple has no validate-only mode, so
+  a name it rejects would only be found out after you approved it. The cap is
+  **200 characters for the whole name, prefix included**, for campaigns, ad
+  groups, ads and creatives -- a conservative figure until Apple's current limit
+  is confirmed.
+- **A campaign name already used** in the account, or an ad group name already
+  used in its campaign, fails the preview (`name_is_free`) -- for a creation and
+  for a rename alike. So does a scope with more entities than the scan reads
+  ("could not verify the name is free"). A duplicate ad or creative name is a
+  warning.
+
+**What gets a prefix:** campaigns, ad groups, ads and creatives. Keywords and
+negative keywords have no name field (only their text), so nothing is added to
+them.
+
+**Renames:** the agent may rename only **its own** entities -- the name carries
+this checkout's prefix, or the change log shows this server created it. A
+hand-made entity, or another agent's, is refused, with no override.
+"Carries this checkout's prefix" means the whole prefix: with only the initials
+`AB` set, `AB-launch` is ours but `AB-bot-launch` (agent `bot`'s) and
+`AB-cli-launch` (a person's, through the escape hatch) are not. The same rule
+decides `mine=True` and the `reconcile_ledger` naming section. The prefix
+is kept (the agent changes only the base), and an entity created here whose
+prefix was removed in the website gets it back. Undoing a rename restores the
+old name exactly.
+
+**The escape hatch** names its creations and renames `<OWNER>-cli-<base>` when
+the initials are set (`AB-cli-launch`), and leaves the name as given when they
+are not: `cli` only separates a person from an agent under the same initials.
+It refuses a create or update path carrying `?` or `#` (`campaigns?`), which
+would otherwise slip past the stamp, and takes no abbreviated flags: `--appl`
+is not `--apply`.
+
+**Finding them:** the list tools filter by `origin` (`agent`, `cli` or `manual`,
+read from the name), `agent_name`, `owner`, or `mine=True` (this checkout's
+prefix). Each row also says `ledger_created` -- the name is a convention, the
+change log is the proof. When a prefix is configured, `reconcile_ledger` adds a
+`naming` section: `prefix_lost` (created here, the name no longer carries the
+prefix -- renamed in the website), `prefix_without_ledger` (carries the prefix
+but this change log has no record of creating it), and other prefixes counted.
+Nothing there is changed automatically. Existing entities are left as they are.
 
 ---
 
@@ -270,6 +392,14 @@ forgotten.
 | `max_budget_change_pct` | 25 |
 | `max_entities_per_call` | 25 |
 | `max_projected_delta_per_day` | 50.00 |
+| `max_cpa_goal` | 20.00 |
+| `max_cpa_goal_change_pct` | 50 |
+
+**Enabling something is the exception.** Re-enabling a paused campaign can spend
+its whole daily budget, which is over `max_projected_delta_per_day` on any real
+campaign -- so an enable (or anything else that widens delivery: pausing a
+negative keyword, switching Search Match on, loosening targeting, undoing a
+pause) skips that one line and is counted in full against the daily total below.
 
 ### 2. Limits per conversation
 
@@ -281,6 +411,19 @@ forgotten.
 **These are the ones that matter.** A per-change limit does nothing against a
 loop making 400 perfectly legal changes. These do. They reset only when the
 server restarts.
+
+And per day, shared by every agent session and the CLI on this machine, counted
+from the change log so a restart does not reset them. The day starts at your
+local midnight.
+
+| Limit | Default |
+|---|---|
+| `max_applies_per_day` | 40 |
+| `max_projected_delta_per_day_total` | 200.00 |
+
+A batch counts once; creating something counts three. Keep the daily total at
+least as big as your largest campaign budget, or that campaign can never be
+re-enabled from here (the server warns at startup).
 
 ### 3. Pin it to one campaign
 
@@ -359,8 +502,26 @@ It refuses if:
 - somebody else has changed that thing since — undoing would wipe out **their**
   change
 
-It cannot undo "add negative keywords", because that created things and there is
-no delete. Pause them instead.
+Undoing something that was **created** pauses it -- nothing is ever deleted. A
+batch (bulk bids, added keywords) can be undone item by item, or all at once by
+the batch id the apply returned. Undoing a pause or a budget cut puts spend back,
+so it counts against the limits like any enable.
+
+A change whose request timed out is recorded as `unknown`: it may have landed,
+so it counts against the limits as if it had. `resolve_unknown_change(entry_id=
+"...")` reads the thing back and records it as applied or failed, without
+changing anything at Apple. Use it to find out; use `revert_change` only when
+you want the change undone. "Applied" is recorded as soon as Apple shows the new
+value. "Failed" stops it counting, so it needs more: the change must be at
+least 5 minutes old (Apple's read can lag its write -- earlier, it says "too
+early to tell" and when to try again), and no later change in the log may have
+touched the same field (then the old value proves nothing, and it stays
+`unknown`).
+
+A targeting change whose own dimension landed while Apple's read-back shows
+another dimension different (normalised or dropped) is recorded as `partial`:
+it is live, it counts against the limits, and `revert_change` puts back only
+the dimension that was asked for.
 
 ### Finding out what else changed
 
@@ -403,9 +564,11 @@ For Cursor or Codex, point them at that file or paste it into their rules.
 # Does everything work? (7 checks, reads only)
 ./venv/bin/python test_platform_connection.py
 
-# Are the tools still what they should be? (no internet needed)
+# The whole test suite (no internet, no credentials used, nothing sent)
+./venv/bin/pip install -r requirements-dev.txt
+./venv/bin/pytest
+# ...or any one file as a plain script
 ./venv/bin/python tests/test_tool_surface.py
-./venv/bin/python tests/test_logdb.py
 
 # Performance
 ./venv/bin/python fetch_campaign_report.py --days 30 --csv
@@ -438,11 +601,14 @@ for campaign in campaigns:
 ## The escape hatch
 
 `apple_ads_cli.py` can call **any** Apple Ads endpoint. It exists so the agent's
-tool list can stay small: when you need something the server will not do, you do
-it yourself instead of widening what the agent can reach.
+tool list does not have to cover deletes, shared budgets and billing: when you
+need one of those, you do it yourself.
 
-**It is for a human to run.** Its only protection is a flag, which an agent could
-type as easily as you can.
+**It is for a human to run, and only a human can.** `--apply` needs an
+interactive terminal and the path typed back at a prompt -- an agent's shell has
+neither -- and `install.py` adds a Claude Code rule that denies the agent the
+command outright. The stop button stops it too, and every write it sends is
+recorded in the change log, so it counts against the daily limits.
 
 ```bash
 # Look at something
@@ -452,7 +618,7 @@ type as easily as you can.
 # Dry run: prints exactly what would be sent, sends nothing
 ./venv/bin/python apple_ads_cli.py campaigns/1234567890 -X PUT -d '{"status":"PAUSED"}'
 
-# Actually send it
+# Actually send it (asks you to type the path back)
 ./venv/bin/python apple_ads_cli.py campaigns/1234567890 -X PUT \
     -d '{"status":"PAUSED"}' --apply --confirm-live
 ```
@@ -460,11 +626,15 @@ type as easily as you can.
 | Flags | Means |
 |---|---|
 | *(none)* | Print what would be sent. Send nothing |
-| `--apply` | I meant to write |
+| `--apply` | I meant to write (then type the path to confirm) |
 | `--apply --confirm-live` | I meant to write to a campaign that is spending money today |
 
 **Nothing is sent without `--apply`.** The dry run is the thing you read before
 you mean it.
+
+A create (`POST campaigns`, `.../adgroups`, `ads`, `creatives`) or an update by
+id with a `"name"` in its body gets `<OWNER>-cli-<base>` when
+`APPLE_ADS_OWNER_INITIALS` is set, and the dry run prints the final name.
 
 ---
 
@@ -497,6 +667,8 @@ for months can never go stale.
 | `APPLE_ADS_AD_ACCOUNT_ID` | yes | **Discovered**, by `test_platform_connection.py` |
 | `APPLE_ADS_DEFAULT_CAMPAIGN_ID` | no | Saves typing a real id in commands |
 | `APPLE_ADS_ALLOWED_CAMPAIGN_IDS` | no | Pins changes to these campaigns |
+| `APPLE_ADS_OWNER_INITIALS` | no | Your initials, for naming what the agent creates (`AB`) |
+| `APPLE_ADS_AGENT_NAME` | no | The agent's name, for the same (`max`) |
 
 > `APPLE_ADS_AD_ACCOUNT_ID` is **not** your org id. Apple returns them as two
 > different fields. Do not read it off the website and do not guess —
@@ -585,6 +757,13 @@ Two things that follow:
 - **Campaign-level negative keywords cannot be listed.** They belong to no ad
   group, and the lookup demands one. Check the Apple Ads website if you need to
   be sure.
+- **Not yet exercised against the live account** (built for parity, checked
+  only against the SDK's models): impression share, search term popularity,
+  phrase and category suggestions, target CPA reads, geo and app search,
+  product pages, change details, the report `group_by` / `sort_by` /
+  pagination arguments, and every new write. An empty targeting `include`
+  list is written to mean "no restriction", which is unverified. Run their
+  previews and reads once before relying on them.
 - **Reports are read as raw JSON**, not through the library's models. The library
   expects a keyword status of `ACTIVE` while Apple returns `ENABLED`, and it
   raises rather than shrugging — so the whole report fails with the data sitting
@@ -602,9 +781,13 @@ Two things that follow:
 | `.claude/skills/apple-ads/SKILL.md` | How an agent should use it |
 | `guardrails.toml` | The limits. **Committed**, so a change is visible |
 | `apple_ads_cli.py` | The escape hatch. For humans |
+| `apple_ads_mcp/naming.py` | The `<OWNER>-<agent>-<base>` naming identity, its parser and its rules |
 | `test_platform_connection.py` | 7-step health check |
-| `tests/test_tool_surface.py` | Pins the tool list and the permission hints |
-| `tests/test_logdb.py` | 31 checks over the log database |
+| `apple_ads_mcp/changes/` | One class per kind of change, and the engine they all run through |
+| `tests/test_tool_surface.py` | Pins the tool list, the permission hints and the unreachable API methods |
+| `tests/kindkit.py` | A fake Apple account the change tests run against |
+| `tests/test_*.py` | The rest of the suite: the engine, every change kind, the daily cap, errors, retries, reads, the CLI |
+| `CLAUDE.md` | Guidance for an agent working on this repository |
 | `generate_client_secret.py` | Signs the credential, and counts down its 180 days |
 | `fetch_campaign_report.py` | Performance, as a table or CSV |
 | `fetch_ad_structure.py` | Campaign → ad group → keyword, as names |

@@ -49,7 +49,7 @@ VENV_PYTHON = REPO_ROOT / "venv" / "bin" / "python"
 WINDOWS_VENV_PYTHON = REPO_ROOT / "venv" / "Scripts" / "python.exe"
 SKILL_FILE = REPO_ROOT / ".claude" / "skills" / SERVER_NAME / "SKILL.md"
 
-#: The tools that cannot change anything: 19 reads and 9 previews. A preview
+#: The tools that cannot change anything: every read and every preview. A preview
 #: calls Apple and mints a token in memory; it writes nothing to the account.
 #: Hardcoded because this script must not import the server (that would need the
 #: dependencies, which is exactly what it may be running before). Kept honest by
@@ -84,9 +84,54 @@ SAFE_TOOLS = (
     "preview_campaign_daily_budget",
     "preview_negative_keywords_add",
     "preview_negative_keyword_pause",
+    "get_account",
+    "list_ads",
+    "get_ad",
+    "list_creatives",
+    "creative_rejection_reasons",
+    "list_product_pages",
+    "get_product_page",
+    "impression_share_report",
+    "search_term_popularity",
+    "phrase_suggestions",
+    "category_suggestions",
+    "target_cpa_recommendations",
+    "target_cpa_suggestion",
+    "search_geos",
+    "get_geos",
+    "list_location_groups",
+    "search_apps",
+    "app_eligibility",
+    "supported_languages",
+    "get_change_details",
+    "ad_report",
+    "preview_add_keywords",
+    "preview_keyword_match_type",
+    "preview_negative_keyword_status",
+    "preview_ad_group_bid_strategy",
+    "preview_ad_group_cpa_goal",
+    "preview_campaign_bid_strategy",
+    "preview_campaign_schedule",
+    "preview_ad_group_search_match",
+    "preview_ad_group_demographics",
+    "preview_ad_group_devices",
+    "preview_ad_group_daypart",
+    "preview_ad_group_locations",
+    "preview_ad_group_app_downloaders",
+    "preview_campaign_countries",
+    "preview_create_creative",
+    "preview_create_ad",
+    "preview_ad_status",
+    "preview_create_campaign",
+    "preview_create_ad_group",
+    "preview_budget_recommendation",
+    "preview_target_cpa_recommendation",
+    "preview_low_risk_change",
 )
 
-#: The tools that move real money. Never allowlisted, by any answer to anything.
+#: The tools that move real money -- plus resolve_unknown_change, which writes
+#: only the local ledger but decides what the caps count. Never allowlisted, by
+#: any answer to anything, and none is published in read-only mode.
 WRITE_TOOLS = (
     "apply_keyword_bid",
     "apply_keyword_bids_bulk",
@@ -98,9 +143,37 @@ WRITE_TOOLS = (
     "apply_negative_keywords_add",
     "apply_negative_keyword_pause",
     "revert_change",
+    "apply_add_keywords",
+    "apply_keyword_match_type",
+    "apply_negative_keyword_status",
+    "apply_ad_group_bid_strategy",
+    "apply_ad_group_cpa_goal",
+    "apply_campaign_bid_strategy",
+    "apply_campaign_schedule",
+    "apply_ad_group_search_match",
+    "apply_ad_group_demographics",
+    "apply_ad_group_devices",
+    "apply_ad_group_daypart",
+    "apply_ad_group_locations",
+    "apply_ad_group_app_downloaders",
+    "apply_campaign_countries",
+    "apply_create_creative",
+    "apply_create_ad",
+    "apply_ad_status",
+    "apply_create_campaign",
+    "apply_create_ad_group",
+    "apply_budget_recommendation",
+    "apply_target_cpa_recommendation",
+    "apply_low_risk_change",
+    "resolve_unknown_change",
 )
 
 READ_ONLY_ENV = "APPLE_ADS_READ_ONLY"
+
+#: The naming identity (apple_ads_mcp/naming.py). Read from .env ONLY -- never
+#: from a client's env block, so this installer never writes them into an MCP
+#: config. The installer only says where they go.
+NAMING_KEYS = ("APPLE_ADS_OWNER_INITIALS", "APPLE_ADS_AGENT_NAME")
 
 AGENTS = {
     "1": "claude-code",
@@ -280,12 +353,50 @@ def install_json_client(
     return notes
 
 
+#: Claude Code deny rule: the agent may never run the break-glass CLI with
+#: --apply. The CLI itself also refuses without a TTY and a typed confirmation;
+#: this stops the attempt before it starts. Added on every Claude Code install,
+#: whatever the read-only answer.
+CLI_DENY_RULES = ("Bash(*apple_ads_cli.py*--apply*)",)
+
+
+def install_claude_code_cli_deny(dry_run: bool) -> list[str]:
+    """Add CLI_DENY_RULES to permissions.deny in Claude Code's settings."""
+    path = claude_code_settings()
+    data = load_json(path)
+    permissions = data.get("permissions")
+    if permissions is None:
+        permissions = {}
+    if not isinstance(permissions, dict):
+        raise InstallError(f"{path}: 'permissions' is not an object; refusing to touch it.")
+    deny = permissions.get("deny")
+    if deny is None:
+        deny = []
+    if not isinstance(deny, list):
+        raise InstallError(f"{path}: 'permissions.deny' is not a list; refusing to touch it.")
+    added = [rule for rule in CLI_DENY_RULES if rule not in deny]
+    if not added:
+        return ["permissions: the break-glass CLI deny rule was already present."]
+    if dry_run:
+        return [f"permissions: WOULD deny {', '.join(added)} in {path}"]
+    deny.extend(added)
+    permissions["deny"] = deny
+    data["permissions"] = permissions
+    saved = backup(path)
+    write_json(path, data)
+    return [
+        f"permissions: denied {', '.join(added)} in {path}"
+        + (f"  (backup: {saved.name})" if saved else "  (new file)"),
+        "            the agent cannot run the break-glass CLI with --apply; a human can.",
+    ]
+
+
 def install_claude_code_permissions(dry_run: bool) -> list[str]:
-    """Pre-approve the 28 tools that cannot change anything.
+    """Pre-approve every tool that cannot change anything (SAFE_TOOLS).
 
     Claude Code is the ONLY one of the four with a per-tool allowlist, so it is
     the only one where "approve the safe tools, keep asking about the rest" is
-    something the client can be told. The ten write tools are never added here,
+    something the client can be told. The write tools are never added here,
     under any answer: not being on this list is what makes them stop and ask.
 
     A blanket `mcp__apple-ads` entry would approve the server including its
@@ -480,6 +591,7 @@ def install(agent: str, read_only: bool, dry_run: bool) -> list[str]:
         # express "ask me about writes", which is strictly more useful than not
         # publishing them, and leaves the preview/apply pair intact.
         notes += install_json_client(claude_code_config(), False, dry_run, "claude-code")
+        notes += install_claude_code_cli_deny(dry_run)
         if read_only:
             notes += install_claude_code_permissions(dry_run)
         else:
@@ -516,6 +628,13 @@ def next_steps(agent: str, read_only: bool) -> list[str]:
             f"To make this one writable later, remove the {READ_ONLY_ENV} entry from "
             f"its env block and restart the client."
         )
+    steps.append("")
+    steps.append("Optional -- name what the agent creates. In this checkout's .env, set")
+    steps.append(f"  {NAMING_KEYS[0]}=   2-4 uppercase initials, e.g. AB")
+    steps.append(f"  {NAMING_KEYS[1]}=       a lowercase slug, e.g. max")
+    steps.append("and every campaign, ad group, ad and creative the agent creates is named")
+    steps.append("AB-max-<name>. Leave them empty for plain names. They are read from .env")
+    steps.append("only (never from the client's env block), so one checkout is one identity.")
     if SKILL_FILE.exists():
         steps.append("")
         steps.append("The agent will drive this far better with the skill next to it:")

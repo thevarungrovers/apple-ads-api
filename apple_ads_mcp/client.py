@@ -25,7 +25,10 @@ invalidated server-side mid-session.
 
 from __future__ import annotations
 
+import json
+import re
 import threading
+import time
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, TypeVar
 
@@ -60,6 +63,8 @@ MAX_PAGE_SIZE = 1000
 _api = None
 _api_lock = threading.Lock()
 _ad_account_id: str | None = None
+#: The ad account's own record (timezone, currency), read once per process.
+_account: Any = None
 
 T = TypeVar("T")
 
@@ -79,6 +84,49 @@ def ad_account() -> str:
     if _ad_account_id is None:
         _ad_account_id = resolve_ad_account_id()
     return _ad_account_id
+
+
+def account() -> Any:
+    """The configured ad account's record, read ONCE per process, or None.
+
+    Its `timezone` decides what "today" means for every report window -- the
+    reports run in the account's zone (TimeRange's default ORTZ), so building
+    the window from the machine's date asked for the wrong day whenever the two
+    zones disagreed. Its `currency` is what every amount here is in.
+
+    A failed read is not cached and not fatal: callers fall back to the
+    machine's date and say so, rather than refusing to report.
+    """
+    global _account
+    if _account is None:
+        try:
+            response = call("ad_accounts_id_get", id=ad_account(), x_ap_context=context_header())
+            _account = unwrap(response, "ad account")
+        except Exception:  # noqa: BLE001 - a fallback, reported by the caller
+            return None
+    return _account
+
+
+def account_timezone() -> str | None:
+    return getattr(account(), "timezone", None) or None
+
+
+def account_currency() -> str | None:
+    return getattr(account(), "currency", None) or None
+
+
+def account_today() -> tuple[Any, str | None]:
+    """(today's date in the ad account's timezone, that timezone or None)."""
+    import datetime as dt
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    zone = account_timezone()
+    if zone:
+        try:
+            return dt.datetime.now(ZoneInfo(zone)).date(), zone
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    return dt.date.today(), None
 
 
 def get_api():
@@ -106,10 +154,84 @@ def _build():
 
 
 def reset_api() -> None:
-    """Drop the cached client so the next call rebuilds it (and re-authenticates)."""
+    """Drop the cached client so the next call rebuilds it (and re-authenticates).
+
+    The old client's TokenManager is CLOSED first. It runs a background
+    `threading.Timer` that refreshes the token ahead of expiry, and dropping the
+    client without closing it left that timer alive for the life of the process
+    -- one leaked refresher per 401/403 rebuild, each still fetching tokens.
+    """
     global _api
     with _api_lock:
-        _api = None
+        old, _api = _api, None
+    _close_token_provider(old)
+
+
+def _close_token_provider(api: Any) -> None:
+    """`api.api_client._access_token_provider.close()`, if that path exists.
+
+    The attribute path is the SDK's private layout (AuthenticatedApiClient
+    keeps the provider it was built with); apple_ads_cli.py reads the same
+    attribute to get a token. A provider with no close() -- a fixed token --
+    has nothing to stop.
+    """
+    provider = getattr(getattr(api, "api_client", None), "_access_token_provider", None)
+    close = getattr(provider, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:  # noqa: BLE001 - a failed close must not mask the retry
+            pass
+
+
+# --- retries ------------------------------------------------------------------
+
+#: Attempts for a READ, including the first. Writes are never retried.
+READ_ATTEMPTS = 3
+#: Seconds before the 2nd and 3rd attempt, unless Apple's Retry-After says more.
+BACKOFF = (1.0, 2.0)
+#: Never wait longer than this on one Retry-After, whatever Apple asks.
+MAX_RETRY_AFTER = 30.0
+_RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+# Replaced by tests, so a backoff costs no wall-clock time.
+_sleep = time.sleep
+
+_READ_SUFFIXES = ("_query_post", "_get", "_reports", "_query")
+_READ_PREFIXES = ("get_", "query_", "search_")
+
+
+def is_read(method_name: str) -> bool:
+    """True for a method that cannot change the account, so a retry is safe.
+
+    Writes are NEVER retried: a create is not idempotent (a retried negative
+    keyword add makes two), and a write that timed out may well have landed --
+    its open ledger intent is what reconcile_ledger looks for. Retrying it
+    would turn "maybe landed once" into "maybe landed twice".
+    """
+    name = method_name.removesuffix("_without_preload_content")
+    return name.endswith(_READ_SUFFIXES) or name.startswith(_READ_PREFIXES)
+
+
+def _retry_after(exc: Any) -> float | None:
+    headers = getattr(exc, "headers", None) or {}
+    try:
+        raw = headers.get("Retry-After") or headers.get("retry-after")
+    except AttributeError:
+        return None
+    try:
+        return min(float(raw), MAX_RETRY_AFTER) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _transient(exc: BaseException) -> bool:
+    """A 429/5xx, or a network timeout or reset -- worth one more try for a read."""
+    if isinstance(exc, ApiException):
+        return getattr(exc, "status", None) in _RETRYABLE_STATUSES
+    import urllib3
+
+    return isinstance(exc, (urllib3.exceptions.HTTPError, TimeoutError, ConnectionError))
 
 
 def call(method_name: str, /, **kwargs: Any) -> Any:
@@ -129,7 +251,7 @@ def call(method_name: str, /, **kwargs: Any) -> Any:
     and a log that hid it would understate what the account actually saw.
     """
     try:
-        return _invoke(method_name, kwargs)
+        return _invoke_with_retries(method_name, kwargs)
     except ApiException as exc:
         if exc.status in (401, 403):
             # Could be an expired/revoked token, could be the context header. One
@@ -141,11 +263,33 @@ def call(method_name: str, /, **kwargs: Any) -> Any:
                 raise ToolError(_describe(method_name, retry_exc)) from retry_exc
         raise ToolError(_describe(method_name, exc)) from exc
     except AuthError as exc:
-        raise ToolError(f"Apple rejected our credentials: {exc}") from exc
+        raise ToolError(f"AUTH: Apple rejected our credentials: {exc}") from exc
     except ToolError:
         raise
     except Exception as exc:
-        raise ToolError(f"{method_name} failed to reach Apple: {type(exc).__name__}: {exc}") from exc
+        from apple_ads_mcp.config import ConfigError
+
+        if isinstance(exc, ConfigError):
+            raise ToolError(f"CONFIG: {exc}") from exc
+        raise ToolError(
+            f"TRANSIENT: {method_name} failed to reach Apple: {type(exc).__name__}: {exc}"
+        ) from exc
+
+
+def _invoke_with_retries(method_name: str, kwargs: dict[str, Any]) -> Any:
+    """`_invoke`, retried with backoff on 429/5xx/timeouts -- for READS only."""
+    attempts = READ_ATTEMPTS if is_read(method_name) else 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return _invoke(method_name, kwargs)
+        except Exception as exc:  # noqa: BLE001 - re-raised unless retryable
+            if attempt >= attempts or not _transient(exc):
+                raise
+            delay = _retry_after(exc)
+            if delay is None:
+                delay = BACKOFF[min(attempt - 1, len(BACKOFF) - 1)]
+            _sleep(delay)
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def _invoke(method_name: str, kwargs: dict[str, Any]) -> Any:
@@ -164,14 +308,67 @@ def _invoke(method_name: str, kwargs: dict[str, Any]) -> Any:
 
 
 def _describe(method_name: str, exc: ApiException) -> str:
-    body = str(getattr(exc, "body", "") or "")[:600]
+    return describe_api_error(method_name, exc)
+
+
+#: HTTP status -> the prefix the agent sees. 401 is the credential; 403 is
+#: usually the role on this ad account (or the context header), not the token.
+_STATUS_PREFIX = {401: "AUTH", 403: "FORBIDDEN_ROLE", 404: "NOT_FOUND", 429: "RATE_LIMITED"}
+
+
+def classify_status(status: Any) -> str:
+    if isinstance(status, int):
+        if status in _STATUS_PREFIX:
+            return _STATUS_PREFIX[status]
+        if status >= 500:
+            return "TRANSIENT"
+        if 400 <= status < 500:
+            return "INVALID"
+    return "TRANSIENT"
+
+
+def apple_error_lines(body: Any) -> list[str]:
+    """`messageCode field: message` for each entry of Apple's error body.
+
+    Apple answers a rejected request with `{"error": {"errors": [{"messageCode",
+    "field", "message"}]}}`. The old message was the first 600 raw characters,
+    which buried the one line that says what to fix.
+    """
+    try:
+        payload = json.loads(body) if isinstance(body, (str, bytes)) else body
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(payload, dict):
+        return []
+    error = payload.get("error") or {}
+    errors = error.get("errors") if isinstance(error, dict) else None
+    lines = []
+    for item in errors or []:
+        if not isinstance(item, dict):
+            continue
+        code = item.get("messageCode") or ""
+        field = item.get("field") or ""
+        message = item.get("message") or ""
+        lines.append(" ".join(part for part in (code, f"{field}:" if field else "", message) if part))
+    return lines
+
+
+def describe_api_error(method_name: str, exc: ApiException) -> str:
+    status = getattr(exc, "status", None)
+    prefix = classify_status(status)
+    if any("NOT_FOUND" in line for line in apple_error_lines(getattr(exc, "body", None))):
+        prefix = "NOT_FOUND"
     hint = ""
-    if exc.status in (401, 403):
+    if status in (401, 403):
         hint = (
             " (a 401/403 on a call that carries X-AP-Context usually means the "
-            "header or the adAccountId is wrong, not that the token is bad)"
+            "header or the adAccountId is wrong, or this user's role on the ad "
+            "account cannot do this -- not that the token is bad)"
         )
-    return f"Apple returned HTTP {exc.status} for {method_name}{hint}: {exc.reason} {body}".strip()
+    lines = apple_error_lines(getattr(exc, "body", None))
+    detail = "; ".join(lines) if lines else str(getattr(exc, "body", "") or "")[:300]
+    reason = getattr(exc, "reason", "") or ""
+    return f"{prefix}: Apple returned HTTP {status} for {method_name}{hint}: {reason} {detail}".strip()
 
 
 def unwrap(response: Any, what: str) -> Any:
@@ -183,7 +380,7 @@ def unwrap(response: Any, what: str) -> Any:
     """
     error = getattr(response, "error", None)
     if error is not None:
-        raise ToolError(f"Apple rejected the {what} request: {error}")
+        raise ToolError(f"INVALID: Apple rejected the {what} request: {error}")
     return getattr(response, "result", None)
 
 
@@ -269,6 +466,11 @@ def landed(observed: str | None, intended: str) -> bool:
     return normalized_value(observed) == normalized_value(intended)
 
 
+#: The one spelling of money accepted: ASCII digits, optionally a point and
+#: one or two more digits.
+_PLAIN_DECIMAL = re.compile(r"[0-9]+(?:\.[0-9]{1,2})?")
+
+
 def parse_decimal(raw: str, field: str) -> Decimal:
     """Money arrives as a decimal STRING, never as cents-as-int.
 
@@ -278,6 +480,16 @@ def parse_decimal(raw: str, field: str) -> Decimal:
     text = str(raw).strip()
     if not text:
         raise ToolError(f"{field} is empty; give an amount like \"1.20\"")
+    if not _PLAIN_DECIMAL.fullmatch(text):
+        # Decimal() also takes "5E+1", "1_000", "+1", ".5" and non-ASCII digits,
+        # and str() of an exponent value is sent verbatim. A human approves
+        # the text shown in the prompt, so only one spelling is accepted.
+        raise ToolError(
+            f"{field}={raw!r} is not a plain decimal amount. Write money as digits "
+            f'with an optional point and up to 2 decimals, e.g. "1.20" -- no '
+            f"exponent, sign, separator or leading point, and never cents as an "
+            f"integer."
+        )
     try:
         value = Decimal(text)
     except InvalidOperation:
@@ -294,7 +506,12 @@ def parse_decimal(raw: str, field: str) -> Decimal:
 
 
 def to_money(amount: Decimal | str, currency: str | None) -> Money:
-    return Money(amount=str(amount), currency=currency)
+    """Money for a request, its amount ALWAYS a plain string ("50", never "5E+1")."""
+    try:
+        text = format(Decimal(str(amount)), "f")
+    except InvalidOperation:
+        text = str(amount)
+    return Money(amount=text, currency=currency)
 
 
 # --- queries -----------------------------------------------------------------
@@ -309,6 +526,46 @@ def query(page_size: int = 100, offset: int = 0, filters: list[QueryFilter] | No
             fetch_total_count=True,
         ),
     )
+
+
+def query_page(
+    method: str, filters: list[QueryFilter] | None = None, *, limit: int = 100, offset: int = 0
+) -> tuple[list[Any], int | None, int | None]:
+    """(rows, total, next_offset) for one page of a `*_query_post` list.
+
+    `next_offset` is None on the last page. It is computed from the RAW page, so
+    a caller that filters rows afterwards (deleted ones, say) still pages
+    correctly -- and `total` is Apple's count, deleted rows included.
+    """
+    response = call(
+        method,
+        x_ap_context=context_header(),
+        query_request=query(page_size=limit, offset=offset, filters=filters),
+    )
+    rows = unwrap(response, method) or []
+    total = getattr(getattr(response, "pagination", None), "total_count", None)
+    seen = offset + len(rows)
+    more = (total is not None and seen < total) or (total is None and len(rows) >= limit)
+    return rows, total, (seen if more and rows else None)
+
+
+def query_all(
+    method: str, filters: list[QueryFilter] | None = None, *, cap: int = 5000
+) -> tuple[list[Any], bool]:
+    """(every row up to `cap`, truncated) for an internal sweep.
+
+    The old sweeps -- a default bid's keyword count, the negative keyword
+    duplicate check -- read one page of 1000 and stopped, so the 1001st keyword
+    simply did not exist as far as the preview was concerned.
+    """
+    rows: list[Any] = []
+    offset: int | None = 0
+    while offset is not None and len(rows) < cap:
+        page, _total, offset = query_page(
+            method, filters, limit=min(MAX_PAGE_SIZE, cap - len(rows)), offset=offset
+        )
+        rows.extend(page)
+    return rows, offset is not None
 
 
 def eq_filter(field: str, value: Any) -> QueryFilter:
