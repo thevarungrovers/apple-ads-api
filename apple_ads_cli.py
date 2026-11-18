@@ -295,11 +295,14 @@ def request(method: str, path: str, body: dict | None, token: str) -> tuple[int,
         return response.status, response.data.decode("utf-8", "replace")
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    # allow_abbrev=False: otherwise `--appl` or `--a` would mean --apply, and the
+    # installer's deny rule (which matches the literal `--apply`) would not see it.
     parser = argparse.ArgumentParser(
         description="Call any Apple Ads Platform API endpoint. Writes need --apply.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
+        allow_abbrev=False,
     )
     parser.add_argument("path", help="path under /v1, e.g. campaigns/query")
     parser.add_argument("-X", "--method", default="GET", help="HTTP method (default: %(default)s)")
@@ -309,7 +312,11 @@ def main() -> int:
     parser.add_argument("--confirm-live", action="store_true",
                         help="required as well as --apply to write to a campaign that is "
                              "serving right now")
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
 
     label = f"apple_ads_cli {args.method.upper()} {args.path.strip('/')}"
     with logdb.record_tool_call(

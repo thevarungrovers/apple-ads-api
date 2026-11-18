@@ -291,6 +291,22 @@ def test_a_named_mutation_hiding_behind_a_query_or_fragment_is_refused() -> None
     assert sent == [] and ledger.entries() == []
 
 
+def test_an_abbreviated_apply_is_not_apply() -> None:
+    """argparse would read --appl or --a as --apply, slipping past the
+    installer's deny rule, which matches the literal `--apply`."""
+    import contextlib
+
+    parser = cli.build_parser()
+    assert parser.parse_args(["campaigns", "--apply"]).apply is True
+    for flag in ("--appl", "--a", "--app", "--confirm"):
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                parser.parse_args(["campaigns", flag])
+            except SystemExit:
+                continue
+        raise AssertionError(f"{flag} must not be accepted as an abbreviation")
+
+
 def test_the_installer_denies_the_cli_apply_to_the_agent() -> None:
     assert "Bash(*apple_ads_cli.py*--apply*)" in install.CLI_DENY_RULES
 
