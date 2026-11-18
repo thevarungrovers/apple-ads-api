@@ -569,6 +569,7 @@ def complete_change(
     observed_after: Any = None,
     failures: list[dict[str, Any]] | None = None,
     entity_id: Any = None,
+    projected_daily_spend_delta: str | None = None,
 ) -> None:
     """Record how it went. A plain UPDATE, never an upsert -- see the docstring.
 
@@ -578,7 +579,9 @@ def complete_change(
     """
     connect().execute(
         "UPDATE changes SET outcome=?, outcome_ts=?, outcome_detail=?, observed_after=?, "
-        "failures_json=?, entity_id=COALESCE(?, entity_id) WHERE entry_id=?",
+        "failures_json=?, entity_id=COALESCE(?, entity_id), "
+        "projected_daily_spend_delta=COALESCE(?, projected_daily_spend_delta) "
+        "WHERE entry_id=?",
         (
             outcome,
             _now(),
@@ -586,6 +589,7 @@ def complete_change(
             None if observed_after is None else str(observed_after),
             _dumps(failures or []),
             None if entity_id is None else str(entity_id),
+            projected_daily_spend_delta,
             entry_id,
         ),
     )

@@ -979,7 +979,7 @@ class NegativeKeywordStatusBulk(ChangeKind):
             raise ToolError("negative_keyword_ids is empty; there is nothing to change.")
         single = NegativeKeywordStatusKind()
         items, children, checks = [], [], []
-        bounded: set[Any] = set()
+        bounded: dict[Any, Decimal] = {}
         total = Decimal("0")
         for negative_id in ids:
             negative = client.get_negative_keyword(negative_id)
@@ -991,8 +991,9 @@ class NegativeKeywordStatusBulk(ChangeKind):
             path = entity_path(campaign, ad_group, negative.text, keyword_label="NegativeKeyword")
             projected = Decimal("0")
             if target == "PAUSED" and negative.campaign_id not in bounded:
-                bounded.add(negative.campaign_id)
+                bounded[negative.campaign_id] = Decimal("0")
                 projected, bound = bound_check(*single.enable_bound(ctx, negative.campaign_id))
+                bounded[negative.campaign_id] = projected
                 checks.extend(bound)
             total += projected
             checks += [
@@ -1003,6 +1004,7 @@ class NegativeKeywordStatusBulk(ChangeKind):
                 entity_type="negative_keyword", entity_id=negative_id, entity_name=negative.text,
                 path=path, field="status", before=before, after=target,
                 campaign_id=negative.campaign_id, projected=projected,
+                campaign_bound=str(bounded.get(negative.campaign_id, Decimal("0"))),
             ))
             children.append(child_preview(
                 tool="apply_negative_keyword_status", entity_type="negative_keyword",
@@ -1025,6 +1027,26 @@ class NegativeKeywordStatusBulk(ChangeKind):
 
     def current(self, ctx, item):
         return enum_value(client.get_negative_keyword(item["entity_id"]).status) or "unknown"
+
+    def landed_projections(self, items, outcomes):
+        """Each campaign's bound, once, on the first of its items that LANDED.
+
+        The preview puts the bound on the first item per campaign; if that one
+        fails and another in the same campaign lands, the traffic is still back,
+        so the bound moves to the item that landed.
+        """
+        if not any("campaign_bound" in item for item in items):
+            return super().landed_projections(items, outcomes)
+        counted: set[Any] = set()
+        recorded = []
+        for item, outcome in zip(items, outcomes):
+            value = Decimal("0")
+            campaign = item.get("campaign_id")
+            if outcome.landed and campaign not in counted:
+                counted.add(campaign)
+                value = max(Decimal(str(item.get("campaign_bound") or "0")), Decimal("0"))
+            recorded.append(value)
+        return recorded
 
     def request(self, ctx, items):
         return "negative_keywords_bulk_update_post", {

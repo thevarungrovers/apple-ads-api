@@ -110,10 +110,14 @@ def write_outcome(
     observed_after: Any = None,
     failures: list[dict[str, Any]] | None = None,
     entity_id: Any = None,
+    projected_daily_spend_delta: str | None = None,
 ) -> None:
     """Record how it went. `outcome` is one of applied/failed/partial/refused/unknown.
 
     `entity_id` fills in the id Apple assigned to something just created.
+    `projected_daily_spend_delta` re-attributes the row's projected spend once
+    the batch's outcomes are known (a per-campaign bound moving to the item
+    that landed); None keeps the intent's value.
     """
     logdb.complete_change(
         entry_id,
@@ -122,6 +126,7 @@ def write_outcome(
         observed_after=observed_after,
         failures=failures,
         entity_id=entity_id,
+        projected_daily_spend_delta=projected_daily_spend_delta,
     )
 
 

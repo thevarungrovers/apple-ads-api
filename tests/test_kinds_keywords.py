@@ -122,6 +122,36 @@ def test_negative_status_in_bulk_projects_each_campaign_once() -> None:
     assert undo.projected_daily_spend_delta == "0"
 
 
+def test_a_partial_negative_pause_still_counts_its_campaign_bound() -> None:
+    from apple_ads_mcp import ledger
+    from apple_ads_mcp.guardrails import DailyUsage
+
+    tools, apple, state = rig(max_projected_delta_per_day_total=Decimal("500"),
+                              max_projected_session_delta=Decimal("500"))
+    apple.negatives[NEGATIVE + 1] = apple.negatives[NEGATIVE].model_copy(
+        update={"id": NEGATIVE + 1, "text": "gratis"}
+    )
+    preview = tools["preview_negative_keyword_status"](
+        negative_keyword_ids=[NEGATIVE, NEGATIVE + 1], status="PAUSED"
+    )
+    real = apple._negative_keywords_bulk_update_post
+
+    def first_fails(negative_keyword_update_bulk_request, **kw):
+        response = real(negative_keyword_update_bulk_request=negative_keyword_update_bulk_request, **kw)
+        response.result[0].success, response.result[0].error = False, "INVALID"
+        return response
+
+    apple._negative_keywords_bulk_update_post = first_fails
+    result = tools["apply_negative_keyword_status"](preview_token=preview.preview_token)
+    assert (result.succeeded, result.failed) == (1, 1), result
+    # The second item landed, so its campaign's traffic is back: bounded once.
+    assert result.projected_daily_spend_delta == "90.00", result.projected_daily_spend_delta
+    assert state.counters.snapshot()["projected_session_delta"] == "90.00"
+    assert DailyUsage(state.limits).usage()[1] == Decimal("90.00")
+    landed = ledger.find_entry(result.entry_ids[1])
+    assert Decimal(landed["projected_daily_spend_delta"]) == Decimal("90.00"), landed
+
+
 def test_a_stale_negative_status_is_refused() -> None:
     tools, apple, _ = rig()
     preview = tools["preview_negative_keyword_status"](negative_keyword_ids=[NEGATIVE], status="PAUSED")

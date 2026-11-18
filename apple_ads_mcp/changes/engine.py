@@ -289,7 +289,9 @@ class Engine:
 
         entry_ids, batch_id = self.write_intents(tool, items, kind.cost)
         outcomes = self.send(ctx, kind, items, entry_ids)
-        landed_total = self.record_outcomes(items, entry_ids, outcomes)
+        landed_total = self.record_outcomes(
+            items, entry_ids, outcomes, kind.landed_projections(items, outcomes)
+        )
         if any(o.landed for o in outcomes):
             ctx.counters.record(landed_total, kind.cost)
         return self.result(ctx, kind, tool, items, entry_ids, batch_id, outcomes, landed_total)
@@ -422,9 +424,9 @@ class Engine:
         )
 
     @staticmethod
-    def record_outcomes(items, entry_ids, outcomes: list[Outcome]) -> Decimal:
+    def record_outcomes(items, entry_ids, outcomes: list[Outcome], recorded=None) -> Decimal:
         try:
-            return Engine._record_outcomes(items, entry_ids, outcomes)
+            return Engine._record_outcomes(items, entry_ids, outcomes, recorded)
         except sqlite3.Error as exc:
             landed = [i["entity_id"] for i, o in zip(items, outcomes) if o.landed]
             raise ToolError(
@@ -435,16 +437,30 @@ class Engine:
             ) from exc
 
     @staticmethod
-    def _record_outcomes(items, entry_ids, outcomes: list[Outcome]) -> Decimal:
+    def _record_outcomes(items, entry_ids, outcomes: list[Outcome], recorded=None) -> Decimal:
         landed_total = Decimal("0")
-        for item, entry_id, outcome in zip(items, entry_ids, outcomes):
-            if outcome.landed:
+        for index, (item, entry_id, outcome) in enumerate(zip(items, entry_ids, outcomes)):
+            projected = None
+            if recorded is not None:
+                # The kind's attribution (a per-campaign bound lands on the
+                # first item of that campaign that LANDED). Written onto the row
+                # when it differs, since the daily cap sums the rows.
+                projected = recorded[index]
+                if outcome.landed:
+                    landed_total += projected
+            elif outcome.landed:
                 # Positive deltas only, exactly as DailyUsage sums the rows and
                 # SessionCounters clamps: a landed cut refunds nothing, so the
                 # session and the day always agree on what a batch used.
                 landed_total += max(Decimal(str(item.get("projected") or "0")), Decimal("0"))
+            original = Decimal(str(item.get("projected") or "0"))
             ledger.write_outcome(
                 entry_id,
+                projected_daily_spend_delta=(
+                    str(projected)
+                    if projected is not None and outcome.landed and projected != max(original, Decimal("0"))
+                    else None
+                ),
                 outcome=ledger.APPLIED if outcome.landed else ledger.FAILED,
                 observed_after=outcome.observed,
                 entity_id=outcome.created_id,

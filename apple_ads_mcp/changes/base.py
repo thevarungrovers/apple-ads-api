@@ -207,6 +207,21 @@ class ChangeKind:
         response = call(method, _request_timeout=WRITE_TIMEOUT, **kwargs)
         return self.observe(ctx, response, items)
 
+    def landed_projections(
+        self, items: list[dict[str, Any]], outcomes: list[Outcome]
+    ) -> list[Decimal]:
+        """What each item's ledger row records as its projected spend, once the
+        outcomes are known: its own positive delta if it landed, else 0.
+
+        The daily cap sums these rows and the session counter their total, so
+        a partial batch counts exactly what landed. A kind whose bound belongs
+        to a GROUP of items (one per campaign) overrides this.
+        """
+        return [
+            max(Decimal(str(item.get("projected") or "0")), Decimal("0")) if o.landed else Decimal("0")
+            for item, o in zip(items, outcomes)
+        ]
+
     # -- revert ------------------------------------------------------------------
 
     def inverse(self, ctx, entry: dict[str, Any]) -> tuple["ChangeKind", dict[str, Any]]:
