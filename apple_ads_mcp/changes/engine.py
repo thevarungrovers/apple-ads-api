@@ -36,7 +36,12 @@ from pydantic import Field
 from apple_ads_mcp import ledger
 from apple_ads_mcp.changes.base import PREVIEW, ChangeKind, Outcome, Proposal
 from apple_ads_mcp.client import WRITE_TIMEOUT, normalized_value
-from apple_ads_mcp.guardrails import Check, check_count, check_projected_delta
+from apple_ads_mcp.guardrails import (
+    Check,
+    check_campaign_in_scope,
+    check_count,
+    check_projected_delta,
+)
 from apple_ads_mcp.previews import (
     ApplyResult,
     BulkApplyResult,
@@ -504,6 +509,13 @@ class Engine:
                 "results and revert the ones you want individually with "
                 "preview_keyword_bid."
             )
+        # SCOPE, again. A revert writes to the live account like any apply, and
+        # allowed_campaign_ids may have been narrowed since the original change:
+        # undoing it must not reach a campaign the server is no longer allowed
+        # to touch.
+        scope = check_campaign_in_scope(ctx.limits, entry.get("campaign_id"))
+        if not scope.passed:
+            raise ToolError(f"refusing to revert entry {entry_id}: {scope.detail}.")
         kind = self.kind_for_entry(entry)
         if kind.not_revertible:
             raise ToolError(kind.not_revertible)

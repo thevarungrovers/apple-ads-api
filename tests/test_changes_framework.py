@@ -247,5 +247,39 @@ def test_an_ad_group_negative_add_flags_an_existing_duplicate() -> None:
     assert any("1 of these already exist" in w for w in preview.warnings), preview.warnings
 
 
+def test_revert_rechecks_the_campaign_scope() -> None:
+    import dataclasses
+
+    tools, _apple, state = rig()
+    preview = tools["preview_keyword_status"](keyword_id=KEYWORD, status="PAUSED")
+    result = tools["apply_keyword_status"](preview_token=preview.preview_token)
+    state.limits = dataclasses.replace(state.limits, allowed_campaign_ids=frozenset({999}))
+    _raises(lambda: tools["revert_change"](entry_id=result.entry_id), "NOT in the pinned set")
+
+
+def test_a_partial_bulk_records_only_what_landed() -> None:
+    tools, apple, state = rig()
+    apple.keywords[KEYWORD + 1] = apple.keywords[KEYWORD].model_copy(update={"id": KEYWORD + 1})
+    apple.reports["apps_keyword_reports"].append(apple.report_row(KEYWORD + 1, spend="35.00", taps=35))
+    preview = tools["preview_keyword_bids_bulk"](
+        keyword_ids=[KEYWORD, KEYWORD + 1], new_bids=["1.20", "1.40"]
+    )
+    assert preview.total_projected_daily_spend_delta == "3.00", preview.total_projected_daily_spend_delta
+    real = apple._keywords_bulk_update_post
+
+    def half(keyword_update_bulk_request, **kw):
+        response = real(keyword_update_bulk_request=keyword_update_bulk_request, **kw)
+        response.result[1].success, response.result[1].error = False, "INVALID bid"
+        return response
+
+    apple._keywords_bulk_update_post = half
+    result = tools["apply_keyword_bids_bulk"](preview_token=preview.preview_token)
+    assert (result.succeeded, result.failed) == (1, 1), result
+    assert result.projected_daily_spend_delta == "1.00", result.projected_daily_spend_delta
+    assert state.counters.snapshot()["projected_session_delta"] == "1.00"
+    outcomes = [ledger.find_entry(e)["outcome"] for e in result.entry_ids]
+    assert outcomes == ["applied", "failed"], outcomes
+
+
 if __name__ == "__main__":
     raise SystemExit(run(dict(globals())))
