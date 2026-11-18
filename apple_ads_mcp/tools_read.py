@@ -1488,9 +1488,12 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             out.append(
                 BudgetRecommendationRow(
                     campaign_id=str(data.get("campaignId")) if data.get("campaignId") else None,
-                    current_daily_budget=format_money(getattr(row, "current_daily_budget", None)),
+                    # DailyCapRecommendation's fields are dailyBudget and
+                    # suggestedDailyBudgetAmount; the names read here before
+                    # do not exist on it, so both columns always printed "-".
+                    current_daily_budget=format_money(getattr(row, "daily_budget", None)),
                     recommended_daily_budget=format_money(
-                        getattr(row, "recommended_daily_budget", None)
+                        getattr(row, "suggested_daily_budget_amount", None)
                     ),
                     extra={k: str(v) for k, v in data.items()},
                 )
@@ -1499,8 +1502,8 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             returned=len(out),
             recommendations=out,
             note=(
-                "Suggestions only. To act on one, run preview_campaign_daily_budget "
-                "and have a human approve it."
+                "Suggestions only. To act on one, run preview_budget_recommendation "
+                "(the normal budget bounds apply) and have a human approve it."
             ),
         )
 

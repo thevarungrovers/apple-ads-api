@@ -17,6 +17,7 @@ def all_kinds() -> list:
         CampaignSchedule,
     )
     from apple_ads_mcp.changes.campaigns import CampaignDailyBudget, CampaignStatusKind
+    from apple_ads_mcp.changes.recommendations import BudgetRecommendation, TargetCpaRecommendation
     from apple_ads_mcp.changes.targeting import (
         AdGroupAppDownloaders,
         AdGroupDaypart,
@@ -72,4 +73,7 @@ def all_kinds() -> list:
         # 3e: creation
         CreateCampaign(),
         CreateAdGroup(),
+        # 3f: recommendations, through the typed kind each amounts to
+        BudgetRecommendation(),
+        TargetCpaRecommendation(),
     ]

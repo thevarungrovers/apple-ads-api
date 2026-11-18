@@ -124,6 +124,8 @@ SAFE_TOOLS = (
     "preview_ad_status",
     "preview_create_campaign",
     "preview_create_ad_group",
+    "preview_budget_recommendation",
+    "preview_target_cpa_recommendation",
 )
 
 #: The tools that move real money. Never allowlisted, by any answer to anything.
@@ -157,6 +159,8 @@ WRITE_TOOLS = (
     "apply_ad_status",
     "apply_create_campaign",
     "apply_create_ad_group",
+    "apply_budget_recommendation",
+    "apply_target_cpa_recommendation",
 )
 
 READ_ONLY_ENV = "APPLE_ADS_READ_ONLY"
