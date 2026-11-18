@@ -25,6 +25,7 @@ invalidated server-side mid-session.
 
 from __future__ import annotations
 
+import json
 import threading
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, TypeVar
@@ -141,11 +142,17 @@ def call(method_name: str, /, **kwargs: Any) -> Any:
                 raise ToolError(_describe(method_name, retry_exc)) from retry_exc
         raise ToolError(_describe(method_name, exc)) from exc
     except AuthError as exc:
-        raise ToolError(f"Apple rejected our credentials: {exc}") from exc
+        raise ToolError(f"AUTH: Apple rejected our credentials: {exc}") from exc
     except ToolError:
         raise
     except Exception as exc:
-        raise ToolError(f"{method_name} failed to reach Apple: {type(exc).__name__}: {exc}") from exc
+        from apple_ads_mcp.config import ConfigError
+
+        if isinstance(exc, ConfigError):
+            raise ToolError(f"CONFIG: {exc}") from exc
+        raise ToolError(
+            f"TRANSIENT: {method_name} failed to reach Apple: {type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def _invoke(method_name: str, kwargs: dict[str, Any]) -> Any:
@@ -164,14 +171,67 @@ def _invoke(method_name: str, kwargs: dict[str, Any]) -> Any:
 
 
 def _describe(method_name: str, exc: ApiException) -> str:
-    body = str(getattr(exc, "body", "") or "")[:600]
+    return describe_api_error(method_name, exc)
+
+
+#: HTTP status -> the prefix the agent sees. 401 is the credential; 403 is
+#: usually the role on this ad account (or the context header), not the token.
+_STATUS_PREFIX = {401: "AUTH", 403: "FORBIDDEN_ROLE", 404: "NOT_FOUND", 429: "RATE_LIMITED"}
+
+
+def classify_status(status: Any) -> str:
+    if isinstance(status, int):
+        if status in _STATUS_PREFIX:
+            return _STATUS_PREFIX[status]
+        if status >= 500:
+            return "TRANSIENT"
+        if 400 <= status < 500:
+            return "INVALID"
+    return "TRANSIENT"
+
+
+def apple_error_lines(body: Any) -> list[str]:
+    """`messageCode field: message` for each entry of Apple's error body.
+
+    Apple answers a rejected request with `{"error": {"errors": [{"messageCode",
+    "field", "message"}]}}`. The old message was the first 600 raw characters,
+    which buried the one line that says what to fix.
+    """
+    try:
+        payload = json.loads(body) if isinstance(body, (str, bytes)) else body
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(payload, dict):
+        return []
+    error = payload.get("error") or {}
+    errors = error.get("errors") if isinstance(error, dict) else None
+    lines = []
+    for item in errors or []:
+        if not isinstance(item, dict):
+            continue
+        code = item.get("messageCode") or ""
+        field = item.get("field") or ""
+        message = item.get("message") or ""
+        lines.append(" ".join(part for part in (code, f"{field}:" if field else "", message) if part))
+    return lines
+
+
+def describe_api_error(method_name: str, exc: ApiException) -> str:
+    status = getattr(exc, "status", None)
+    prefix = classify_status(status)
+    if any("NOT_FOUND" in line for line in apple_error_lines(getattr(exc, "body", None))):
+        prefix = "NOT_FOUND"
     hint = ""
-    if exc.status in (401, 403):
+    if status in (401, 403):
         hint = (
             " (a 401/403 on a call that carries X-AP-Context usually means the "
-            "header or the adAccountId is wrong, not that the token is bad)"
+            "header or the adAccountId is wrong, or this user's role on the ad "
+            "account cannot do this -- not that the token is bad)"
         )
-    return f"Apple returned HTTP {exc.status} for {method_name}{hint}: {exc.reason} {body}".strip()
+    lines = apple_error_lines(getattr(exc, "body", None))
+    detail = "; ".join(lines) if lines else str(getattr(exc, "body", "") or "")[:300]
+    reason = getattr(exc, "reason", "") or ""
+    return f"{prefix}: Apple returned HTTP {status} for {method_name}{hint}: {reason} {detail}".strip()
 
 
 def unwrap(response: Any, what: str) -> Any:
@@ -183,7 +243,7 @@ def unwrap(response: Any, what: str) -> Any:
     """
     error = getattr(response, "error", None)
     if error is not None:
-        raise ToolError(f"Apple rejected the {what} request: {error}")
+        raise ToolError(f"INVALID: Apple rejected the {what} request: {error}")
     return getattr(response, "result", None)
 
 

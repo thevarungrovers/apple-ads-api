@@ -25,6 +25,7 @@ annotations would have to be resolved against globals where they do not exist.
 
 import inspect
 import secrets
+import sqlite3
 import typing
 from decimal import Decimal
 from typing import Annotated, Any, Callable
@@ -261,21 +262,35 @@ class Engine:
             }
             if detail:
                 extra["detail"] = detail
-            ledger.write_intent(
-                entry_id,
-                tool=tool,
-                entity_type=item["entity_type"],
-                entity_id=item["entity_id"],
-                entity_name=item.get("entity_name"),
-                path=item.get("path") or "-",
-                field=item["field"],
-                before=item.get("before"),
-                after=item["after"],
-                campaign_id=item.get("campaign_id"),
-                projected_daily_spend_delta=str(item.get("projected") or "0"),
-                reverts_entry_id=reverts[index] if reverts else None,
-                extra=extra or None,
-            )
+            try:
+                ledger.write_intent(
+                    entry_id,
+                    tool=tool,
+                    entity_type=item["entity_type"],
+                    entity_id=item["entity_id"],
+                    entity_name=item.get("entity_name"),
+                    path=item.get("path") or "-",
+                    field=item["field"],
+                    before=item.get("before"),
+                    after=item["after"],
+                    campaign_id=item.get("campaign_id"),
+                    projected_daily_spend_delta=str(item.get("projected") or "0"),
+                    reverts_entry_id=reverts[index] if reverts else None,
+                    extra=extra or None,
+                )
+            except sqlite3.Error as exc:
+                for earlier in entry_ids[:-1]:
+                    try:
+                        ledger.write_outcome(
+                            earlier, outcome=ledger.REFUSED, detail="batch intent failed"
+                        )
+                    except sqlite3.Error:
+                        pass
+                raise ToolError(
+                    f"LEDGER: could not record the intent for this change "
+                    f"({type(exc).__name__}: {exc}), so NOTHING WAS SENT to Apple. "
+                    f"A write that cannot be recorded is refused. Check logs/apple-ads.db."
+                ) from exc
         return entry_ids, batch_id
 
     def send(self, ctx, kind: ChangeKind, items, entry_ids) -> list[Outcome]:
@@ -291,6 +306,19 @@ class Engine:
 
     @staticmethod
     def record_outcomes(items, entry_ids, outcomes: list[Outcome]) -> Decimal:
+        try:
+            return Engine._record_outcomes(items, entry_ids, outcomes)
+        except sqlite3.Error as exc:
+            landed = [i["entity_id"] for i, o in zip(items, outcomes) if o.landed]
+            raise ToolError(
+                f"LEDGER: the request WAS SENT and Apple answered (landed: "
+                f"{landed or 'none'}), but recording the outcome failed "
+                f"({type(exc).__name__}: {exc}). The ledger rows stay unfinished; "
+                f"run reconcile_ledger and check the Apple Ads UI before retrying."
+            ) from exc
+
+    @staticmethod
+    def _record_outcomes(items, entry_ids, outcomes: list[Outcome]) -> Decimal:
         landed_total = Decimal("0")
         for item, entry_id, outcome in zip(items, entry_ids, outcomes):
             if outcome.landed:

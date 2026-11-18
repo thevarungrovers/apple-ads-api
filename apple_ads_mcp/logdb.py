@@ -422,6 +422,21 @@ class InstrumentedServer:
 UNINSTRUMENTED: list[str] = []
 
 
+def _reaches_the_caller(exc: Exception) -> Exception:
+    """The exception to re-raise: a ToolError, so the agent sees why.
+
+    Only a ToolError's message survives the MCP SDK; anything else becomes a
+    bare "Error executing tool X". See apple_ads_mcp.errors for the prefixes.
+    The tool_calls row records the converted message.
+    """
+    from apple_ads_mcp.errors import to_tool_error
+
+    try:
+        return to_tool_error(exc)
+    except Exception:  # noqa: BLE001 - never lose the original to a mapper bug
+        return exc
+
+
 def instrument_tool(fn: Any) -> Any:
     """Wrap one tool function so each invocation writes a `tool_calls` row.
 
@@ -468,14 +483,26 @@ def instrument_tool(fn: Any) -> Any:
         @functools.wraps(fn)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
             with record_tool_call(fn.__name__, bind(args, kwargs)):
-                return await fn(*args, **kwargs)
+                try:
+                    return await fn(*args, **kwargs)
+                except Exception as exc:
+                    mapped = _reaches_the_caller(exc)
+                    if mapped is exc:
+                        raise
+                    raise mapped from exc
 
         return finish(async_wrapper)
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         with record_tool_call(fn.__name__, bind(args, kwargs)):
-            return fn(*args, **kwargs)
+            try:
+                return fn(*args, **kwargs)
+            except Exception as exc:
+                mapped = _reaches_the_caller(exc)
+                if mapped is exc:
+                    raise
+                raise mapped from exc
 
     return finish(wrapper)
 
