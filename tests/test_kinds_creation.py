@@ -156,5 +156,22 @@ def test_a_duplicate_campaign_or_ad_group_name_fails_name_is_free() -> None:
     assert not failed(other, "name_is_free"), other.guardrail_checks
 
 
+
+def test_a_capped_name_scan_fails_name_is_free_rather_than_passing() -> None:
+    """More campaigns than the sweep cap: a clash may sit past it, so the name
+    is not known to be free."""
+    from apple_ads_mcp import client
+
+    tools, apple, _ = rig()
+    real = client.query_all
+    client.query_all = lambda method, filters=None, **kw: (real(method, filters, **kw)[0], True)
+    try:
+        preview = tools["preview_create_campaign"](**_campaign_args())
+    finally:
+        client.query_all = real
+    assert preview.blocked and failed(preview, "name_is_free"), preview.guardrail_checks
+    assert any("could not verify the name is free" in line for line in preview.guardrail_checks), \
+        preview.guardrail_checks
+
 if __name__ == "__main__":
     raise SystemExit(run(dict(globals())))

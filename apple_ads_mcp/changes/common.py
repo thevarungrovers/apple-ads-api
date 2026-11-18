@@ -450,36 +450,48 @@ _NAME_SCOPES = {
 }
 
 
-def name_taken(entity_type: str, final: str, parent_id: Any = None) -> tuple[bool | None, str]:
+def name_taken(
+    entity_type: str, final: str, parent_id: Any = None, exclude_id: Any = None,
+) -> tuple[bool | None, str]:
     """(taken, where) for ``final`` among live entities of that type in its scope.
 
     A campaign is compared within the ad account, an ad group within its
     campaign, an ad within its ad group, a creative within the account; deleted
     rows are ignored, and case is ignored too (two names that differ only in
-    case read as one in a report). ``taken`` is None when the read failed.
+    case read as one in a report). ``exclude_id`` is the entity being renamed,
+    which may keep its own name in another case. ``taken`` is None when the
+    read failed or stopped at the sweep cap: a clash may sit past it.
     """
     method, parent_field = _NAME_SCOPES[entity_type]
     filters = [client.eq_filter(parent_field, parent_id)] if parent_field and parent_id else None
     scope = f"{parent_field[:-2].replace('adGroup', 'ad group')} {parent_id}" if filters else "the ad account"
     try:
-        rows, _truncated = client.query_all(method, filters)
+        rows, truncated = client.query_all(method, filters)
     except ToolError as exc:
         return None, f"could not read existing names in {scope}: {str(exc)[:160]}"
     wanted = final.casefold()
     clash = [r for r in rows if not getattr(r, "deleted", False)
+             and (exclude_id is None or str(getattr(r, "id", "")) != str(exclude_id))
              and str(getattr(r, "name", "") or "").casefold() == wanted]
     if clash:
         return True, f"{entity_type.replace('_', ' ')} {clash[0].id} in {scope} is already named {clash[0].name!r}"
+    if truncated:
+        return None, (
+            f"could not verify the name is free: {scope} has more "
+            f"{entity_type.replace('_', ' ')}s than the scan reads ({len(rows)}), and none "
+            f"of those is named {final!r}"
+        )
     return False, f"no other {entity_type.replace('_', ' ')} in {scope} is named {final!r}"
 
 
-def name_is_free(entity_type: str, final: str, parent_id: Any = None):
+def name_is_free(entity_type: str, final: str, parent_id: Any = None, exclude_id: Any = None):
     """A FAIL `name_is_free` check for a campaign or ad group whose final name
-    is already in use: Apple models no uniqueness error and has no validate-only
-    mode, and two identically named campaigns make every report unreadable."""
+    is already in use (or cannot be shown not to be): Apple models no
+    uniqueness error and has no validate-only mode, and two identically named
+    campaigns make every report unreadable."""
     from apple_ads_mcp.guardrails import Check
 
-    taken, detail = name_taken(entity_type, final, parent_id)
+    taken, detail = name_taken(entity_type, final, parent_id, exclude_id)
     return Check("name_is_free", taken is False, detail)
 
 

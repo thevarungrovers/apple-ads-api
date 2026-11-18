@@ -98,6 +98,14 @@ def test_empty_and_control_characters_are_refused() -> None:
     _refused(lambda: stamp(BOTH, "AB-max-", entity_type="campaign"), "only the prefix")
 
 
+def test_invisible_and_format_characters_are_refused() -> None:
+    for char in ("\u200b", "\u200e", "\u2028", "\u2029", "\ufeff", "\u0085", "\u202e"):
+        for identity, _ in COMBOS.values():
+            _refused(lambda identity=identity, char=char: stamp(
+                identity, f"spring{char}promo", entity_type="campaign"), "invisible")
+    assert stamp(BOTH, "printemps \u00e9t\u00e9 \u2014 promo", entity_type="ad").final.endswith("promo")
+
+
 def test_the_length_cap_counts_the_prefix_and_never_truncates() -> None:
     limit = naming.NAME_LIMITS["campaign"]
     assert limit == 200

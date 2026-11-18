@@ -183,6 +183,29 @@ def test_renames_for_each_identity() -> None:
             "already called")
 
 
+def test_a_rename_onto_a_name_in_use_fails_name_is_free() -> None:
+    from kindkit import failed
+
+    tools, apple, _ = rig()
+    _name(apple.campaigns, CAMPAIGN, "AB-max-Old")
+    apple.campaigns[CAMPAIGN + 1] = apple.campaigns[CAMPAIGN].model_copy(
+        update={"id": CAMPAIGN + 1, "name": "AB-max-Taken"})
+    clash = tools["preview_low_risk_change"](
+        entity_type="campaign", entity_id=str(CAMPAIGN), field="name", value="taken")
+    assert clash.blocked and failed(clash, "name_is_free"), clash.guardrail_checks
+    # A case-only change of its own name is not a clash with itself.
+    case = tools["preview_low_risk_change"](
+        entity_type="campaign", entity_id=str(CAMPAIGN), field="name", value="OLD")
+    assert not failed(case, "name_is_free"), case.guardrail_checks
+    _name(apple.ad_groups, AD_GROUP, "AB-max-Group")
+    group = apple.ad_groups[AD_GROUP]
+    apple.ad_groups[AD_GROUP + 1] = group.model_copy(update={"id": AD_GROUP + 1, "name": "AB-max-Other"})
+    clash = tools["preview_low_risk_change"](
+        entity_type="ad_group", entity_id=str(AD_GROUP), field="name", value="Other")
+    assert clash.blocked and failed(clash, "name_is_free"), clash.guardrail_checks
+    assert apple.writes() == []
+
+
 def test_a_dismissal_has_no_inverse() -> None:
     tools, apple, _ = rig()
     apple.extra["query_daily_budget_recommendations"] = lambda **_: SimpleNamespace(error=None, result=[

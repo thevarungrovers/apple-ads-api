@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -74,7 +75,15 @@ NAME_LIMITS: dict[str, int] = {
 #: temporary `.env` -- the real one holds real values and is never read by tests.
 ENV_FILES: list[Path] = [REPO_ROOT / "config.env", REPO_ROOT / ".env"]
 
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+#: Control (Cc), format (Cf: zero-width space, bidi marks, BOM...), line and
+#: paragraph separators (Zl, Zp). None shows up on screen, so a name carrying
+#: one is not the name a human read and approved.
+_INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+
+
+def invisible_character(text: str) -> str | None:
+    """The first control, format or separator character in ``text``, if any."""
+    return next((c for c in text if unicodedata.category(c) in _INVISIBLE_CATEGORIES), None)
 
 
 class NameRefused(ValueError):
@@ -337,9 +346,14 @@ def stamp(identity: Identity, requested: str | None, *, entity_type: str) -> Sta
                 f"{inner.owner}-{inner.agent}-, which reads as another prefix. Pass the base "
                 f"name only; if the base itself starts like that, reorder it."
             )
-    if _CONTROL.search(base):
-        raise NameRefused("INVALID_REQUEST: the name contains a control character (tab, newline, NUL...)")
     final = prefix + base
+    bad = invisible_character(final)
+    if bad is not None:
+        raise NameRefused(
+            f"INVALID_REQUEST: the name contains a control character or other invisible "
+            f"character (U+{ord(bad):04X} {unicodedata.name(bad, 'unnamed')}); tabs, newlines, NUL, "
+            f"zero-width and bidi marks and line separators are refused. Remove it."
+        )
     claimed = parse(final)
     if claimed is not None and (claimed.owner, claimed.agent) != (identity.owner, identity.agent):
         # Only the initials are set and the base begins `max-...`: the result

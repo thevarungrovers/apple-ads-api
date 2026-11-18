@@ -35,6 +35,7 @@ from pydantic import Field
 
 from apple_ads_mcp import client
 from apple_ads_mcp.changes.base import APPLY, ChangeKind, Outcome, Proposal, item as make_item
+from apple_ads_mcp.changes.common import name_is_free
 from apple_ads_mcp.client import context_header, unwrap
 from apple_ads_mcp.guardrails import check_campaign_in_scope
 
@@ -144,6 +145,13 @@ class LowRiskChange(ChangeKind):
         campaign_id = entity.id if entity_type == "campaign" else getattr(entity, "campaign_id", None)
         checks = [] if entity_type == "creative" else [check_campaign_in_scope(ctx.limits, campaign_id)]
         checks += stamped.checks()
+        if entity_type in ("campaign", "ad_group"):
+            # The same uniqueness a creation answers to: an ad group's name
+            # within its campaign, a campaign's within the account.
+            checks.append(name_is_free(
+                entity_type, new_name, None if entity_type == "campaign" else campaign_id,
+                exclude_id=entity_id,
+            ))
         path = f"{entity_type.replace('_', ' ').title().replace(' ', '')} {entity.name!r}"
         return Proposal(
             items=[make_item(
