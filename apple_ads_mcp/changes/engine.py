@@ -292,7 +292,7 @@ class Engine:
         landed_total = self.record_outcomes(
             items, entry_ids, outcomes, kind.landed_projections(items, outcomes)
         )
-        if any(o.landed for o in outcomes):
+        if any(o.counted for o in outcomes):
             ctx.counters.record(landed_total, kind.cost)
         return self.result(ctx, kind, tool, items, entry_ids, batch_id, outcomes, landed_total)
 
@@ -446,9 +446,9 @@ class Engine:
                 # first item of that campaign that LANDED). Written onto the row
                 # when it differs, since the daily cap sums the rows.
                 projected = recorded[index]
-                if outcome.landed:
+                if outcome.counted:
                     landed_total += projected
-            elif outcome.landed:
+            elif outcome.counted:
                 # Positive deltas only, exactly as DailyUsage sums the rows and
                 # SessionCounters clamps: a landed cut refunds nothing, so the
                 # session and the day always agree on what a batch used.
@@ -458,12 +458,14 @@ class Engine:
                 entry_id,
                 projected_daily_spend_delta=(
                     str(projected)
-                    if projected is not None and outcome.landed and projected != max(original, Decimal("0"))
+                    if projected is not None and outcome.counted and projected != max(original, Decimal("0"))
                     else None
                 ),
                 outcome=(
                     (ledger.PARTIAL if outcome.partial else ledger.APPLIED)
                     if outcome.landed
+                    else ledger.UNKNOWN
+                    if outcome.unknown
                     else ledger.FAILED
                 ),
                 observed_after=outcome.observed,
@@ -489,6 +491,9 @@ class Engine:
                     lines.append(f"{label}: {item.get('before')} -> {outcome.observed}{suffix}")
                     if outcome.partial and outcome.error:
                         failures.append(f"{label}: {outcome.error}")
+                elif outcome.unknown:
+                    failures.append(f"{label}: {outcome.error or 'OUTCOME UNKNOWN'}")
+                    lines.append(f"{label}: OUTCOME UNKNOWN -- may have landed")
                 elif outcome.error:
                     failures.append(f"{label}: {outcome.error}")
                     lines.append(f"{label}: FAILED -- {outcome.error}")
@@ -501,7 +506,8 @@ class Engine:
                     )
                     lines.append(f"{label}: NOT APPLIED -- still {outcome.observed}")
             succeeded = sum(1 for o in outcomes if o.landed)
-            failed = len(items) - succeeded
+            unknown = sum(1 for o in outcomes if o.unknown)
+            failed = len(items) - succeeded - unknown
             undo_id = batch_id or entry_ids[0]
             return BulkApplyResult(
                 applied=succeeded > 0,
@@ -516,7 +522,16 @@ class Engine:
                 session=session,
                 daily=daily,
                 note=(
-                    f"{succeeded} applied, {failed} failed, one ledger entry each. "
+                    f"{succeeded} applied, {failed} failed"
+                    + (f", {unknown} with an UNKNOWN outcome" if unknown else "")
+                    + ", one ledger entry each. "
+                    + (
+                        "An unknown item may have landed and is counted against the caps "
+                        "as if it had: re-read it (get_*) or run reconcile_ledger "
+                        "before retrying. "
+                        if unknown
+                        else ""
+                    )
                     + (
                         "Some items did NOT apply -- read the failures list before "
                         "assuming the batch landed. "

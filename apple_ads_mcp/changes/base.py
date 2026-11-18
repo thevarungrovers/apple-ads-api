@@ -109,6 +109,16 @@ class Outcome:
     #: change is live and spending, so it counts against the caps and stays
     #: revertible. ``landed`` is True whenever this is.
     partial: bool = False
+    #: The request for this item left the process and no answer came back (a
+    #: TRANSIENT error part-way through a multi-request change): it may have
+    #: landed. Recorded UNKNOWN and counted against the caps as if it had, the
+    #: same as the engine does for a whole request. ``landed`` stays False.
+    unknown: bool = False
+
+    @property
+    def counted(self) -> bool:
+        """Charged against the session and daily caps: landed, or may have."""
+        return self.landed or self.unknown
 
 
 @dataclass
@@ -219,14 +229,15 @@ class ChangeKind:
         self, items: list[dict[str, Any]], outcomes: list[Outcome]
     ) -> list[Decimal]:
         """What each item's ledger row records as its projected spend, once the
-        outcomes are known: its own positive delta if it landed, else 0.
+        outcomes are known: its own positive delta if it landed (or may have:
+        an UNKNOWN item is counted as if it had), else 0.
 
         The daily cap sums these rows and the session counter their total, so
         a partial batch counts exactly what landed. A kind whose bound belongs
         to a GROUP of items (one per campaign) overrides this.
         """
         return [
-            max(Decimal(str(item.get("projected") or "0")), Decimal("0")) if o.landed else Decimal("0")
+            max(Decimal(str(item.get("projected") or "0")), Decimal("0")) if o.counted else Decimal("0")
             for item, o in zip(items, outcomes)
         ]
 

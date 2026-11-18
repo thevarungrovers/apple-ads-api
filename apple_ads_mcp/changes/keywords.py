@@ -967,7 +967,18 @@ class KeywordMatchTypeKind(ChangeKind):
             method, kwargs = status.request(ctx, [pause])
             paused = status.observe(ctx, call(method, _request_timeout=WRITE_TIMEOUT, **kwargs), [pause])[0]
         except ToolError as exc:
-            paused = Outcome(False, None, error=f"the new keyword was created but the old was not paused: {exc}")
+            from apple_ads_mcp.changes.engine import Engine
+
+            if Engine.may_have_landed(exc):
+                # A timeout or 5xx: the pause may have reached Apple and landed.
+                # UNKNOWN, as the engine records a whole request that does this.
+                paused = Outcome(False, None, unknown=True, error=(
+                    f"OUTCOME UNKNOWN: the new keyword was created, but the pause of "
+                    f"the old one got no answer ({exc}), so it may have landed. Check "
+                    f"the old keyword with get_keyword before retrying."
+                ))
+            else:
+                paused = Outcome(False, None, error=f"the new keyword was created but the old was not paused: {exc}")
         return [created, paused]
 
 

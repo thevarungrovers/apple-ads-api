@@ -96,6 +96,27 @@ def test_a_match_type_change_adds_a_paused_copy_and_pauses_the_old() -> None:
     assert apple.keywords[new_id].status.value == "PAUSED"
 
 
+def test_a_match_type_pause_that_times_out_is_unknown_not_failed() -> None:
+    """The copy was created, then the pause of the old keyword timed out: it may
+    have landed, so its row is UNKNOWN and counted -- never FAILED."""
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    from apple_ads_mcp.guardrails import DailyUsage
+
+    tools, apple, state = rig(max_projected_session_delta=Decimal("500"),
+                              max_projected_delta_per_day_total=Decimal("500"))
+    preview = tools["preview_keyword_match_type"](keyword_id=KEYWORD, new_match_type="BROAD")
+    apple.fail["keywords_id_put"] = ToolError(
+        "TRANSIENT: keywords_id_put failed to reach Apple: TimeoutError: read timed out")
+    result = tools["apply_keyword_match_type"](preview_token=preview.preview_token)
+    create_row, pause_row = (ledger.find_entry(e) for e in result.entry_ids)
+    assert create_row["outcome"] == ledger.APPLIED, create_row
+    assert pause_row["outcome"] == ledger.UNKNOWN, pause_row
+    assert any("UNKNOWN" in f.upper() for f in result.failures), result.failures
+    assert state.counters.snapshot()["applies_this_session"] == 1
+    assert DailyUsage(state.limits).usage()[0] == 1
+
+
 def test_a_match_type_change_to_the_same_type_is_refused() -> None:
     tools, _apple, _ = rig()
     _raises(lambda: tools["preview_keyword_match_type"](keyword_id=KEYWORD, new_match_type="EXACT"),
