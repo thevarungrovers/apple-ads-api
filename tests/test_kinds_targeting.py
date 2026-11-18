@@ -13,7 +13,7 @@ from decimal import Decimal
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from kindkit import AD_GROUP, CAMPAIGN, rig, run  # noqa: E402
+from kindkit import AD_GROUP, APP, CAMPAIGN, rig, run  # noqa: E402
 
 import apple_ads_platform as sdk  # noqa: E402
 
@@ -101,6 +101,79 @@ def test_adding_a_country_widens_and_says_what_it_implies() -> None:
     result = tools["apply_campaign_countries"](preview_token=preview.preview_token)
     assert result.applied
     assert sorted(apple.campaigns[CAMPAIGN].targeting.country_or_region.include) == ["FR", "US"]
+
+
+def _rich_targeting(apple) -> None:
+    group = apple.ad_groups[AD_GROUP]
+    apple.ad_groups[AD_GROUP] = group.model_copy(update={"targeting": sdk.AdGroupTargeting.model_validate({
+        "deviceClass": {"include": ["IPHONE", "IPAD"]},
+        "daypart": {"include": ["1", "2", "3"]},
+        "country": {"include": ["US"]},
+        "appDownloader": {"exclude": [APP]},
+    })})
+
+
+def _wholesale(apple, drop: str | None = None) -> None:
+    """A PUT that REPLACES the nested targeting object instead of merging it.
+
+    ``drop`` names a dimension Apple then leaves out of what it echoes back.
+    """
+    def put(id, ad_group_update, **_):
+        group = apple.ad_groups[int(id)]
+        data = group.model_dump(by_alias=True, exclude_none=True)
+        changes = ad_group_update.model_dump(by_alias=True, exclude_none=True)
+        data.update(changes)
+        if drop:
+            data.get("targeting", {}).pop(drop, None)
+        apple.ad_groups[int(id)] = type(group).model_validate(data)
+        return type("R", (), {"result": apple.ad_groups[int(id)].model_copy(deep=True), "error": None})()
+
+    apple._adgroups_id_put = put
+
+
+def test_a_targeting_write_echoes_every_other_dimension() -> None:
+    tools, apple, _ = rig(**ROOMY)
+    _rich_targeting(apple)
+    preview = tools["preview_ad_group_demographics"](ad_group_id=AD_GROUP, min_age=30)
+    _wholesale(apple)
+    result = tools["apply_ad_group_demographics"](preview_token=preview.preview_token)
+    assert result.applied, result.failures
+    targeting = apple.ad_groups[AD_GROUP].targeting
+    assert targeting.min_age.include == ["30"]
+    assert sorted(targeting.device_class.include) == ["IPAD", "IPHONE"]
+    assert targeting.daypart.include == ["1", "2", "3"]
+    assert targeting.country.include == ["US"]
+    assert targeting.app_downloader.exclude == [APP]
+
+
+def test_a_targeting_write_that_drops_another_dimension_is_not_landed() -> None:
+    tools, apple, _ = rig(**ROOMY)
+    _rich_targeting(apple)
+    preview = tools["preview_ad_group_demographics"](ad_group_id=AD_GROUP, min_age=30)
+    _wholesale(apple, drop="daypart")
+    result = tools["apply_ad_group_demographics"](preview_token=preview.preview_token)
+    assert not result.applied
+    assert any("daypart" in f for f in result.failures), result.failures
+
+
+def test_a_targeting_apply_refuses_when_another_dimension_moved() -> None:
+    tools, apple, _ = rig(**ROOMY)
+    _rich_targeting(apple)
+    preview = tools["preview_ad_group_demographics"](ad_group_id=AD_GROUP, min_age=30)
+    group = apple.ad_groups[AD_GROUP]
+    apple.ad_groups[AD_GROUP] = group.model_copy(update={"targeting": group.targeting.model_copy(
+        update={"daypart": sdk.TargetingData(include=["5"])})})
+    _raises(lambda: tools["apply_ad_group_demographics"](preview_token=preview.preview_token),
+            "Something changed it in between")
+    assert apple.writes() == []
+
+
+def test_a_campaign_country_write_echoes_the_supply_dimensions() -> None:
+    tools, apple, _ = rig(**ROOMY)
+    preview = tools["preview_campaign_countries"](campaign_id=CAMPAIGN, countries=["US", "CA"])
+    tools["apply_campaign_countries"](preview_token=preview.preview_token)
+    sent = [kw for m, kw in apple.calls if m == "campaigns_id_put"][-1]["campaign_update"].targeting
+    assert sent.supply_placement.include == ["APPSTORE_SEARCH_RESULTS"], sent
 
 
 def test_widening_rules() -> None:

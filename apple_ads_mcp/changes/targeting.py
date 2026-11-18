@@ -6,6 +6,11 @@ Every targeting dimension in the Platform API is `{include: [...], exclude:
 dimensions it owns, reads them, writes them, and the before/after in the ledger
 is the canonical JSON of exactly those dimensions.
 
+THE WRITE CARRIES THE WHOLE TARGETING OBJECT. `targeting` is nested and Apple's
+PUT merges at the top level only, so every other dimension is read at preview
+time and echoed back unchanged; staleness covers the whole object, and the
+read-back fails the write if any other dimension moved.
+
 THE PROJECTION is the honest one for targeting: WIDENING (a dimension
 unrestricted, an include list grown, an exclude list shrunk, an age bound
 loosened, Search Match switched on) can let the campaign spend up to its unused
@@ -43,6 +48,7 @@ from apple_ads_mcp.changes.base import (
 from apple_ads_mcp.changes.common import (
     bound_check,
     campaign_headroom,
+    refuse_if_moved,
     serving_warning,
 )
 from apple_ads_mcp.client import context_header, entity_path, enum_value, unwrap
@@ -61,6 +67,55 @@ def _dimension(targeting: Any, attr: str) -> dict[str, list[str]]:
 def read_state(entity: Any, attrs: tuple[str, ...]) -> dict[str, dict[str, list[str]]]:
     targeting = getattr(entity, "targeting", None)
     return {attr: _dimension(targeting, attr) for attr in attrs}
+
+
+#: Every targeting dimension each entity carries, as SDK attribute names.
+AD_GROUP_DIMENSIONS = tuple(
+    f for f in AdGroupTargetingUpdate.model_fields if f != "additional_properties"
+)
+CAMPAIGN_DIMENSIONS = tuple(
+    f for f in CampaignTargetingUpdate.model_fields if f != "additional_properties"
+)
+#: Where full_state keeps targeting keys the SDK does not model.
+EXTRA = "_unmodelled"
+
+
+def _sorted_or_none(values: Any) -> list[str] | None:
+    return None if values is None else sorted(str(v) for v in values)
+
+
+def full_state(entity: Any, dimensions: tuple[str, ...]) -> dict[str, Any]:
+    """EVERY targeting dimension the entity has set, exactly as Apple holds it.
+
+    Absent dimensions are left out (not written as empty), and a null include
+    or exclude stays null, so echoing this back changes nothing. Keys the SDK
+    does not model are kept under EXTRA and echoed verbatim.
+    """
+    targeting = getattr(entity, "targeting", None)
+    state: dict[str, Any] = {}
+    if targeting is None:
+        return state
+    for attr in dimensions:
+        data = getattr(targeting, attr, None)
+        if data is None:
+            continue
+        state[attr] = {
+            "include": _sorted_or_none(getattr(data, "include", None)),
+            "exclude": _sorted_or_none(getattr(data, "exclude", None)),
+        }
+    extra = getattr(targeting, "additional_properties", None) or {}
+    if extra:
+        state[EXTRA] = json.loads(json.dumps(extra, sort_keys=True, default=str))
+    return state
+
+
+def _same_dimension(a: dict[str, Any] | None, b: dict[str, Any] | None) -> bool:
+    """Equal as targeting: absent, null and [] all mean nothing set."""
+    def norm(v):
+        v = v or {}
+        return (sorted(v.get("include") or []), sorted(v.get("exclude") or []))
+
+    return norm(a) == norm(b)
 
 
 def encode(state: dict[str, Any]) -> str:
@@ -133,15 +188,43 @@ class _TargetingKind(ChangeKind):
     def ledger_keys(self):  # type: ignore[override]
         return ((self.entity_type, self.field_name),)
 
+    @property
+    def dimensions(self) -> tuple[str, ...]:
+        return CAMPAIGN_DIMENSIONS if self.entity_type == "campaign" else AD_GROUP_DIMENSIONS
+
     def fetch(self, entity_id):
         return client.get_ad_group(int(entity_id))
 
-    def update(self, state: dict[str, Any]):
-        dims = {
-            attr: TargetingDataUpdate(include=value["include"], exclude=value["exclude"] or None)
-            for attr, value in state.items()
-        }
-        return "adgroups_id_put", "ad_group_update", AdGroupUpdate(targeting=AdGroupTargetingUpdate(**dims))
+    def own_dimension(self, value: dict[str, list[str]]) -> TargetingDataUpdate:
+        """How one of THIS kind's dimensions is written."""
+        return TargetingDataUpdate(include=value["include"], exclude=value["exclude"] or None)
+
+    def wrap(self, dims: dict[str, Any], extra: dict[str, Any]):
+        return "adgroups_id_put", "ad_group_update", AdGroupUpdate(
+            targeting=AdGroupTargetingUpdate(**dims, additional_properties=extra)
+        )
+
+    def update(self, state: dict[str, Any], everything: dict[str, Any] | None = None):
+        """The whole targeting object: this kind's dimensions as ``state`` says,
+        every other one echoed back from ``everything`` exactly as it was.
+
+        `targeting` is a NESTED object and Apple's PUT merges at the top level
+        only, so sending just this kind's dimensions risks the rest of the
+        object being replaced -- dropping devices, daypart or locations along
+        with it. Echoing all of them makes the write a no-op for everything
+        except what a human approved.
+        """
+        everything = dict(everything or {})
+        extra = everything.pop(EXTRA, None) or {}
+        dims: dict[str, Any] = {}
+        for attr, value in everything.items():
+            if attr in state:
+                continue
+            kwargs = {k: v for k, v in value.items() if v is not None}
+            dims[attr] = TargetingDataUpdate(**kwargs)
+        for attr, value in state.items():
+            dims[attr] = self.own_dimension(value)
+        return self.wrap(dims, extra)
 
     def bound(self, ctx, campaign):
         return campaign_headroom(ctx, campaign)
@@ -157,6 +240,7 @@ class _TargetingKind(ChangeKind):
             campaign_id = entity.campaign_id
             campaign, parent = ctx.campaign(campaign_id), entity
         before_state = read_state(entity, self.attrs)
+        everything = full_state(entity, self.dimensions)
         after_state = {
             attr: (wanted[attr] if wanted.get(attr) is not None else before_state[attr])
             for attr in self.attrs
@@ -187,7 +271,7 @@ class _TargetingKind(ChangeKind):
             items=[make_item(
                 entity_type=self.entity_type, entity_id=entity_id, entity_name=entity.name,
                 path=path, field=self.field_name, before=before, after=after,
-                campaign_id=campaign_id, projected=projected,
+                campaign_id=campaign_id, projected=projected, targeting=encode(everything),
             )],
             checks=checks, projected=projected, is_enable=wider, warnings=warnings,
             note=note or "Reversible with revert_change, which writes the previous targeting back.",
@@ -198,16 +282,52 @@ class _TargetingKind(ChangeKind):
         )
 
     def current(self, ctx, item):
-        return encode(read_state(self.fetch(item["entity_id"]), self.attrs))
+        entity = self.fetch(item["entity_id"])
+        if "targeting" in item:
+            # The write echoes the WHOLE preview-time targeting object, so any
+            # dimension moved since then would be silently put back.
+            refuse_if_moved(
+                encode(full_state(entity, self.dimensions)),
+                item["targeting"],
+                f"{self.entity_type.replace('_', ' ')} {item['entity_id']} targeting",
+            )
+        return encode(read_state(entity, self.attrs))
 
     def request(self, ctx, items):
-        method, arg, body = self.update(decode(items[0]["after"]))
-        return method, {"id": str(items[0]["entity_id"]), "x_ap_context": context_header(), arg: body}
+        item = items[0]
+        everything = decode(item["targeting"]) if item.get("targeting") else None
+        method, arg, body = self.update(decode(item["after"]), everything)
+        return method, {"id": str(item["entity_id"]), "x_ap_context": context_header(), arg: body}
 
     def observe(self, ctx, response, items):
+        item = items[0]
         updated = unwrap(response, f"{self.entity_type} update")
         observed = encode(read_state(updated, self.attrs)) if updated else None
-        return [Outcome(observed == items[0]["after"], observed)]
+        if observed != item["after"]:
+            return [Outcome(False, observed)]
+        # Read-back of EVERY other dimension: one that moved means the write did
+        # more than the preview said, and is not reported as landed.
+        if item.get("targeting"):
+            expected = decode(item["targeting"])
+            echoed = full_state(updated, self.dimensions)
+            moved = sorted(
+                attr
+                for attr in (set(expected) | set(echoed)) - set(self.attrs)
+                if (
+                    expected.get(attr) != echoed.get(attr)
+                    if attr == EXTRA
+                    else not _same_dimension(expected.get(attr), echoed.get(attr))
+                )
+            )
+            if moved:
+                return [Outcome(False, observed, error=(
+                    f"the {self.field_name} change was applied, but Apple's read-back "
+                    f"also shows {', '.join(moved)} changed from before -- the write "
+                    f"touched targeting it was not meant to. Check the "
+                    f"{self.entity_type.replace('_', ' ')} in the Apple Ads UI and "
+                    f"put {', '.join(moved)} back by hand."
+                ))]
+        return [Outcome(True, observed)]
 
     def inverse(self, ctx, entry):
         return self, make_item(
@@ -215,6 +335,7 @@ class _TargetingKind(ChangeKind):
             entity_name=entry.get("entity_name"), path=str(entry.get("path")),
             field=self.field_name, before=str(entry["after"]), after=str(entry["before"]),
             campaign_id=entry.get("campaign_id"),
+            targeting=encode(full_state(self.fetch(entry["entity_id"]), self.dimensions)),
         )
 
     def revert_projection(self, ctx, entry, item):
@@ -376,11 +497,8 @@ class AdGroupAppDownloaders(_TargetingKind):
                   "exclude": [str(i).strip() for i in exclude_app_ids if str(i).strip()]}
         return self.build(ctx, ad_group_id, {"app_downloader": wanted})
 
-    def update(self, state):
-        value = state["app_downloader"]
-        body = AdGroupUpdate(targeting=AdGroupTargetingUpdate(app_downloader=TargetingDataUpdate(
-            include=value["include"], exclude=value["exclude"])))
-        return "adgroups_id_put", "ad_group_update", body
+    def own_dimension(self, value):
+        return TargetingDataUpdate(include=value["include"], exclude=value["exclude"])
 
 
 class CampaignCountries(_TargetingKind):
@@ -395,11 +513,10 @@ class CampaignCountries(_TargetingKind):
     def fetch(self, entity_id):
         return client.get_campaign(int(entity_id))
 
-    def update(self, state):
-        value = state["country_or_region"]
-        body = CampaignUpdate(targeting=CampaignTargetingUpdate(country_or_region=TargetingDataUpdate(
-            include=value["include"], exclude=value["exclude"] or None)))
-        return "campaigns_id_put", "campaign_update", body
+    def wrap(self, dims, extra):
+        return "campaigns_id_put", "campaign_update", CampaignUpdate(
+            targeting=CampaignTargetingUpdate(**dims, additional_properties=extra)
+        )
 
     def bound(self, ctx, campaign):
         return campaign_headroom(ctx, campaign)
