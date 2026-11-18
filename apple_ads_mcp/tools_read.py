@@ -12,6 +12,7 @@ changes that will be refused.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import json
 from decimal import Decimal, InvalidOperation
@@ -25,6 +26,8 @@ from apple_ads_platform import (
     Filter,
     Pagination,
     RecommendationQueryRequest,
+    RequestPagination,
+    Sorting,
     TimeRange,
 )
 from mcp.server.mcpserver.exceptions import ToolError
@@ -107,9 +110,13 @@ class CampaignRow(BaseModel):
 
 
 class CampaignList(BaseModel):
-    total: int | None
+    total: int | None = Field(description="Apple's count, deleted rows included")
     returned: int
     campaigns: list[CampaignRow]
+    next_offset: int | None = Field(
+        default=None, description="Pass as offset for the next page; null on the last"
+    )
+    truncated: bool = Field(default=False, description="True when more rows exist")
 
 
 class AdGroupRow(BaseModel):
@@ -126,9 +133,13 @@ class AdGroupRow(BaseModel):
 
 
 class AdGroupList(BaseModel):
-    total: int | None
+    total: int | None = Field(description="Apple's count, deleted rows included")
     returned: int
     ad_groups: list[AdGroupRow]
+    next_offset: int | None = Field(
+        default=None, description="Pass as offset for the next page; null on the last"
+    )
+    truncated: bool = Field(default=False, description="True when more rows exist")
 
 
 class KeywordRow(BaseModel):
@@ -144,9 +155,13 @@ class KeywordRow(BaseModel):
 
 
 class KeywordList(BaseModel):
-    total: int | None
+    total: int | None = Field(description="Apple's count, deleted rows included")
     returned: int
     keywords: list[KeywordRow]
+    next_offset: int | None = Field(
+        default=None, description="Pass as offset for the next page; null on the last"
+    )
+    truncated: bool = Field(default=False, description="True when more rows exist")
 
 
 class NegativeKeywordRow(BaseModel):
@@ -160,9 +175,13 @@ class NegativeKeywordRow(BaseModel):
 
 
 class NegativeKeywordList(BaseModel):
-    total: int | None
+    total: int | None = Field(description="Apple's count, deleted rows included")
     returned: int
     negative_keywords: list[NegativeKeywordRow]
+    next_offset: int | None = Field(
+        default=None, description="Pass as offset for the next page; null on the last"
+    )
+    truncated: bool = Field(default=False, description="True when more rows exist")
 
 
 class SharedBudgetRow(BaseModel):
@@ -199,6 +218,17 @@ class Report(BaseModel):
     granularity: str
     rows: list[ReportRow]
     grand_total: ReportRow | None
+    returned: int = 0
+    offset: int = 0
+    next_offset: int | None = Field(
+        default=None, description="Pass as offset for the next page; null when this is the last"
+    )
+    total_rows_available: int | None = Field(
+        default=None, description="Rows Apple has for this request across every page"
+    )
+    truncated: bool = Field(
+        default=False, description="True when more rows exist than were returned"
+    )
     note: str
 
 
@@ -357,6 +387,25 @@ def _metrics_row(
     )
 
 
+#: Report columns a `sort_by` may name, as Apple spells them in totalMetrics.
+REPORT_SORT_FIELDS = ("localSpend", "impressions", "taps", "totalInstalls")
+#: Rows per page when an internal sweep reads a whole report.
+REPORT_PAGE = 1000
+#: Pages a sweep will read before saying it stopped.
+REPORT_MAX_PAGES = 20
+
+
+@dataclasses.dataclass
+class ReportPage:
+    rows: list[dict]
+    grand_total: dict | None
+    start: dt.date
+    end: dt.date
+    #: Apple's count of rows across every page, when it says.
+    total: int | None
+    truncated: bool = False
+
+
 def run_report(
     method: str,
     entity: str,
@@ -366,24 +415,43 @@ def run_report(
     group_by: list[str] | None = None,
     grand_total: bool = True,
 ) -> tuple[list[dict], dict | None, dt.date, dt.date]:
-    """One `apps_*_reports` call, parsed from RAW JSON rather than the SDK's models.
+    """Every row of one report (all pages), as (rows, grand_total, start, end)."""
+    page = run_report_all(method, entity, days, filters, granularity, group_by, grand_total)
+    return page.rows, page.grand_total, page.start, page.end
 
-    Not a style choice. apple-ads-platform 1.109.0 generates
-    `ReportingKeyword.status` with the enum ('ACTIVE', 'PAUSED', 'DELETED') while
-    the live API returns 'ENABLED', and the generated validator RAISES on an
-    unrecognised value instead of falling back to its own
-    `unknown_default_open_api` placeholder. The whole keyword report therefore
-    fails to deserialize -- a client-side bug, with the response sitting there
-    intact. Other reporting models are likely to have the same mismatch.
 
-    Reports are read-only and get flattened into ReportRow regardless, so nothing
-    is lost by reading the JSON directly, and the server stops being hostage to
-    one wrong enum in a generated model.
+def run_report_page(
+    method: str,
+    entity: str,
+    days: int,
+    filters: list[Filter] | None = None,
+    granularity: str = "DAILY",
+    group_by: list[str] | None = None,
+    grand_total: bool = True,
+    offset: int = 0,
+    page_size: int | None = None,
+    sort_by: str | None = None,
+    window: tuple[dt.date, dt.date] | None = None,
+) -> ReportPage:
+    """One page of one `apps_*_reports` call, parsed from RAW JSON.
 
-    `_request_timeout` is lifted to 60s: a report is the one read in this API that
-    routinely outruns the client's 30s default.
+    RAW JSON rather than the SDK's models is not a style choice.
+    apple-ads-platform 1.109.0 generates `ReportingKeyword.status` with the enum
+    ('ACTIVE', 'PAUSED', 'DELETED') while the live API returns 'ENABLED', and the
+    generated validator RAISES on an unrecognised value instead of falling back
+    to its own `unknown_default_open_api` placeholder. The whole keyword report
+    therefore fails to deserialize -- a client-side bug, with the response
+    sitting there intact. Reports are flattened into ReportRow regardless, so
+    nothing is lost by reading the JSON directly.
+
+    PAGINATION. A request with no `pagination` gets Apple's default page and
+    nothing says so, so a large report used to be silently cut. Every request
+    now says which page it wants, and the caller is told when more exist.
+
+    `_request_timeout` is lifted to 60s: a report is the one read in this API
+    that routinely outruns the client's 30s default.
     """
-    start, end = _window(days)
+    start, end = window or _window(days)
     response = client.call(
         f"{method}_without_preload_content",
         x_ap_context=context_header(),
@@ -392,19 +460,128 @@ def run_report(
             filters=filters or None,
             group_by=group_by or None,
             options=AppsOptions(include_rows=["GRAND_TOTAL"]) if grand_total else None,
+            pagination=RequestPagination(offset=max(0, offset), page_size=page_size or REPORT_PAGE),
+            sorting=[Sorting(var_field=sort_by, order="DESC")] if sort_by else None,
         ),
         _request_timeout=REPORT_TIMEOUT,
     )
     try:
         payload = json.loads(response.data.decode("utf-8"))
     except (ValueError, AttributeError, UnicodeDecodeError) as exc:
-        raise ToolError(f"could not parse the {entity} report response: {exc}") from exc
+        raise ToolError(f"INTERNAL: could not parse the {entity} report response: {exc}") from exc
 
     if payload.get("error"):
-        raise ToolError(f"Apple rejected the {entity} report request: {payload['error']}")
+        raise ToolError(f"INVALID: Apple rejected the {entity} report request: {payload['error']}")
 
     result = payload.get("result") or {}
-    return result.get("rows") or [], (result.get("summary") or {}).get("grandTotal"), start, end
+    rows = result.get("rows") or []
+    pagination = payload.get("pagination") or result.get("pagination") or {}
+    total = pagination.get("totalResults", pagination.get("totalCount"))
+    try:
+        total = int(total) if total is not None else None
+    except (TypeError, ValueError):
+        total = None
+    return ReportPage(
+        rows=rows,
+        grand_total=(result.get("summary") or {}).get("grandTotal"),
+        start=start,
+        end=end,
+        total=total,
+    )
+
+
+def run_report_all(
+    method: str,
+    entity: str,
+    days: int,
+    filters: list[Filter] | None = None,
+    granularity: str = "DAILY",
+    group_by: list[str] | None = None,
+    grand_total: bool = True,
+    window: tuple[dt.date, dt.date] | None = None,
+) -> ReportPage:
+    """Every page of a report, up to REPORT_MAX_PAGES, for an internal sweep.
+
+    A projection that looks one keyword up in a campaign report must see the
+    whole report: a keyword on page two would otherwise read as "no delivery",
+    a confident zero.
+    """
+    first = run_report_page(
+        method, entity, days, filters, granularity, group_by, grand_total, window=window
+    )
+    rows = list(first.rows)
+    page_rows = len(first.rows)
+    pages = 1
+    while page_rows >= REPORT_PAGE and pages < REPORT_MAX_PAGES:
+        if first.total is not None and len(rows) >= first.total:
+            break
+        nxt = run_report_page(
+            method, entity, days, filters, granularity, group_by, False,
+            offset=len(rows), window=(first.start, first.end),
+        )
+        rows.extend(nxt.rows)
+        page_rows = len(nxt.rows)
+        pages += 1
+    truncated = page_rows >= REPORT_PAGE and pages >= REPORT_MAX_PAGES
+    return ReportPage(rows, first.grand_total, first.start, first.end, first.total, truncated)
+
+
+def _spend_of(row: dict, field: str = "localSpend") -> Decimal:
+    metrics = row.get("totalMetrics") or {}
+    value = metrics.get(field)
+    if isinstance(value, dict):
+        value = value.get("amount")
+    try:
+        return Decimal(str(value)) if value not in (None, "") else Decimal("0")
+    except InvalidOperation:
+        return Decimal("0")
+
+
+def report_rows(
+    method: str,
+    entity: str,
+    days: int,
+    filters: list[Filter] | None,
+    *,
+    narrow,
+    limit: int,
+    offset: int,
+    sort_by: str,
+    min_impressions: int,
+    grand_total: bool = True,
+    group_by: list[str] | None = None,
+    granularity: str = "DAILY",
+) -> tuple[ReportPage, list[dict], int | None, bool]:
+    """(page, rows to show, next_offset, truncated) for a report TOOL.
+
+    Without client-side narrowing, one server-side page sorted by Apple. With it
+    (an ad group or keyword id, which Apple's report filters reject), the whole
+    report is swept, narrowed, sorted here and sliced -- otherwise the entity
+    asked for could sit on a page that was never read.
+    """
+    if sort_by not in REPORT_SORT_FIELDS:
+        raise ToolError(
+            f"INVALID_REQUEST: sort_by={sort_by!r} must be one of {', '.join(REPORT_SORT_FIELDS)}"
+        )
+    if narrow is None:
+        page = run_report_page(
+            method, entity, days, filters, granularity, group_by, grand_total,
+            offset=offset, page_size=limit, sort_by=sort_by,
+        )
+        rows = [r for r in page.rows if (r.get("totalMetrics") or {}).get("impressions", 0) >= min_impressions]
+        seen = offset + len(page.rows)
+        more = (page.total is not None and seen < page.total) or (
+            page.total is None and len(page.rows) >= limit
+        )
+        return page, rows, (seen if more else None), more
+    page = run_report_all(method, entity, days, filters, granularity, group_by, grand_total)
+    rows = [r for r in page.rows if narrow(r)]
+    rows = [r for r in rows if (r.get("totalMetrics") or {}).get("impressions", 0) >= min_impressions]
+    rows.sort(key=lambda r: _spend_of(r, sort_by), reverse=True)
+    sliced = rows[offset: offset + limit]
+    more = offset + limit < len(rows) or page.truncated
+    page.total = len(rows)
+    return page, sliced, (offset + limit if offset + limit < len(rows) else None), more
 
 
 def report_filter(field: str, values: list[Any]) -> Filter:
@@ -464,10 +641,10 @@ def report_rows_7d(
         filters = [report_filter("campaignId", [campaign_id])]
 
     try:
-        rows, _grand_total, _start, _end = run_report(method, id_key, days=7, filters=filters)
+        page = run_report_all(method, id_key, days=7, filters=filters)
     except ToolError as exc:
         return [], str(exc)
-    return rows, None
+    return page.rows, None
 
 
 def pick_metrics(
@@ -685,6 +862,22 @@ def query_audit_page(
     return rows, truncated
 
 
+# --- report arguments, shared by every report tool -------------------------------
+# Module level: the tool modules use `from __future__ import annotations`, so an
+# annotation is resolved against these globals, never against register()'s locals.
+
+Days = Annotated[int, Field(description="Window ending today", ge=1, le=90)]
+Limit = Annotated[int, Field(description="Max rows to return", ge=1, le=1000)]
+Offset = Annotated[int, Field(description="Rows to skip; pass next_offset to page", ge=0)]
+SortBy = Annotated[
+    str,
+    Field(description="Sort descending by: localSpend, impressions, taps or totalInstalls"),
+]
+MinImpressions = Annotated[
+    int, Field(description="Drop rows with fewer impressions than this", ge=0)
+]
+
+
 # --- registration -------------------------------------------------------------
 
 
@@ -731,19 +924,19 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             bool, Field(description="Include campaigns Apple has marked deleted")
         ] = False,
         limit: Annotated[int, Field(description="Max campaigns to return", ge=1, le=1000)] = 100,
+        offset: Annotated[int, Field(description="Rows to skip; pass next_offset to page", ge=0)] = 0,
     ) -> CampaignList:
-        """Every campaign, with status, serving status and daily budget."""
-        response = client.call(
-            "campaigns_query_post",
-            x_ap_context=context_header(),
-            query_request=query(page_size=limit),
-        )
-        rows = unwrap(response, "campaigns") or []
+        """Every campaign, with status, serving status and daily budget.
+
+        Deleted campaigns are dropped AFTER the page is read, so `returned` can
+        be under `limit` while next_offset still says more exist.
+        """
+        rows, total, next_offset = client.query_page("campaigns_query_post", limit=limit, offset=offset)
         if not include_deleted:
             rows = [c for c in rows if not c.deleted]
-        total = getattr(getattr(response, "pagination", None), "total_count", None)
         return CampaignList(
-            total=total, returned=len(rows), campaigns=[_campaign_row(c) for c in rows]
+            total=total, returned=len(rows), campaigns=[_campaign_row(c) for c in rows],
+            next_offset=next_offset, truncated=next_offset is not None,
         )
 
     @mcp.tool(title="Get one campaign by id", annotations=READ_ONLY)
@@ -758,20 +951,18 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         ] = None,
         include_deleted: Annotated[bool, Field(description="Include deleted ad groups")] = False,
         limit: Annotated[int, Field(description="Max ad groups to return", ge=1, le=1000)] = 200,
+        offset: Annotated[int, Field(description="Rows to skip; pass next_offset to page", ge=0)] = 0,
     ) -> AdGroupList:
         """Ad groups, with status, serving status and default bid."""
         filters = [eq_filter("campaignId", campaign_id)] if campaign_id else None
-        response = client.call(
-            "adgroups_query_post",
-            x_ap_context=context_header(),
-            query_request=query(page_size=limit, filters=filters),
+        rows, total, next_offset = client.query_page(
+            "adgroups_query_post", filters, limit=limit, offset=offset
         )
-        rows = unwrap(response, "ad groups") or []
         if not include_deleted:
             rows = [g for g in rows if not g.deleted]
-        total = getattr(getattr(response, "pagination", None), "total_count", None)
         return AdGroupList(
-            total=total, returned=len(rows), ad_groups=[_ad_group_row(g) for g in rows]
+            total=total, returned=len(rows), ad_groups=[_ad_group_row(g) for g in rows],
+            next_offset=next_offset, truncated=next_offset is not None,
         )
 
     @mcp.tool(title="Get one ad group by id", annotations=READ_ONLY)
@@ -785,6 +976,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         campaign_id: Annotated[int | None, Field(description="Limit to one campaign")] = None,
         include_deleted: Annotated[bool, Field(description="Include deleted keywords")] = False,
         limit: Annotated[int, Field(description="Max keywords to return", ge=1, le=1000)] = 200,
+        offset: Annotated[int, Field(description="Rows to skip; pass next_offset to page", ge=0)] = 0,
     ) -> KeywordList:
         """Keywords with their bids, match types and serving status.
 
@@ -797,16 +989,15 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
             filters.append(eq_filter("adGroupId", ad_group_id))
         if campaign_id:
             filters.append(eq_filter("campaignId", campaign_id))
-        response = client.call(
-            "keywords_query_post",
-            x_ap_context=context_header(),
-            query_request=query(page_size=limit, filters=filters or None),
+        rows, total, next_offset = client.query_page(
+            "keywords_query_post", filters or None, limit=limit, offset=offset
         )
-        rows = unwrap(response, "keywords") or []
         if not include_deleted:
             rows = [k for k in rows if not k.deleted]
-        total = getattr(getattr(response, "pagination", None), "total_count", None)
-        return KeywordList(total=total, returned=len(rows), keywords=[_keyword_row(k) for k in rows])
+        return KeywordList(
+            total=total, returned=len(rows), keywords=[_keyword_row(k) for k in rows],
+            next_offset=next_offset, truncated=next_offset is not None,
+        )
 
     @mcp.tool(title="Get one keyword by id", annotations=READ_ONLY)
     def get_keyword(keyword_id: Annotated[int, Field(description="Apple keyword id")]) -> KeywordRow:
@@ -822,6 +1013,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         ] = None,
         include_deleted: Annotated[bool, Field(description="Include deleted negatives")] = False,
         limit: Annotated[int, Field(description="Max to return", ge=1, le=1000)] = 200,
+        offset: Annotated[int, Field(description="Rows to skip; pass next_offset to page", ge=0)] = 0,
     ) -> NegativeKeywordList:
         """Negative keywords for an ad group, or for every ad group in a campaign.
 
@@ -844,36 +1036,33 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         if ad_group_id is not None:
             ad_group_ids = [ad_group_id]
         else:
-            groups = unwrap(
-                client.call(
-                    "adgroups_query_post",
-                    x_ap_context=context_header(),
-                    query_request=query(page_size=1000, filters=[eq_filter("campaignId", campaign_id)]),
-                ),
-                "ad groups",
-            ) or []
+            groups, _cut = client.query_all(
+                "adgroups_query_post", [eq_filter("campaignId", campaign_id)], cap=5000
+            )
             ad_group_ids = [g.id for g in groups if not g.deleted]
 
+        # Every negative of every ad group, then filtered and sliced: `total` is
+        # the real count, not the length of what fits under `limit`.
         rows: list[Any] = []
+        swept_all = True
         for group_id in ad_group_ids:
-            if len(rows) >= limit:
-                break
-            response = client.call(
-                "negative_keywords_query_post",
-                x_ap_context=context_header(),
-                query_request=query(
-                    page_size=limit, filters=[eq_filter("adGroupId", group_id)]
-                ),
+            found, cut = client.query_all(
+                "negative_keywords_query_post", [eq_filter("adGroupId", group_id)], cap=5000
             )
-            rows.extend(unwrap(response, "negative keywords") or [])
+            rows.extend(found)
+            swept_all = swept_all and not cut
 
         if not include_deleted:
             rows = [n for n in rows if not n.deleted]
-        rows = rows[:limit]
+        total = len(rows)
+        page = rows[offset: offset + limit]
+        next_offset = offset + limit if offset + limit < total else None
         return NegativeKeywordList(
-            total=len(rows),
-            returned=len(rows),
-            negative_keywords=[_negative_row(n) for n in rows],
+            total=total,
+            returned=len(page),
+            negative_keywords=[_negative_row(n) for n in page],
+            next_offset=next_offset,
+            truncated=next_offset is not None or not swept_all,
         )
 
     @mcp.tool(title="List shared budgets", annotations=READ_ONLY)
@@ -913,11 +1102,59 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         )
 
     # --- reports --------------------------------------------------------------
+    #
+    # Every report takes the same paging and ordering arguments and says how
+    # many rows exist and whether it showed them all. campaignId is the ONLY
+    # filter Apple accepts on these reports (an adGroupId or keywordId filter is
+    # rejected with INVALID_FIELD_ATTRIBUTE), so ad group and keyword ids narrow
+    # the rows here -- after sweeping every page, never just the first.
+
+    def build_report(
+        entity: str,
+        method: str,
+        days: int,
+        filters,
+        *,
+        narrow,
+        limit: int,
+        offset: int,
+        sort_by: str,
+        min_impressions: int,
+        row: Any,
+        grand_total: bool = True,
+        note: str = "Totals are for the whole window, not per day.",
+    ) -> Report:
+        page, rows, next_offset, truncated = report_rows(
+            method, entity, days, filters, narrow=narrow, limit=limit, offset=offset,
+            sort_by=sort_by, min_impressions=min_impressions, grand_total=grand_total,
+        )
+        total = page.grand_total if (grand_total and narrow is None) else None
+        return Report(
+            entity=entity.replace(" ", "_"),
+            start=page.start.isoformat(),
+            end=page.end.isoformat(),
+            granularity="DAILY",
+            rows=[row(r) for r in rows],
+            grand_total=_metrics_row(total, name="GRAND TOTAL") if total else None,
+            returned=len(rows),
+            offset=offset,
+            next_offset=next_offset,
+            total_rows_available=page.total,
+            truncated=truncated,
+            note=note,
+        )
+
+    def meta(r: dict) -> dict:
+        return r.get("metadata") or {}
 
     @mcp.tool(title="Campaign performance report", annotations=READ_ONLY)
     def campaign_report(
-        days: Annotated[int, Field(description="Window ending today", ge=1, le=90)] = 7,
+        days: Days = 7,
         campaign_id: Annotated[int | None, Field(description="Limit to one campaign")] = None,
+        limit: Limit = 200,
+        offset: Offset = 0,
+        sort_by: SortBy = "localSpend",
+        min_impressions: MinImpressions = 0,
     ) -> Report:
         """Spend, impressions, taps and installs per campaign.
 
@@ -925,64 +1162,41 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         totalNewDownloads / totalRedownloads, and the bare `installs` key v3 used
         does not exist.
         """
-        rows, grand_total, start, end = run_report("apps_campaign_reports", "campaign", days)
-        if campaign_id:
-            rows = [r for r in rows if str((r.get("metadata") or {}).get("id")) == str(campaign_id)]
-            grand_total = None  # Apple's total covers every campaign, not the one asked for
-        return Report(
-            entity="campaign",
-            start=start.isoformat(),
-            end=end.isoformat(),
-            granularity="DAILY",
-            rows=[
-                _metrics_row(
-                    row.get("totalMetrics"),
-                    id_=(row.get("metadata") or {}).get("id"),
-                    name=(row.get("metadata") or {}).get("name"),
-                )
-                for row in rows
-            ],
-            grand_total=_metrics_row(grand_total, name="GRAND TOTAL") if grand_total else None,
-            note="Totals are for the whole window, not per day.",
+        # The CAMPAIGN report takes no filter at all, so one campaign is picked
+        # out of the full report.
+        narrow = (lambda r: str(meta(r).get("id")) == str(campaign_id)) if campaign_id else None
+        return build_report(
+            "campaign", "apps_campaign_reports", days, None, narrow=narrow, limit=limit,
+            offset=offset, sort_by=sort_by, min_impressions=min_impressions,
+            row=lambda r: _metrics_row(r.get("totalMetrics"), id_=meta(r).get("id"),
+                                       name=meta(r).get("name")),
         )
 
     @mcp.tool(title="Ad group performance report", annotations=READ_ONLY)
     def ad_group_report(
-        days: Annotated[int, Field(description="Window ending today", ge=1, le=90)] = 7,
+        days: Days = 7,
         campaign_id: Annotated[int | None, Field(description="Limit to one campaign")] = None,
         ad_group_id: Annotated[int | None, Field(description="Limit to one ad group")] = None,
+        limit: Limit = 200,
+        offset: Offset = 0,
+        sort_by: SortBy = "localSpend",
+        min_impressions: MinImpressions = 0,
     ) -> Report:
         """Spend, impressions, taps and installs per ad group."""
-        # campaignId is the ONLY filter Apple accepts on these reports; an
-        # adGroupId filter is rejected outright. Everything else narrows here.
         filters = [report_filter("campaignId", [campaign_id])] if campaign_id else None
-        rows, grand_total, start, end = run_report(
-            "apps_ad_group_reports", "ad group", days, filters
-        )
-        if ad_group_id:
-            rows = [r for r in rows if str((r.get("metadata") or {}).get("id")) == str(ad_group_id)]
-            grand_total = None
-        return Report(
-            entity="ad_group",
-            start=start.isoformat(),
-            end=end.isoformat(),
-            granularity="DAILY",
-            rows=[
-                _metrics_row(
-                    row.get("totalMetrics"),
-                    id_=(row.get("metadata") or {}).get("id"),
-                    name=(row.get("metadata") or {}).get("name"),
-                    extra={"campaign_id": (row.get("metadata") or {}).get("campaignId")},
-                )
-                for row in rows
-            ],
-            grand_total=_metrics_row(grand_total, name="GRAND TOTAL") if grand_total else None,
-            note="Totals are for the whole window, not per day.",
+        narrow = (lambda r: str(meta(r).get("id")) == str(ad_group_id)) if ad_group_id else None
+        return build_report(
+            "ad group", "apps_ad_group_reports", days, filters, narrow=narrow, limit=limit,
+            offset=offset, sort_by=sort_by, min_impressions=min_impressions,
+            row=lambda r: _metrics_row(
+                r.get("totalMetrics"), id_=meta(r).get("id"), name=meta(r).get("name"),
+                extra={"campaign_id": meta(r).get("campaignId")},
+            ),
         )
 
     @mcp.tool(title="Keyword performance report", annotations=READ_ONLY)
     def keyword_report(
-        days: Annotated[int, Field(description="Window ending today", ge=1, le=90)] = 7,
+        days: Days = 7,
         campaign_id: Annotated[int | None, Field(description="Limit to one campaign")] = None,
         ad_group_id: Annotated[
             int | None, Field(description="Narrow to one ad group (filtered after fetching)")
@@ -990,57 +1204,51 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         keyword_id: Annotated[
             int | None, Field(description="Narrow to one keyword (filtered after fetching)")
         ] = None,
+        limit: Limit = 200,
+        offset: Offset = 0,
+        sort_by: SortBy = "localSpend",
+        min_impressions: MinImpressions = 0,
     ) -> Report:
         """Spend and conversions per keyword -- the input to any bid decision.
 
         Apple only filters these reports by campaignId, so ad_group_id and
-        keyword_id narrow the rows after they arrive. Give campaign_id too when
-        you can; without it this pulls every campaign.
+        keyword_id narrow the rows after every page has been read. Give
+        campaign_id too when you can; without it this pulls every campaign.
         """
-        # campaignId is the ONLY filter Apple accepts here. A keywordId or
-        # adGroupId filter is rejected with INVALID_FIELD_ATTRIBUTE, so those two
-        # narrow the returned rows instead.
         filters = [report_filter("campaignId", [campaign_id])] if campaign_id else None
-        rows, grand_total, start, end = run_report("apps_keyword_reports", "keyword", days, filters)
-        if ad_group_id:
-            rows = [
-                r for r in rows
-                if str((r.get("metadata") or {}).get("adGroupId")) == str(ad_group_id)
-            ]
-        if keyword_id:
-            rows = [r for r in rows if str((r.get("metadata") or {}).get("id")) == str(keyword_id)]
+        narrow = None
         if ad_group_id or keyword_id:
-            grand_total = None  # Apple's total covers the campaign, not the subset
-        return Report(
-            entity="keyword",
-            start=start.isoformat(),
-            end=end.isoformat(),
-            granularity="DAILY",
-            rows=[
-                _metrics_row(
-                    row.get("totalMetrics"),
-                    id_=(row.get("metadata") or {}).get("id"),
-                    name=(row.get("metadata") or {}).get("text"),
-                    extra={
-                        "match_type": (row.get("metadata") or {}).get("matchType"),
-                        "ad_group_id": (row.get("metadata") or {}).get("adGroupId"),
-                        "ad_group": ((row.get("metadata") or {}).get("adGroup") or {}).get("name"),
-                        "status": (row.get("metadata") or {}).get("status"),
-                        "serving_status": (row.get("metadata") or {}).get("displayStatus"),
-                        "bid": _json_money((row.get("metadata") or {}).get("bid")),
-                    },
+            def narrow(r: dict) -> bool:
+                return (not ad_group_id or str(meta(r).get("adGroupId")) == str(ad_group_id)) and (
+                    not keyword_id or str(meta(r).get("id")) == str(keyword_id)
                 )
-                for row in rows
-            ],
-            grand_total=_metrics_row(grand_total, name="GRAND TOTAL") if grand_total else None,
-            note="Totals are for the whole window, not per day.",
+        return build_report(
+            "keyword", "apps_keyword_reports", days, filters, narrow=narrow, limit=limit,
+            offset=offset, sort_by=sort_by, min_impressions=min_impressions,
+            row=lambda r: _metrics_row(
+                r.get("totalMetrics"),
+                id_=meta(r).get("id"),
+                name=meta(r).get("text"),
+                extra={
+                    "match_type": meta(r).get("matchType"),
+                    "ad_group_id": meta(r).get("adGroupId"),
+                    "ad_group": (meta(r).get("adGroup") or {}).get("name"),
+                    "status": meta(r).get("status"),
+                    "serving_status": meta(r).get("displayStatus"),
+                    "bid": _json_money(meta(r).get("bid")),
+                },
+            ),
         )
 
     @mcp.tool(title="Search term report", annotations=READ_ONLY)
     def search_term_report(
-        days: Annotated[int, Field(description="Window ending today", ge=1, le=90)] = 7,
+        days: Days = 7,
         campaign_id: Annotated[int | None, Field(description="Limit to one campaign")] = None,
         ad_group_id: Annotated[int | None, Field(description="Limit to one ad group")] = None,
+        limit: Limit = 200,
+        offset: Offset = 0,
+        sort_by: SortBy = "localSpend",
+        min_impressions: MinImpressions = 0,
     ) -> Report:
         """What people actually typed -- where negative keywords come from.
 
@@ -1048,40 +1256,27 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         keywords.
         """
         filters = [report_filter("campaignId", [campaign_id])] if campaign_id else None
+        narrow = (
+            (lambda r: str(meta(r).get("adGroupId")) == str(ad_group_id)) if ad_group_id else None
+        )
         # SEARCHTERM reports accept GRAND_TOTAL *or* granular data, never both:
         # "SEARCHTERM level reports supports only GRAND_TOTAL or granularity data,
         # not both." The per-term rows are the whole point of this report, so the
         # grand total is what gives way.
-        rows, grand_total, start, end = run_report(
-            "apps_search_term_reports", "search term", days, filters, grand_total=False
-        )
-        if ad_group_id:
-            rows = [
-                r for r in rows
-                if str((r.get("metadata") or {}).get("adGroupId")) == str(ad_group_id)
-            ]
-        return Report(
-            entity="search_term",
-            start=start.isoformat(),
-            end=end.isoformat(),
-            granularity="DAILY",
-            rows=[
-                _metrics_row(
-                    row.get("totalMetrics"),
-                    id_=(row.get("metadata") or {}).get("keywordId"),
-                    name=(row.get("metadata") or {}).get("searchTermText")
-                    or (row.get("metadata") or {}).get("searchTerm"),
-                    extra={
-                        "matched_keyword": (row.get("metadata") or {}).get("keyword")
-                        or (row.get("metadata") or {}).get("text"),
-                        "match_type": (row.get("metadata") or {}).get("matchType")
-                        or (row.get("metadata") or {}).get("searchTermSource"),
-                        "ad_group_id": (row.get("metadata") or {}).get("adGroupId"),
-                    },
-                )
-                for row in rows
-            ],
-            grand_total=None,
+        return build_report(
+            "search term", "apps_search_term_reports", days, filters, narrow=narrow,
+            limit=limit, offset=offset, sort_by=sort_by, min_impressions=min_impressions,
+            grand_total=False,
+            row=lambda r: _metrics_row(
+                r.get("totalMetrics"),
+                id_=meta(r).get("keywordId"),
+                name=meta(r).get("searchTermText") or meta(r).get("searchTerm"),
+                extra={
+                    "matched_keyword": meta(r).get("keyword") or meta(r).get("text"),
+                    "match_type": meta(r).get("matchType") or meta(r).get("searchTermSource"),
+                    "ad_group_id": meta(r).get("adGroupId"),
+                },
+            ),
             note=(
                 "A row with no keyword id was served by Search Match, not by a "
                 "keyword you set. No grand total: Apple refuses GRAND_TOTAL and "

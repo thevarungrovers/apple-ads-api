@@ -192,13 +192,10 @@ def default_bid_blast_radius(ad_group_id: int) -> list[str]:
     preview is still worth reading if this one query fails.
     """
     try:
-        response = client.call(
-            "keywords_query_post",
-            x_ap_context=context_header(),
-            query_request=query(page_size=1000, filters=[eq_filter("adGroupId", ad_group_id)]),
+        rows, truncated = client.query_all(
+            "keywords_query_post", [eq_filter("adGroupId", ad_group_id)], cap=5000
         )
-        rows = [k for k in (unwrap(response, "keywords") or []) if not k.deleted]
-        truncated = False
+        rows = [k for k in rows if not k.deleted]
     except ToolError as exc:
         return [
             "Could not list this ad group's keywords, so this preview cannot say how "
@@ -237,14 +234,9 @@ def existing_negatives(
             "from here. Check the Apple Ads UI before approving."
         )
     try:
-        rows = unwrap(
-            client.call(
-                "negative_keywords_query_post",
-                x_ap_context=context_header(),
-                query_request=query(page_size=1000, filters=[eq_filter("adGroupId", ad_group_id)]),
-            ),
-            "negative keywords",
-        ) or []
+        rows, _truncated = client.query_all(
+            "negative_keywords_query_post", [eq_filter("adGroupId", ad_group_id)], cap=5000
+        )
     except ToolError as exc:
         return set(), f"duplicates could not be checked: {str(exc)[:160]}"
     return (

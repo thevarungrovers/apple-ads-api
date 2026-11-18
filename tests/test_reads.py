@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from kindkit import AD_GROUP, Registrar, rig, run  # noqa: E402
+from kindkit import AD_GROUP, CAMPAIGN, KEYWORD, NEGATIVE, Registrar, rig, run  # noqa: E402
 
 from apple_ads_mcp import tools_read  # noqa: E402
 
@@ -62,6 +62,71 @@ def test_a_full_audit_page_is_reported_as_truncated() -> None:
     apple.extra["query_audit_summary"] = audit
     listed = read_tools(state)["list_recent_changes"](days=1, limit=5)
     assert listed.truncated and listed.returned == 5
+
+
+def test_lists_page_and_say_when_more_exist() -> None:
+    _tools, apple, state = rig()
+    for offset in range(1, 5):
+        apple.keywords[KEYWORD + offset] = apple.keywords[KEYWORD].model_copy(
+            update={"id": KEYWORD + offset}
+        )
+    tools = read_tools(state)
+    first = tools["list_keywords"](ad_group_id=AD_GROUP, limit=2)
+    assert first.returned == 2 and first.total == 5 and first.next_offset == 2 and first.truncated
+    last = tools["list_keywords"](ad_group_id=AD_GROUP, limit=2, offset=4)
+    assert last.returned == 1 and last.next_offset is None and not last.truncated
+
+
+def test_negatives_report_their_real_total() -> None:
+    _tools, apple, state = rig()
+    for offset in range(1, 4):
+        apple.negatives[NEGATIVE + offset] = apple.negatives[NEGATIVE].model_copy(
+            update={"id": NEGATIVE + offset}
+        )
+    listed = read_tools(state)["list_negative_keywords"](campaign_id=CAMPAIGN, limit=2)
+    assert listed.total == 4 and listed.returned == 2 and listed.next_offset == 2
+
+
+def test_a_report_narrowed_client_side_reads_every_page() -> None:
+    from apple_ads_mcp import tools_read as tr
+
+    _tools, apple, state = rig()
+    tr.REPORT_PAGE, saved = 2, tr.REPORT_PAGE
+    try:
+        apple.reports["apps_keyword_reports"] = [
+            apple.report_row(KEYWORD + i, spend=f"{i}.00", taps=i, adGroupId=AD_GROUP)
+            for i in range(1, 6)
+        ]
+        sent = []
+
+        def paged(method, /, **kwargs):
+            request = kwargs.get("apps_reporting_request")
+            if request is not None:
+                sent.append(request.pagination.offset)
+                rows = apple.reports["apps_keyword_reports"]
+                start = request.pagination.offset
+                chunk = rows[start: start + request.pagination.page_size]
+                import json
+                return type("R", (), {"data": json.dumps(
+                    {"result": {"rows": chunk}, "pagination": {"totalResults": len(rows)}}).encode()})()
+            return apple(method, **kwargs)
+
+        from apple_ads_mcp import client
+        client.call = paged
+        report = read_tools(state)["keyword_report"](campaign_id=CAMPAIGN, keyword_id=KEYWORD + 5)
+        assert [r.id for r in report.rows] == [str(KEYWORD + 5)], report.rows
+        assert sent == [0, 2, 4], sent
+    finally:
+        tr.REPORT_PAGE = saved
+
+
+def test_a_report_page_says_how_many_rows_exist() -> None:
+    _tools, apple, state = rig()
+    apple.reports["apps_campaign_reports"] = [
+        apple.report_row(CAMPAIGN + i, spend="1.00", taps=1) for i in range(3)
+    ]
+    report = read_tools(state)["campaign_report"](limit=3)
+    assert report.total_rows_available == 3 and report.next_offset is None and not report.truncated
 
 
 if __name__ == "__main__":

@@ -462,6 +462,46 @@ def query(page_size: int = 100, offset: int = 0, filters: list[QueryFilter] | No
     )
 
 
+def query_page(
+    method: str, filters: list[QueryFilter] | None = None, *, limit: int = 100, offset: int = 0
+) -> tuple[list[Any], int | None, int | None]:
+    """(rows, total, next_offset) for one page of a `*_query_post` list.
+
+    `next_offset` is None on the last page. It is computed from the RAW page, so
+    a caller that filters rows afterwards (deleted ones, say) still pages
+    correctly -- and `total` is Apple's count, deleted rows included.
+    """
+    response = call(
+        method,
+        x_ap_context=context_header(),
+        query_request=query(page_size=limit, offset=offset, filters=filters),
+    )
+    rows = unwrap(response, method) or []
+    total = getattr(getattr(response, "pagination", None), "total_count", None)
+    seen = offset + len(rows)
+    more = (total is not None and seen < total) or (total is None and len(rows) >= limit)
+    return rows, total, (seen if more and rows else None)
+
+
+def query_all(
+    method: str, filters: list[QueryFilter] | None = None, *, cap: int = 5000
+) -> tuple[list[Any], bool]:
+    """(every row up to `cap`, truncated) for an internal sweep.
+
+    The old sweeps -- a default bid's keyword count, the negative keyword
+    duplicate check -- read one page of 1000 and stopped, so the 1001st keyword
+    simply did not exist as far as the preview was concerned.
+    """
+    rows: list[Any] = []
+    offset: int | None = 0
+    while offset is not None and len(rows) < cap:
+        page, _total, offset = query_page(
+            method, filters, limit=min(MAX_PAGE_SIZE, cap - len(rows)), offset=offset
+        )
+        rows.extend(page)
+    return rows, offset is not None
+
+
 def eq_filter(field: str, value: Any) -> QueryFilter:
     # The Platform API's query filters take a list even for a single value.
     return QueryFilter(field=field, operator="EQUALS", value=[value])
