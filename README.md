@@ -59,7 +59,9 @@ cd apple-ads-api
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 
-# 2. Fill in your Apple credentials
+# 2. Fill in your Apple credentials (and, optionally, the two naming keys:
+#    APPLE_ADS_OWNER_INITIALS / APPLE_ADS_AGENT_NAME -- see "Naming what the
+#    agent creates" below)
 cp .env.example .env
 $EDITOR .env
 
@@ -187,6 +189,12 @@ its own change history, and a reconciliation of the two.
 
 Every list and report says how many rows exist and whether it showed them all.
 
+`list_campaigns`, `list_ad_groups`, `list_ads` and `list_creatives` say who each
+name says made it (`origin`, `owner`, `agent`, `base`, and `ledger_created` when
+this checkout created it) and filter on it: `origin` (`any` / `agent` / `cli` /
+`manual`), `agent_name`, `owner`, and `mine`. See
+[Naming what the agent creates](#naming-what-the-agent-creates).
+
 ### Can change (needs your yes)
 
 Every change is a `preview_<name>` / `apply_<name>` pair.
@@ -202,9 +210,9 @@ Every change is a `preview_<name>` / `apply_<name>` pair.
 | Add negative keywords; pause or enable them | `negative_keywords_add`, `negative_keyword_pause`, `negative_keyword_status` |
 | Bid strategy and goal; CPA goal; campaign start and end | `ad_group_bid_strategy`, `campaign_bid_strategy`, `ad_group_cpa_goal`, `campaign_schedule` |
 | Targeting: Search Match, age and gender, devices, hours, locations, customer type, countries | `ad_group_search_match`, `ad_group_demographics`, `ad_group_devices`, `ad_group_daypart`, `ad_group_locations`, `ad_group_app_downloaders`, `campaign_countries` |
-| Create a campaign, ad group, creative or ad (**created paused**) | `create_campaign`, `create_ad_group`, `create_creative`, `create_ad` |
+| Create a campaign, ad group, creative or ad (**created paused**, **named with your prefix**) | `create_campaign`, `create_ad_group`, `create_creative`, `create_ad` |
 | Act on Apple's budget or CPA recommendation (normal limits apply) | `budget_recommendation`, `target_cpa_recommendation` |
-| Rename something, or dismiss a recommendation | `low_risk_change` |
+| Rename something the agent created (the prefix is kept), or dismiss a recommendation | `low_risk_change` |
 | Undo one change, or a whole batch | `revert_change` |
 | Settle a timed-out change: did it land? (reads Apple, writes only the ledger, undoes nothing) | `resolve_unknown_change` |
 
@@ -229,6 +237,80 @@ must stay unreachable, so neither can grow by accident.
 If you genuinely need one of those, there is a command-line escape hatch further
 down -- for a human to run. The agent is told to hand you the command, and it
 cannot run it itself.
+
+---
+
+## Naming what the agent creates
+
+A month after the agent created a campaign, nobody can tell it from one made by
+hand. So everything the agent creates is named after who made it:
+
+```
+<OWNER>-<agent>-<base name>
+AB-max-spring_promo_week_12          <- placeholder values
+```
+
+Put two keys in this checkout's `.env`:
+
+| Key | Format | Example |
+|---|---|---|
+| `APPLE_ADS_OWNER_INITIALS` | 2-4 uppercase letters | `AB` |
+| `APPLE_ADS_AGENT_NAME` | lowercase, 2-24 of `a-z 0-9 _`, starting with a letter, no `-`; `cli` and `manual` are reserved | `max` |
+
+Either can be left empty -- that part is simply skipped, never an error:
+
+| `.env` has | The agent asks for `spring_promo`; Apple gets |
+|---|---|
+| both | `AB-max-spring_promo` |
+| only the initials | `AB-spring_promo` |
+| only the agent name | `max-spring_promo` |
+| neither | `spring_promo`, exactly as given |
+
+- **A value that is set but malformed** (initials `a1`, an agent name with a
+  `-`) blocks every creation at the preview, and the message names the `.env`
+  key to fix.
+- **`.env` is the only source.** No tool takes an owner or agent argument, and
+  the process environment (a client's `env` block) is ignored -- the server warns
+  at startup if one disagrees with `.env`. **One identity per checkout**: a
+  second agent needs its own checkout with its own `.env`.
+- **The prefix goes first**, before any house naming style you use: the
+  house-style name is the base. The agent passes the base; the prefix is added
+  for it, never twice, and another agent's prefix (`CD-bot-...`) is refused.
+- **The preview shows the exact name** that will be sent (`entity_name`, `path`
+  and a `naming` block with the requested name, the final one, the prefix and
+  the length), and warns when it differs from what was asked.
+- **Too long is refused, never cut short.** Apple has no validate-only mode, so
+  a name it rejects would only be found out after you approved it. The cap is
+  **200 characters for the whole name, prefix included**, for campaigns, ad
+  groups, ads and creatives -- a conservative figure until Apple's current limit
+  is confirmed.
+- **A campaign name already used** in the account, or an ad group name already
+  used in its campaign, fails the preview (`name_is_free`). A duplicate ad or
+  creative name is a warning.
+
+**What gets a prefix:** campaigns, ad groups, ads and creatives. Keywords and
+negative keywords have no name field (only their text), so nothing is added to
+them.
+
+**Renames:** the agent may rename only **its own** entities -- the name carries
+this checkout's prefix, or the change log shows this server created it. A
+hand-made entity, or another agent's, is refused, with no override. The prefix
+is kept (the agent changes only the base), and an entity created here whose
+prefix was removed in the website gets it back. Undoing a rename restores the
+old name exactly.
+
+**The escape hatch** names its creations and renames `<OWNER>-cli-<base>` when
+the initials are set (`AB-cli-launch`), and leaves the name as given when they
+are not: `cli` only separates a person from an agent under the same initials.
+
+**Finding them:** the list tools filter by `origin` (`agent`, `cli` or `manual`,
+read from the name), `agent_name`, `owner`, or `mine=True` (this checkout's
+prefix). Each row also says `ledger_created` -- the name is a convention, the
+change log is the proof. When a prefix is configured, `reconcile_ledger` adds a
+`naming` section: `prefix_lost` (created here, the name no longer carries the
+prefix -- renamed in the website), `prefix_without_ledger` (carries the prefix
+but this change log has no record of creating it), and other prefixes counted.
+Nothing there is changed automatically. Existing entities are left as they are.
 
 ---
 
@@ -527,6 +609,10 @@ recorded in the change log, so it counts against the daily limits.
 **Nothing is sent without `--apply`.** The dry run is the thing you read before
 you mean it.
 
+A create (`POST campaigns`, `.../adgroups`, `ads`, `creatives`) or an update by
+id with a `"name"` in its body gets `<OWNER>-cli-<base>` when
+`APPLE_ADS_OWNER_INITIALS` is set, and the dry run prints the final name.
+
 ---
 
 ## Credentials
@@ -558,6 +644,8 @@ for months can never go stale.
 | `APPLE_ADS_AD_ACCOUNT_ID` | yes | **Discovered**, by `test_platform_connection.py` |
 | `APPLE_ADS_DEFAULT_CAMPAIGN_ID` | no | Saves typing a real id in commands |
 | `APPLE_ADS_ALLOWED_CAMPAIGN_IDS` | no | Pins changes to these campaigns |
+| `APPLE_ADS_OWNER_INITIALS` | no | Your initials, for naming what the agent creates (`AB`) |
+| `APPLE_ADS_AGENT_NAME` | no | The agent's name, for the same (`max`) |
 
 > `APPLE_ADS_AD_ACCOUNT_ID` is **not** your org id. Apple returns them as two
 > different fields. Do not read it off the website and do not guess —
@@ -670,6 +758,7 @@ Two things that follow:
 | `.claude/skills/apple-ads/SKILL.md` | How an agent should use it |
 | `guardrails.toml` | The limits. **Committed**, so a change is visible |
 | `apple_ads_cli.py` | The escape hatch. For humans |
+| `apple_ads_mcp/naming.py` | The `<OWNER>-<agent>-<base>` naming identity, its parser and its rules |
 | `test_platform_connection.py` | 7-step health check |
 | `apple_ads_mcp/changes/` | One class per kind of change, and the engine they all run through |
 | `tests/test_tool_surface.py` | Pins the tool list, the permission hints and the unreachable API methods |

@@ -56,6 +56,16 @@ python3 -m venv venv && ./venv/bin/pip install -r requirements.txt -r requiremen
 - **The break-glass CLI is for humans.** `apple_ads_cli.py --apply` needs a TTY
   and a typed confirmation, honours the kill switch and writes a ledger row.
   Never tell an agent to run it.
+- **Names the agent creates are `<OWNER>-<agent>-<base>`** (`apple_ads_mcp/
+  naming.py`). The identity is `APPLE_ADS_OWNER_INITIALS` / `APPLE_ADS_AGENT_NAME`
+  in this checkout's `.env` only -- never a tool argument, never the process env
+  -- so one checkout is one identity. An empty part is skipped; a malformed one
+  blocks creation naming its key. A creating kind stamps through
+  `ctx.name_for_create`, reports `Proposal.created_names` and declares
+  `creates_named`; the engine fails `name_prefix` otherwise. Renames go through
+  `ctx.name_for_rename` and reach only the agent's own entities. Over 200
+  characters is refused, never truncated. Tests and docs use the placeholders
+  `AB` / `max` (and `CD` / `bot`); real values never appear in the repo.
 - **This repository is public.** No company, brand, app, campaign, ad group or
   keyword names from a real account, no real ids (org, ad account, campaign,
   adamId), no emails, no credentials. Fixtures use placeholders (`Example App`,

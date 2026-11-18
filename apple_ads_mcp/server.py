@@ -124,6 +124,17 @@ human wants it done anyway, hand THEM the break-glass command to run in their
 own terminal -- never run `apple_ads_cli.py ... --apply` yourself: it needs an
 interactive terminal and a typed confirmation, and it is denied to agents.
 
+NAMING. Give create_campaign, create_ad_group, create_creative and create_ad
+the BASE name only: the server adds this checkout's prefix from .env
+(<OWNER>-<agent>-, e.g. AB-max-spring_promo; one part if only one is set, none
+if neither is) and the preview shows the exact final name. Another agent's
+prefix is refused, ours is never doubled, and a name over 200 characters is
+refused, not truncated. Renames through low_risk_change keep the prefix and
+reach only your own entities (your prefix, or the ledger shows you created
+it); hand-made and other agents' entities are refused. The list_* tools take
+origin / agent_name / owner / mine to find what you made; get_guardrails shows
+the identity.
+
 READ-ONLY INSTALLS. If get_guardrails reports read_only_server: true, this
 process was started with APPLE_ADS_READ_ONLY set and published no apply_* tool
 and no revert_change at all -- they are absent from the tool list, not refused

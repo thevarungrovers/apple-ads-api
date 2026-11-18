@@ -159,13 +159,15 @@ PAUSED) → for wasted spend, `preview_negative_keywords_add` → show both → 
 → later, enable the new keywords with `preview_keyword_status`.
 
 **A custom product page test.** `list_product_pages(adam_id)` →
-`preview_create_creative(product_page_id=...)` → `preview_create_ad(ad_group_id,
-creative_id)` (PAUSED) → when ready, `preview_ad_status(status="ENABLED")` →
+`preview_create_creative(name="<base>", product_page_id=...)` →
+`preview_create_ad(ad_group_id, creative_id, name="<base>")` (PAUSED; both names
+get your prefix) → when ready, `preview_ad_status(status="ENABLED")` →
 compare with `ad_report(ad_group_id=...)`.
 
 **A new campaign.** `search_apps` → `app_eligibility` → `preview_create_campaign`
-(state the `regulation_responses` explicitly; the human is answering for them) →
-`preview_create_ad_group` → `preview_add_keywords` → negatives → review it all →
+with the base name only (state the `regulation_responses` explicitly; the human
+is answering for them; read the final name off the `naming` block) →
+`preview_create_ad_group` (base name again) → `preview_add_keywords` → negatives → review it all →
 `preview_campaign_status(status="ENABLED")`, which projects the whole budget.
 
 **Acting on a recommendation.** `budget_recommendations` or
@@ -173,6 +175,28 @@ compare with `ad_report(ad_group_id=...)`.
 `preview_target_cpa_recommendation(ad_group_id)` → the normal bounds decide →
 apply. To set one aside, `preview_low_risk_change(entity_type=
 "daily_budget_recommendation", entity_id=..., field="dismiss")` (no undo).
+
+## Naming
+
+Pass the BASE name to `create_campaign`, `create_ad_group`, `create_creative`
+and `create_ad`. The server adds `<OWNER>-<agent>-` from this checkout's `.env`
+(`AB-max-spring_promo`; one part if only one is set; nothing if neither is) and
+the preview's `naming` block shows the exact final name -- show that to the
+human. Never type a prefix yourself: ours is not doubled, another agent's is
+refused, and over 200 characters (prefix included) is refused, not truncated.
+A house-style name, if the team has one, is the base: the prefix goes first.
+A duplicate campaign name, or ad group name in its campaign, fails
+`name_is_free`.
+
+Renames (`low_risk_change`, field `name`) reach only YOUR entities -- the name
+carries your prefix or the ledger shows this server created it. Hand-made and
+other agents' entities are refused; tell the human to rename those in the Apple
+Ads UI. The prefix is kept: pass the new base.
+
+Find your work with `list_campaigns` / `list_ad_groups` / `list_ads` /
+`list_creatives` and `mine=True`, or filter by `origin` (`agent`, `cli`,
+`manual`), `agent_name`, `owner`. `get_guardrails` and `whoami` show the
+identity; `reconcile_ledger` lists `prefix_lost` / `prefix_without_ledger`.
 
 ## Undo
 
