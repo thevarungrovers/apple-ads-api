@@ -747,7 +747,47 @@ class Engine:
             observed_after=current,
             detail=f"outcome was unknown; read back {when}: {verdict}",
         )
+        self.rebalance_batch(entry)
         return outcome, current
+
+    def rebalance_batch(self, entry: dict[str, Any]) -> None:
+        """Re-attribute a batch's projected spend after one of its rows settled.
+
+        A kind whose bound belongs to a GROUP of items (a campaign's, counted
+        once) puts it on one row. Settled row by row, that row can turn out
+        FAILED while another in the same campaign landed or may have -- and the
+        daily cap, which sums rows that count, would lose the bound. So the
+        kind's own landed_projections is re-run over the whole batch as it now
+        stands, and every row that still counts gets what it says.
+        """
+        batch_id = entry.get("batch_id")
+        kind = self.kinds.get(str(entry.get("tool") or "").removeprefix("apply_"))
+        if not batch_id or kind is None:
+            return
+        if type(kind).landed_projections is ChangeKind.landed_projections:
+            return  # each row's own delta: nothing is shared, nothing can move
+        rows = ledger.batch_entries(str(batch_id))
+        items = [
+            {
+                **(row.get("detail") or {}),
+                "campaign_id": row.get("campaign_id"),
+                "projected": row.get("projected_daily_spend_delta") or "0",
+            }
+            for row in rows
+        ]
+        outcomes = [
+            Outcome(
+                landed=row.get("outcome") in (ledger.APPLIED, ledger.PARTIAL),
+                observed=None,
+                unknown=row.get("outcome") == ledger.UNKNOWN,
+            )
+            for row in rows
+        ]
+        for row, outcome, value in zip(rows, outcomes, kind.landed_projections(items, outcomes)):
+            if not outcome.counted:
+                continue
+            if Decimal(str(row.get("projected_daily_spend_delta") or "0")) != value:
+                ledger.write_projected(str(row["entry_id"]), str(value))
 
     def settle(self, entry_id: str) -> SettleResult:
         """resolve_unknown_change: settle UNKNOWN rows by read-back, revert nothing.

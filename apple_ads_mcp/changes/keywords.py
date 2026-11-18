@@ -1057,7 +1057,8 @@ class NegativeKeywordStatusBulk(ChangeKind):
         return enum_value(client.get_negative_keyword(item["entity_id"]).status) or "unknown"
 
     def landed_projections(self, items, outcomes):
-        """Each campaign's bound, once, on the first of its items that LANDED.
+        """Each campaign's bound, once, on the first of its items that LANDED
+        (or may have: an UNKNOWN item counts as if it had).
 
         The preview puts the bound on the first item per campaign; if that one
         fails and another in the same campaign lands, the traffic is still back,
@@ -1070,7 +1071,7 @@ class NegativeKeywordStatusBulk(ChangeKind):
         for item, outcome in zip(items, outcomes):
             value = Decimal("0")
             campaign = item.get("campaign_id")
-            if outcome.landed and campaign not in counted:
+            if outcome.counted and campaign not in counted:
                 counted.add(campaign)
                 value = max(Decimal(str(item.get("campaign_bound") or "0")), Decimal("0"))
             recorded.append(value)

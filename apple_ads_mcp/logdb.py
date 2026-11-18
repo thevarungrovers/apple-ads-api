@@ -595,6 +595,18 @@ def complete_change(
     )
 
 
+def set_projected_delta(entry_id: str, projected_daily_spend_delta: str) -> None:
+    """Re-attribute one finished row's projected spend, leaving its outcome alone.
+
+    For a batch settled row by row after a timeout: a per-campaign bound has to
+    sit on a row that still counts, or the daily cap stops seeing it.
+    """
+    connect().execute(
+        "UPDATE changes SET projected_daily_spend_delta=? WHERE entry_id=?",
+        (projected_daily_spend_delta, entry_id),
+    )
+
+
 def _row_to_entry(row: sqlite3.Row) -> dict[str, Any]:
     """One `changes` row in the shape the JSONL ledger used to hand back.
 

@@ -66,6 +66,7 @@ entries = logdb.entries
 find_entry = logdb.find_entry
 batch_entries = logdb.batch_entries
 reverted_entry_ids = logdb.reverted_entry_ids
+write_projected = logdb.set_projected_delta
 
 
 def write_intent(

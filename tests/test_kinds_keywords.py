@@ -143,6 +143,51 @@ def test_negative_status_in_bulk_projects_each_campaign_once() -> None:
     assert undo.projected_daily_spend_delta == "0"
 
 
+def _two_negatives(apple) -> None:
+    apple.negatives[NEGATIVE + 1] = apple.negatives[NEGATIVE].model_copy(
+        update={"id": NEGATIVE + 1, "text": "gratis"}
+    )
+
+
+def test_resolving_an_unknown_bulk_negative_pause_keeps_the_campaign_bound() -> None:
+    """The batch timed out; only the SECOND item landed. Settling the first as
+    failed must move the campaign's bound onto the second, not lose it."""
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    from apple_ads_mcp.guardrails import DailyUsage
+
+    tools, apple, state = rig(max_projected_delta_per_day_total=Decimal("500"),
+                              max_projected_session_delta=Decimal("500"))
+    _two_negatives(apple)
+    preview = tools["preview_negative_keyword_status"](
+        negative_keyword_ids=[NEGATIVE, NEGATIVE + 1], status="PAUSED"
+    )
+
+    def second_lands_then_times_out(**_):
+        apple.negatives[NEGATIVE + 1] = apple.negatives[NEGATIVE + 1].model_copy(
+            update={"status": sdk.NegativeKeywordStatus("PAUSED")})
+        raise ToolError("TRANSIENT: negative_keywords_bulk_update_post: read timed out")
+
+    apple._negative_keywords_bulk_update_post = second_lands_then_times_out
+    try:
+        tools["apply_negative_keyword_status"](preview_token=preview.preview_token)
+    except ToolError:
+        pass
+    [batch_id] = {r["batch_id"] for r in ledger.entries()}
+    first, second = ledger.batch_entries(batch_id)
+    assert (first["outcome"], second["outcome"]) == (ledger.UNKNOWN, ledger.UNKNOWN)
+    assert DailyUsage(state.limits).usage()[1] == Decimal("90.00")
+
+    settled = tools["resolve_unknown_change"](entry_id=first["entry_id"])
+    assert settled.settled == {first["entry_id"]: ledger.FAILED}, settled
+    # The traffic may be back through the second item: the bound must survive.
+    assert DailyUsage(state.limits).usage()[1] == Decimal("90.00")
+    tools["resolve_unknown_change"](entry_id=second["entry_id"])
+    assert ledger.find_entry(second["entry_id"])["outcome"] == ledger.APPLIED
+    assert Decimal(ledger.find_entry(second["entry_id"])["projected_daily_spend_delta"]) == Decimal("90.00")
+    assert DailyUsage(state.limits).usage()[1] == Decimal("90.00")
+
+
 def test_a_partial_negative_pause_still_counts_its_campaign_bound() -> None:
     from apple_ads_mcp import ledger
     from apple_ads_mcp.guardrails import DailyUsage
