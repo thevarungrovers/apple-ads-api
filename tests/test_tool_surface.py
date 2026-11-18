@@ -77,6 +77,7 @@ READ_TOOLS = frozenset(
         "app_eligibility",
         "supported_languages",
         "get_change_details",
+        "ad_report",
     }
 )
 

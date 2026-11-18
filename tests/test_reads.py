@@ -257,5 +257,39 @@ def test_a_read_only_role_blocks_every_preview() -> None:
     assert any(c.startswith("FAIL role_can_write") for c in preview.guardrail_checks)
 
 
+def test_reports_split_by_dimension_and_by_day() -> None:
+    _tools, apple, state = rig()
+    row = apple.report_row(CAMPAIGN, spend="14.00", taps=14, countryOrRegion="US")
+    row["granularity"] = [
+        {"date": "2026-11-01", "localSpend": {"amount": "6.00", "currency": "USD"}, "taps": 6,
+         "impressions": 60},
+        {"date": "2026-11-02", "localSpend": {"amount": "8.00", "currency": "USD"}, "taps": 8,
+         "impressions": 80},
+    ]
+    apple.reports["apps_campaign_reports"] = [row]
+    tools = read_tools(state)
+    report = tools["campaign_report"](group_by=["countryOrRegion"], segment_by_date=True)
+    assert [r.extra["date"] for r in report.rows] == ["2026-11-01", "2026-11-02"], report.rows
+    assert all(r.extra["countryOrRegion"] == "US" for r in report.rows)
+    request = [k["apps_reporting_request"] for m, k in apple.calls if m.endswith("_without_preload_content")][-1]
+    assert request.group_by == ["countryOrRegion"]
+    try:
+        tools["campaign_report"](group_by=["browser"])
+    except Exception as exc:
+        assert "INVALID_REQUEST" in str(exc)
+    else:
+        raise AssertionError("an unknown dimension was sent to Apple")
+
+
+def test_ad_report_narrows_to_one_ad() -> None:
+    _tools, apple, state = rig()
+    apple.reports["apps_ad_reports"] = [
+        apple.report_row(5555, spend="14.00", taps=14, adGroupId=AD_GROUP),
+        apple.report_row(5556, spend="9.00", taps=9, adGroupId=AD_GROUP),
+    ]
+    report = read_tools(state)["ad_report"](campaign_id=CAMPAIGN, ad_id=5556)
+    assert [r.id for r in report.rows] == ["5556"], report.rows
+
+
 if __name__ == "__main__":
     raise SystemExit(run(dict(globals())))

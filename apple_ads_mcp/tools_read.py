@@ -910,6 +910,17 @@ SortBy = Annotated[
     str,
     Field(description="Sort descending by: localSpend, impressions, taps or totalInstalls"),
 ]
+GROUP_BY_FIELDS = ("countryOrRegion", "deviceClass", "ageRange", "gender")
+GroupBy = Annotated[
+    list[str] | None,
+    Field(
+        description="Split each row by countryOrRegion, deviceClass, ageRange and/or "
+        "gender -- how age, gender, device and country targeting decisions get made"
+    ),
+]
+SegmentByDate = Annotated[
+    bool, Field(description="One row per entity per day instead of window totals")
+]
 MinImpressions = Annotated[
     int, Field(description="Drop rows with fewer impressions than this", ge=0)
 ]
@@ -1206,19 +1217,42 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         min_impressions: int,
         row: Any,
         grand_total: bool = True,
+        group_by: list[str] | None = None,
+        segment_by_date: bool = False,
         note: str = "Totals are for the whole window, not per day.",
     ) -> Report:
+        dims = list(group_by or [])
+        unknown = [d for d in dims if d not in GROUP_BY_FIELDS]
+        if unknown:
+            raise ToolError(
+                f"INVALID_REQUEST: group_by {unknown} -- allowed: {', '.join(GROUP_BY_FIELDS)}"
+            )
         page, rows, next_offset, truncated = report_rows(
             method, entity, days, filters, narrow=narrow, limit=limit, offset=offset,
             sort_by=sort_by, min_impressions=min_impressions, grand_total=grand_total,
+            group_by=dims or None,
         )
-        total = page.grand_total if (grand_total and narrow is None) else None
+        total = page.grand_total if (grand_total and narrow is None and not dims) else None
+        shown: list[ReportRow] = []
+        for raw in rows:
+            base = row(raw)
+            for dim in dims:
+                value = meta(raw).get(dim)
+                if value is not None:
+                    base.extra[dim] = str(value)
+            if not segment_by_date:
+                shown.append(base)
+                continue
+            for day in raw.get("granularity") or []:
+                daily = _metrics_row(day, id_=base.id, name=base.name, extra=dict(base.extra))
+                daily.extra["date"] = str(day.get("date"))
+                shown.append(daily)
         return Report(
             entity=entity.replace(" ", "_"),
             start=page.start.isoformat(),
             end=page.end.isoformat(),
-            granularity="DAILY",
-            rows=[row(r) for r in rows],
+            granularity="DAILY" if segment_by_date else "TOTAL",
+            rows=shown,
             grand_total=_metrics_row(total, name="GRAND TOTAL") if total else None,
             returned=len(rows),
             offset=offset,
@@ -1240,6 +1274,8 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         offset: Offset = 0,
         sort_by: SortBy = "localSpend",
         min_impressions: MinImpressions = 0,
+        group_by: GroupBy = None,
+        segment_by_date: SegmentByDate = False,
     ) -> Report:
         """Spend, impressions, taps and installs per campaign.
 
@@ -1253,6 +1289,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         return build_report(
             "campaign", "apps_campaign_reports", days, None, narrow=narrow, limit=limit,
             offset=offset, sort_by=sort_by, min_impressions=min_impressions,
+            group_by=group_by, segment_by_date=segment_by_date,
             row=lambda r: _metrics_row(r.get("totalMetrics"), id_=meta(r).get("id"),
                                        name=meta(r).get("name")),
         )
@@ -1266,6 +1303,8 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         offset: Offset = 0,
         sort_by: SortBy = "localSpend",
         min_impressions: MinImpressions = 0,
+        group_by: GroupBy = None,
+        segment_by_date: SegmentByDate = False,
     ) -> Report:
         """Spend, impressions, taps and installs per ad group."""
         filters = [report_filter("campaignId", [campaign_id])] if campaign_id else None
@@ -1273,6 +1312,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         return build_report(
             "ad group", "apps_ad_group_reports", days, filters, narrow=narrow, limit=limit,
             offset=offset, sort_by=sort_by, min_impressions=min_impressions,
+            group_by=group_by, segment_by_date=segment_by_date,
             row=lambda r: _metrics_row(
                 r.get("totalMetrics"), id_=meta(r).get("id"), name=meta(r).get("name"),
                 extra={"campaign_id": meta(r).get("campaignId")},
@@ -1293,6 +1333,8 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         offset: Offset = 0,
         sort_by: SortBy = "localSpend",
         min_impressions: MinImpressions = 0,
+        group_by: GroupBy = None,
+        segment_by_date: SegmentByDate = False,
     ) -> Report:
         """Spend and conversions per keyword -- the input to any bid decision.
 
@@ -1310,6 +1352,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         return build_report(
             "keyword", "apps_keyword_reports", days, filters, narrow=narrow, limit=limit,
             offset=offset, sort_by=sort_by, min_impressions=min_impressions,
+            group_by=group_by, segment_by_date=segment_by_date,
             row=lambda r: _metrics_row(
                 r.get("totalMetrics"),
                 id_=meta(r).get("id"),
@@ -1334,6 +1377,8 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         offset: Offset = 0,
         sort_by: SortBy = "localSpend",
         min_impressions: MinImpressions = 0,
+        group_by: GroupBy = None,
+        segment_by_date: SegmentByDate = False,
     ) -> Report:
         """What people actually typed -- where negative keywords come from.
 
@@ -1351,6 +1396,7 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
         return build_report(
             "search term", "apps_search_term_reports", days, filters, narrow=narrow,
             limit=limit, offset=offset, sort_by=sort_by, min_impressions=min_impressions,
+            group_by=group_by, segment_by_date=segment_by_date,
             grand_total=False,
             row=lambda r: _metrics_row(
                 r.get("totalMetrics"),
@@ -1366,6 +1412,48 @@ def register(mcp, state) -> None:  # noqa: C901 -- a flat list of tool definitio
                 "A row with no keyword id was served by Search Match, not by a "
                 "keyword you set. No grand total: Apple refuses GRAND_TOTAL and "
                 "granular rows on the same SEARCHTERM request."
+            ),
+        )
+
+    @mcp.tool(title="Ad performance report", annotations=READ_ONLY)
+    def ad_report(
+        days: Days = 7,
+        campaign_id: Annotated[int | None, Field(description="Limit to one campaign")] = None,
+        ad_group_id: Annotated[
+            int | None, Field(description="Narrow to one ad group (filtered after fetching)")
+        ] = None,
+        ad_id: Annotated[int | None, Field(description="Narrow to one ad (filtered after fetching)")] = None,
+        limit: Limit = 200,
+        offset: Offset = 0,
+        sort_by: SortBy = "localSpend",
+        min_impressions: MinImpressions = 0,
+        group_by: GroupBy = None,
+        segment_by_date: SegmentByDate = False,
+    ) -> Report:
+        """Spend, taps and installs per ad -- how a custom product page creative
+        performs against the default page in the same ad group."""
+        filters = [report_filter("campaignId", [campaign_id])] if campaign_id else None
+        narrow = None
+        if ad_group_id or ad_id:
+            def narrow(r: dict) -> bool:
+                m = meta(r)
+                return (not ad_group_id or str(m.get("adGroupId")) == str(ad_group_id)) and (
+                    not ad_id or str(m.get("adId") or m.get("id")) == str(ad_id)
+                )
+        return build_report(
+            "ad", "apps_ad_reports", days, filters, narrow=narrow, limit=limit,
+            offset=offset, sort_by=sort_by, min_impressions=min_impressions,
+            group_by=group_by, segment_by_date=segment_by_date,
+            row=lambda r: _metrics_row(
+                r.get("totalMetrics"),
+                id_=meta(r).get("adId") or meta(r).get("id"),
+                name=meta(r).get("adName") or meta(r).get("name"),
+                extra={
+                    "ad_group_id": meta(r).get("adGroupId"),
+                    "creative_id": meta(r).get("creativeId"),
+                    "creative_type": meta(r).get("creativeType"),
+                    "status": meta(r).get("status"),
+                },
             ),
         )
 

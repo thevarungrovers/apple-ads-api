@@ -104,6 +104,7 @@ SAFE_TOOLS = (
     "app_eligibility",
     "supported_languages",
     "get_change_details",
+    "ad_report",
 )
 
 #: The tools that move real money. Never allowlisted, by any answer to anything.
