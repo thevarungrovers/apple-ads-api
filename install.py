@@ -112,6 +112,13 @@ SAFE_TOOLS = (
     "preview_ad_group_cpa_goal",
     "preview_campaign_bid_strategy",
     "preview_campaign_schedule",
+    "preview_ad_group_search_match",
+    "preview_ad_group_demographics",
+    "preview_ad_group_devices",
+    "preview_ad_group_daypart",
+    "preview_ad_group_locations",
+    "preview_ad_group_app_downloaders",
+    "preview_campaign_countries",
 )
 
 #: The tools that move real money. Never allowlisted, by any answer to anything.
@@ -133,6 +140,13 @@ WRITE_TOOLS = (
     "apply_ad_group_cpa_goal",
     "apply_campaign_bid_strategy",
     "apply_campaign_schedule",
+    "apply_ad_group_search_match",
+    "apply_ad_group_demographics",
+    "apply_ad_group_devices",
+    "apply_ad_group_daypart",
+    "apply_ad_group_locations",
+    "apply_ad_group_app_downloaders",
+    "apply_campaign_countries",
 )
 
 READ_ONLY_ENV = "APPLE_ADS_READ_ONLY"

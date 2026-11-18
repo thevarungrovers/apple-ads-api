@@ -16,6 +16,15 @@ def all_kinds() -> list:
         CampaignSchedule,
     )
     from apple_ads_mcp.changes.campaigns import CampaignDailyBudget, CampaignStatusKind
+    from apple_ads_mcp.changes.targeting import (
+        AdGroupAppDownloaders,
+        AdGroupDaypart,
+        AdGroupDemographics,
+        AdGroupDevices,
+        AdGroupLocations,
+        AdGroupSearchMatch,
+        CampaignCountries,
+    )
     from apple_ads_mcp.changes.keywords import (
         AddKeywords,
         KeywordBid,
@@ -46,4 +55,12 @@ def all_kinds() -> list:
         AdGroupCpaGoal(),
         CampaignBidStrategy(),
         CampaignSchedule(),
+        # 3c: targeting
+        AdGroupSearchMatch(),
+        AdGroupDemographics(),
+        AdGroupDevices(),
+        AdGroupDaypart(),
+        AdGroupLocations(),
+        AdGroupAppDownloaders(),
+        CampaignCountries(),
     ]

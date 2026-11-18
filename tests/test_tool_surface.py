@@ -99,6 +99,13 @@ PREVIEW_TOOLS = frozenset(
         "preview_ad_group_cpa_goal",
         "preview_campaign_bid_strategy",
         "preview_campaign_schedule",
+        "preview_ad_group_search_match",
+        "preview_ad_group_demographics",
+        "preview_ad_group_devices",
+        "preview_ad_group_daypart",
+        "preview_ad_group_locations",
+        "preview_ad_group_app_downloaders",
+        "preview_campaign_countries",
     }
 )
 
@@ -121,6 +128,13 @@ APPLY_TOOLS = frozenset(
         "apply_ad_group_cpa_goal",
         "apply_campaign_bid_strategy",
         "apply_campaign_schedule",
+        "apply_campaign_countries",
+        "apply_ad_group_search_match",
+        "apply_ad_group_demographics",
+        "apply_ad_group_devices",
+        "apply_ad_group_daypart",
+        "apply_ad_group_locations",
+        "apply_ad_group_app_downloaders",
     }
 )
 
@@ -135,6 +149,7 @@ DESTRUCTIVE_TOOLS = frozenset(
         "apply_campaign_daily_budget",
         "apply_campaign_bid_strategy",
         "apply_campaign_schedule",
+        "apply_campaign_countries",
     }
 )
 
@@ -167,6 +182,11 @@ FORBIDDEN_METHODS = (
     "delete_asset",
     "ad_accounts_id_put",
     "ad_accounts_post",
+    # Location groups belong to a BUSINESS_BRAND (LocationGroupCreate requires a
+    # brandId): Maps local ads, out of scope for writes in this round.
+    "create_location_group",
+    "update_location_group",
+    "delete_location_group",
 )
 
 
